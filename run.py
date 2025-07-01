@@ -7,48 +7,53 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import taichi as ti
-from fastflow.flow_api import FastFlowProcessor
+import dg2
+from fastflow.unified_fields import UnifiedFlowFields
+from fastflow.flow_accumulation import compute_drainage_accumulation
+from fastflow.lakeflow import lakeflow
+from fastflow.compute_receivers import compute_receivers
+from fastflow.fillinig_topo import fill_dem
 
 ti.init(arch=ti.gpu, debug = False)  # Using default ti.i32 to suppress warnings
 
 
 
-# Main terrain
-# Create test terrain with depression
-res = 512
-np.random.seed(42)
-x = np.linspace(-2, 2, res)
-y = np.linspace(-2, 2, res)
-X, Y = np.meshgrid(x, y)
 
-z = np.zeros_like(X, dtype=np.float32)
-z += 2.0 * np.exp(-(X**2 + Y**2) * 0.4)  # Central hill
-z -= 0.8 * np.exp(-((X-0.5)**2 + (Y+0.8)**2) * 4.0)  # Depression
-z += 0.3 * (X * 0.3 + Y * 0.4)  # Regional slope
-z += 0.1 * np.random.randn(res, res)  # Noise
+# --- Main execution ---
+nx, ny = 2048, 2048
+N = nx * ny
+
+print("Generating terrain...")
+noise = dg2.PerlinNoiseF32(frequency=0.01, amplitude=1.0, octaves=6)
+z = noise.create_noise_grid(nx, ny, 0, 0, 100, 100).as_numpy()
+z = (z - z.min()) / (z.max() - z.min()) * 1000
 
 # Boundary conditions
 z[0, :] = z[-1, :] = z[:, 0] = z[:, -1] = 0.15
 z = np.maximum(z, 0.01)
 
-plt.imshow(z, cmap = 'terrain')
+
+
+unified_fields = UnifiedFlowFields(N)
+unified_fields.load_terrain(z)
+unified_fields.set_boundary_edges()
+
+fill_dem(unified_fields.z, nx, ny, N_iterations=None)
+plt.imshow(unified_fields.z.to_numpy().reshape(ny,nx), cmap = 'terrain')
 plt.show()
 
-processor = FastFlowProcessor(res)
-processor.setup_terrain(z)
 
-# Basic receivers and drainage
-rcv_taichi = processor.compute_receivers_deterministic()
-rcv_original = rcv_taichi.copy()  # Capture BEFORE accumulate_flow_upward
-drain_taichi_basic = processor.accumulate_flow_upward()
+drain = np.zeros_like(z)
+compute_drainage_accumulation(unified_fields, drain, method='deterministic')
 
-plt.imshow(drain_taichi_basic, cmap = 'Blues')
+
+plt.imshow(np.log10(drain), cmap = 'Blues')
 plt.show()
 
-# Depression routing and drainage  
-print("  Running depression routing...")
-rcv_carved_taichi = processor.route_depressions(method='carve')
-drain_taichi_carved = processor.accumulate_flow_upward()
+# # Depression routing and drainage  
+# print("  Running depression routing...")
+# rcv_carved_taichi = processor.route_depressions(method='carve')
+# drain_taichi_carved = processor.accumulate_flow_upward()
 
-plt.imshow(drain_taichi_carved, cmap = 'Blues')
-plt.show()
+# plt.imshow(drain_taichi_carved, cmap = 'Blues')
+# plt.show()
