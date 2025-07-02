@@ -460,7 +460,7 @@ def set_keep_b(S_plus_1: int, b: ti.template(), b_rcv: ti.template(), keep_b: ti
     
     Parameters:
     -----------
-    N : int
+    S_plus_1 : int
         Number of basin entries to process (typically S+1)
     b : ti.template()
         Basin ID array (current basin for each local minimum)
@@ -523,7 +523,7 @@ def init_reverse(S: int, keep: ti.template(), p: ti.template(), reverse_path: ti
     CUDA: init_reverse<<<(S + threads - 1)/threads, threads>>>(keep_offset_ptr + S, keep_ptr, p_ptr, reverse_path_ptr)
     The kernel launches with S threads, NOT final_count threads!
     """
-    for id in range(ti.i32(S)):
+    for id in range(ti.i32(S)+1):
         if id == 0 or id >= S:
             continue
         keep_id = keep[id]

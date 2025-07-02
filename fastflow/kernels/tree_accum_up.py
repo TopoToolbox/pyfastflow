@@ -34,7 +34,9 @@ def rcv2donor(rcv: ti.template(), dnr: ti.template(), ndnr: ti.template(), n: in
     for tid in range(ti.i32(n)):
         if tid < n and rcv[tid] != tid:
             old_val = ti.atomic_add(ndnr[ti.i32(rcv[tid])], 1)
-            dnr[ti.i32(rcv[tid]) * 4 + old_val] = tid
+            donid = ti.i32(rcv[tid]) * 4 + old_val
+            if(donid < n*4):
+                dnr[ti.i32(rcv[tid]) * 4 + old_val] = tid
 
 
 @ti.kernel
@@ -72,7 +74,7 @@ def rake_compress_accum(dnr: ti.template(), ndnr: ti.template(), p: ti.template(
                 
                 if ndnr_val == 0:
                     todo -= 1
-                    if todo > i:
+                    if todo > i and base + todo < n*4:
                         donors[i] = dnr[base + todo] if not flip else dnr_[base + todo]
                     i -= 1
                 else:
@@ -83,11 +85,11 @@ def rake_compress_accum(dnr: ti.template(), ndnr: ti.template(), p: ti.template(
             if flip:
                 ndnr[tid] = todo
                 p[tid] = p_added
-                for j in range(todo):
+                for j in range(min(todo,4)): # the min is not required if the code does not bug, to be removed when everything works
                     dnr[base + j] = donors[j]
             else:
                 ndnr_[tid] = todo
                 p_[tid] = p_added
-                for j in range(todo):
+                for j in range(min(todo,4)): # the min is not required if the code does not bug, to be removed when everything works
                     dnr_[base + j] = donors[j]
             updateSrc(src, tid, iter, flip)
