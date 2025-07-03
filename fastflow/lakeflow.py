@@ -60,6 +60,22 @@ from .scatter_min_interface import flow_cuda_scatter_min_atomic
 from .kernels.lakeflow import *
 from .kernels.common_utils import swap_arrays, init_lakeflow_iteration
 
+@ti.kernel
+def jump_update_routing(K: int, keep: ti.template(), p_lm: ti.template(),
+                     p_rcv: ti.template(), rcv: ti.template(), W: ti.template()):
+  """Taichi kernel matching CUDA jumping method exactly"""
+  for i in range(1, K):  # Skip index 0, process 1 to K-1
+      if i < keep.shape[0]:
+          keep_idx = keep[i]  # This matches CUDA's sliced keep array access
+          if keep_idx > 0 and (keep_idx - 1) < p_lm.shape[0]:
+              lm_idx = p_lm[keep_idx - 1]  # idx = p_lm[keep-1]
+              if lm_idx < rcv.shape[0] and keep_idx < p_rcv.shape[0]:
+                  rcv[lm_idx] = p_rcv[keep_idx]  # rcv[idx] = p_rcv[keep]
+                  W[lm_idx] = 1.0  # W[idx] = 1.0
+
+
+
+
 def lakeflow(unified_fields: UnifiedFlowFields, method='carve', max_iterations=None):
     """
     Execute depression routing using the lakeflow algorithm.
@@ -355,6 +371,7 @@ def lakeflow(unified_fields: UnifiedFlowFields, method='carve', max_iterations=N
             propag_basin_route_lm(unified_fields.final_count, keep, unified_fields.p_lm,
                                  unified_fields.basin_route)
 
+        print('FINAL COUNT::', unified_fields.final_count.to_numpy())
         
         # === PHASE 10: DEPRESSION ELIMINATION ===
         # Apply the chosen method to eliminate depressions
@@ -432,22 +449,21 @@ def lakeflow(unified_fields: UnifiedFlowFields, method='carve', max_iterations=N
             # W[idx] = 1.0                // Vectorized weight update
             
             # Get final count from keep array offset (CUDA: keep[N + 1 + S])
-            K = unified_fields.final_count[0]  # This should match keep[N + 1 + S] from CUDA
+            K = keep[N+1+S]  # This should match keep[N + 1 + S] from CUDA
             
-            # Update flow routing for each connectable basin
-            if K > 1:  # Skip if only boundary basin (K=1 means only basin 0)
-                # Apply vectorized updates matching CUDA exactly
-                # Remove extra bounds checking that might skip valid connections
-                for i in range(1, K):  # Skip index 0 (boundary basin), match CUDA keep[1:K]
-                    if i < keep.shape[0]:
-                        keep_idx = keep[i]  # Basin index from keep array
-                        if keep_idx > 0 and (keep_idx - 1) < unified_fields.p_lm.shape[0]:
-                            # Get local minimum position: idx = p_lm[keep-1]
-                            lm_idx = unified_fields.p_lm[keep_idx - 1]
-                            if lm_idx < unified_fields.rcv.shape[0] and keep_idx < unified_fields.p_rcv.shape[0]:
-                                # CUDA: rcv[idx] = p_rcv[keep] and W[idx] = 1.0
-                                unified_fields.rcv[lm_idx] = unified_fields.p_rcv[keep_idx]
-                                unified_fields.W[lm_idx] = 1.0
+            # Then call it in the main function:
+            if K > 1:
+              jump_update_routing(K, keep, unified_fields.p_lm, unified_fields.p_rcv,
+                                 unified_fields.rcv, unified_fields.W)
+
+
+                        # if keep_idx > 0 and (keep_idx - 1) < unified_fields.p_lm.shape[0]:
+                        #     # Get local minimum position: idx = p_lm[keep-1]
+                        #     lm_idx = unified_fields.p_lm[keep_idx - 1]
+                        #     if (lm_idx < unified_fields.rcv.shape[0] and keep_idx < unified_fields.p_rcv.shape[0]) or True:
+                        #         # CUDA: rcv[idx] = p_rcv[keep] and W[idx] = 1.0
+                        #         unified_fields.rcv[lm_idx] = unified_fields.p_rcv[keep_idx]
+                        #         unified_fields.W[lm_idx] = 1.0
         
         # else:
         #     raise NotImplementedError(f"Method '{method}' not implemented")

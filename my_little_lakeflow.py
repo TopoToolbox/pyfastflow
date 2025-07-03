@@ -16,6 +16,7 @@ from fastflow.compute_receivers import compute_receivers
 from fastflow.fillinig_topo import fill_dem
 from fastflow.kernels.rcv import make_rcv
 from fastflow.kernels.tree_accum_up import rcv2donor, rake_compress_accum, fuse
+from fastflow.kernels.lakeflow_bg import basin_identification
 
 ti.init(arch=ti.gpu, debug = False)  # Using default ti.i32 to suppress warnings
 
@@ -23,12 +24,12 @@ ti.init(arch=ti.gpu, debug = False)  # Using default ti.i32 to suppress warnings
 
 
 # --- Main execution ---
-nx, ny = 10, 10
+nx, ny = 514, 514
 N = nx * ny
 
 print("Generating terrain...")
 noise = dg2.PerlinNoiseF32(frequency=0.01, amplitude=1.0, octaves=6)
-z = noise.create_noise_grid(nx, ny, 0, 0, 1, 1).as_numpy()
+z = noise.create_noise_grid(nx, ny, 0, 0, 100, 100).as_numpy()
 z = (z - z.min()) / (z.max() - z.min()) * 10
 
 # Boundary conditions
@@ -51,7 +52,27 @@ make_rcv(unified_fields.z, unified_fields.res, unified_fields.N,
 rcv_before_flow = unified_fields.get_receivers_2d()
 
 
-lakeflow(unified_fields, method='jump', max_iterations=None)
+bid = ti.field(ti.i32, shape = (N))
+is_border = ti.field(ti.u8, shape = (N))
+saddlez = ti.field(ti.f32, shape = (N))
+border_z = ti.field(ti.f32, shape = (N))
+saddlenode = ti.field(ti.i32, shape = (N))
+basin_identification(bid, unified_fields.rcv, unified_fields.rcv_, unified_fields.boundary, N)
+
+
+plt.imshow(bid.to_numpy().reshape(ny,nx))
+plt.show()
+
+
+
+
+quit()
+
+
+
+
+
+
 
 
 # Phase 2: Initialize accumulation values to unity

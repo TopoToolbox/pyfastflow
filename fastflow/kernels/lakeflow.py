@@ -608,7 +608,9 @@ def update_basin_route(final_count: ti.template(), keep: ti.template(), p_lm: ti
     for i in range(ti.i32(K)):
         if i >= K or i == 0:
             continue
+        # print('rerouting', i)
         keep_id = keep[i]
+        # print(keep_id, b_rcv[ti.i32(keep_id), ])
         if keep_id > 0:  # Bounds check to prevent negative access
             b_rcv_keep = b_rcv[ti.i32(keep_id)]
             lm_from = ti.i32(p_lm[keep_id - 1])
