@@ -24,18 +24,26 @@ ti.init(arch=ti.gpu, debug = False)  # Using default ti.i32 to suppress warnings
 
 
 # --- Main execution ---
-nx, ny = 512, 512
+nx, ny = 2048, 2048
 N = nx * ny
+# np.random.seed(42)
 
 print("Generating terrain...")
 noise = dg2.PerlinNoiseF32(frequency=0.01, amplitude=1.0, octaves=6)
-z = noise.create_noise_grid(nx, ny, 0, 0, 100, 100).as_numpy()
+z = noise.create_noise_grid(nx, ny, 0, 0, 1000, 1000).as_numpy()
+z+=np.random.rand(ny,nx)
+
+# z[100:103,100:107] -= 2
+# z[101,[100,102,104,106]] -= 1
+# z[101,[101,105]] -= 1
+# z[101,[103]] += 3
+
 z = (z - z.min()) / (z.max() - z.min()) * 1000
 
 # Boundary conditions
 z[0, :] = z[-1, :] = z[:, 0] = z[:, -1] = 0.15
 z = np.maximum(z, 0.01)
-z[3:6,3:6] -= 5000
+# z[3:6,3:6] -= 5000
 
 # plt.imshow(z)
 # plt.show()
@@ -136,12 +144,12 @@ drain = unified_fields.get_drainage_2d()
 
 # quit()
 
-fig,ax = plt.subplots(1,5)
-ax[0].imshow(rcv_before_flow)
-ax[1].imshow(unified_fields.get_receivers_2d())
-ax[2].imshow(unified_fields.get_receivers_2d() - rcv_before_flow)
-ax[3].imshow(drain, cmap = 'Blues')
-ax[4].imshow(bid.to_numpy().reshape(ny,nx), cmap = 'jet')
+fig,ax = plt.subplots(1,3)
+ax[0].imshow(np.log10(drain), cmap = 'Blues')
+# ax[1].imshow(unified_fields.get_receivers_2d())
+# ax[2].imshow(unified_fields.get_receivers_2d() - rcv_before_flow)
+ax[1].imshow(z, cmap = 'terrain')
+ax[2].imshow(bid.to_numpy().reshape(ny,nx), cmap = 'jet')
 
 
 # print(np.unique(unified_fields.b.to_numpy()))

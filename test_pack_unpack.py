@@ -180,8 +180,8 @@ def test_massive_array():
     n = 10000
     
     # Generate random test data
-    floats = np.random.uniform(-100, 100, n).astype(np.float32)
-    indices = np.random.randint(-1000, 1000, n, dtype=np.int32)
+    floats = np.random.uniform(-1e6, 1e6, n).astype(np.float32)
+    indices = np.random.randint(0, 750000, n, dtype=np.int32)
     
     # Taichi approach
     vals = ti.field(ti.f32, shape=n)
@@ -210,7 +210,7 @@ def test_massive_array():
     
     # Compare the results
     matches = 0
-    for i in range(min(100, n)):  # Check first 100 to avoid spam
+    for i in range(n):  # Check first 100 to avoid spam
         if numpy_sorted_pairs[i] == taichi_sorted_pairs[i]:
             matches += 1
         elif i < 10:  # Show first few mismatches

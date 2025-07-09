@@ -170,23 +170,23 @@ def border_id_edgez(z:ti.template(), bid:ti.template(), is_border:ti.template(),
 	'''
 	for i in z:
 		if(on_edge(i,nx,ny)):
+			z_prime[i] = z[i]
 			continue
 
 		is_border[i] = False
-		z_prime[i] = z[i]
+		z_prime[i] = 1e9
 		zn = 1e9
 		for k in range(4):
 			j = neighbour(i,k,nx,ny)
 
 			if(bid[j]!=bid[i]):
 				is_border[i] = True
-				if(z[j]<zn):
-					zn = z[j]
+				zn = ti.min(zn,z[j])
 
 		if(is_border[i]):
-			z_prime[i] = ti.max(z_prime[i], zn)
-		else:
-			z_prime[i] = 1e9		
+			z_prime[i] = ti.max(z[i], zn)
+		# else:
+		# 	z_prime[i] = 1e9		
 
 
 @ti.kernel
@@ -198,8 +198,10 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 	Identifying sadlles for each basin ID
 	'''
 	
+	# Generic invalid value
 	invalid = pack_float_index(1e8,42)
 
+	# 
 	for i in bid:
 		basin_saddle[i] = invalid
 		outlet[i] = invalid
@@ -208,26 +210,29 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 	for i in bid:
 		
 		# Ignoring no border nodes or basins draining to da edges
-		if(is_border[i] == False or bid[i] == 0):
+		if(is_border[i] == False):
 			continue
 
+		# if z_prime[i]>1e8:
+		# 	print('!!!!!!')
+
 		# Basin Identifyer
-		tbid:ti.i32 = nx*ny
+		tbid:ti.i32 = bid[i]
 
 		# Local Prime
-		tx = z_prime[i]
+		res:ti.i64 = invalid
 
 		for k in range(4):
 			j = neighbour(i,k,nx,ny)
-			if(bid[j] != tbid):
-				tbid = ti.min(bid[j],tbid)
 
+			if(bid[j] != tbid ):
+				candidate:ti.i64 = pack_float_index(z_prime[i],bid[j])
+				res = ti.min(res,candidate)
 
-		# Lexicographic atomic min
-		candidate:ti.i64 = pack_float_index(tx,tbid)
-		# debug_f, debug_i = unpack_float_index(candidate)
-		# print(f'{tx} {tbid} -> {debug_f} {debug_i}')
-		ti.atomic_min(basin_saddle[bid[i]], candidate)
+		if(res == invalid):
+			continue
+
+		ti.atomic_min(basin_saddle[bid[i]], res)
 
 	for i in bid:
 
@@ -236,14 +241,16 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 
 		target_z, target_b = unpack_float_index(basin_saddle[bid[i]])
 
-		if(z_prime[i] != target_z):
-			continue
+		
+
 		# print('HERE')
-		ishere=False
+		ishere = False
 		for k in range(4):
 			j = neighbour(i,k,nx,ny)
-			if(bid[j] == target_b):
+			if(bid[j] == target_b and z_prime[i] == target_z):
+			# if(bid[j] != bid[i] and z_prime[j] == target_z ):
 				ishere = True
+
 		if(ishere):
 			basin_saddlenode[bid[i]] = i
 			# print('here')
@@ -257,13 +264,8 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 
 		# Basin Identifyer
 		tbid:ti.i32 = i
-		# target_z, temp = unpack_float_index(basin_saddle[tbid])
 
-
-		# if(z_prime[temp] != target_z):
-		# 	continue
-
-		node = basin_saddlenode[i]
+		node = basin_saddlenode[tbid]
 		tz = 1e9
 		rec = -1
 		for k in range(4):
@@ -273,52 +275,88 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 				rec = j
 
 		if(rec > -1):
-			print(rec,'here')
 			# Lexicographic atomic min
 			candidate:ti.i64 = pack_float_index(tz,rec)
 			ti.atomic_min(outlet[tbid], candidate)
+		# else:
+		# 	print('YOLO')
 
 
 	# Remove the cycles part of the thingy
 	for i in bid:
 
 		bid_d = i
-		# print('A')
+
 		# if(active_basin[bid_d] == False or bid_d == 0):
 		if(bid_d == 0 or outlet[bid_d] == invalid):
 			continue
-		# print('B')
 
 		temp, recout = unpack_float_index(outlet[bid_d])
+		# temp1,temp2, recout = unpack_float_index(outlet[bid_d])
 		bid_d_prime = bid[recout]
-		print(bid_d,bid_d_prime, "<---THAT")
+		# print(bid_d, z[basin_saddlenode[bid_d]],'--->',bid_d_prime, temp, "<---THAT")
+
 		if(bid_d_prime == 0):
 			continue
+		# print('B')
+		
 		temp, recoutdprime = unpack_float_index(outlet[bid_d_prime])
 		bid_d_prime_prime = bid[recoutdprime]
 
-		temp, bid_saddle_of_d = unpack_float_index(basin_saddle[bid_d])
+		# temp, bid_saddle_of_d = unpack_float_index(basin_saddle[bid_d])
+		bid_saddle_of_d = bid_d
 
 		# if the magical mixture of conditions is met then delete the edge
 		if(bid_d_prime_prime == bid_saddle_of_d):
+			# print("B")
 			if(bid_d_prime < bid_saddle_of_d):
-				outlet[bid_d]       = invalid
-				basin_saddle[bid_d] = invalid
+				outlet[bid_d]           = invalid
+				basin_saddle[bid_d]     = invalid
 				basin_saddlenode[bid_d] = -1
+				# print("???")
+		# if
 
+
+	# Debug kernel the cycles part of the thingy
+	for i in bid:
+
+		bid_d = i
+
+		# if(active_basin[bid_d] == False or bid_d == 0):
+		if(bid_d == 0 or outlet[bid_d] == invalid):
+			continue
+
+		temp1, n1 = unpack_float_index(outlet[bid_d])
+		o1 = bid[n1]
+		temp2, n2 = unpack_float_index(outlet[o1])
+		o2 = bid[n2]
+		temp3, n3 = unpack_float_index(outlet[o2])
+		o3 = bid[n3]
+
+		if o1 == bid_d:
+			print('666')
+		if o2 == bid_d:
+			print('!!!!!')
+		if o3 == bid_d:
+			print(f'{i}-({temp1})->{o1}-({temp2})->{o2}-({temp3})->{o3} == {i}')
+			# outlet[o2]           = invalid
+			# basin_saddle[o2]     = invalid
+			# basin_saddlenode[o2] = -1
+			# outlet[o1]           = invalid
+			# basin_saddle[o1]     = invalid
+			# basin_saddlenode[o1] = -1
 
 @ti.kernel
 def reroute_jump(rec:ti.template(), outlet:ti.template()):
 
 	invalid = pack_float_index(1e8,42)
-
-
 	for i in rec:
 		if(outlet[i] == invalid):
 			continue
 		# print('YOLO')
 		temp, rrec = unpack_float_index(outlet[i])
 		rec[i-1] = rrec
+
 
 
 @ti.kernel
@@ -346,10 +384,11 @@ def _reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec_
 	# print(f"DEBUG::{Ndep} depressions found initially, should be {nump[nump==arr].shape[0]}")
 	print(f"DEBUG::{Ndep} depressions found initially")
 
-	for _ in range(math.ceil(math.log2(Ndep))+1):
+	for _ in range(math.ceil(math.log2(Ndep))+1000):
 	# for _ in range(1):
-		Ndep = count_Ndep(rec_, edges)
-		print(Ndep)
+		Ndep_bis = count_Ndep(rec_, edges)
+		print('Number of depressions :',Ndep_bis, '\n\n')
+
 
 		####################################
 		# Algorithm 2: Basin identification
@@ -357,9 +396,11 @@ def _reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec_
 		active_basin.fill(False)
 		basin_id_init(bid, edges)
 		rec__.copy_from(rec_)
-		for _ in range(math.ceil(math.log2(N))+1):
+		for _ in range((math.ceil(math.log2(N))+1)):
 			propagate_basin(bid, rec__, edges, active_basin)
 
+		if Ndep_bis == 0:
+			break
 
 		####################################
 		# Algorithm 3: Computing basin graph
@@ -381,7 +422,7 @@ def _reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec_
 	active_basin.fill(False)
 	basin_id_init(bid, edges)
 	rec__.copy_from(rec_)
-	for _ in range(math.ceil(math.log2(N))+1):
+	for _ in range(math.ceil(math.log2(N))):
 		propagate_basin(bid, rec__, edges, active_basin)
 
 	swap_arrays(rec, rec_, N)
