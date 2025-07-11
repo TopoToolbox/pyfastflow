@@ -79,10 +79,10 @@ def setup_boundary_edges(boundary: ti.template(), res: int, N: int):
             boundary[i] = ti.u8(0)
 
 @ti.kernel
-def reset_accumulation_kernel(p: ti.template()):
+def reset_accumulation_kernel(p: ti.template(), cellarea:ti.f32):
     """Reset drainage accumulation to unit values."""
     for i in p:
-        p[i] = 1.0
+        p[i] = cellarea
 
 @ti.kernel
 def extract_local_minima_filter(rcv: ti.template(), bound: ti.template(), 
@@ -350,9 +350,9 @@ class UnifiedFlowFields:
         """Extract drainage accumulation as 2D array."""
         return self.p.to_numpy().reshape(self.res, self.res)
     
-    def reset_accumulation(self):
+    def reset_accumulation(self, CA = 1.):
         """Reset drainage accumulation to unit values."""
-        reset_accumulation_kernel(self.p)
+        reset_accumulation_kernel(self.p, CA)
     
     # === DEPRESSION ROUTING UTILITIES ===
     

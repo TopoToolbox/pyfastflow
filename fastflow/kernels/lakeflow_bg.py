@@ -313,38 +313,7 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 				outlet[bid_d]           = invalid
 				basin_saddle[bid_d]     = invalid
 				basin_saddlenode[bid_d] = -1
-				# print("???")
-		# if
 
-
-	# Debug kernel the cycles part of the thingy
-	for i in bid:
-
-		bid_d = i
-
-		# if(active_basin[bid_d] == False or bid_d == 0):
-		if(bid_d == 0 or outlet[bid_d] == invalid):
-			continue
-
-		temp1, n1 = unpack_float_index(outlet[bid_d])
-		o1 = bid[n1]
-		temp2, n2 = unpack_float_index(outlet[o1])
-		o2 = bid[n2]
-		temp3, n3 = unpack_float_index(outlet[o2])
-		o3 = bid[n3]
-
-		if o1 == bid_d:
-			print('666')
-		if o2 == bid_d:
-			print('!!!!!')
-		if o3 == bid_d:
-			print(f'{i}-({temp1})->{o1}-({temp2})->{o2}-({temp3})->{o3} == {i}')
-			# outlet[o2]           = invalid
-			# basin_saddle[o2]     = invalid
-			# basin_saddlenode[o2] = -1
-			# outlet[o1]           = invalid
-			# basin_saddle[o1]     = invalid
-			# basin_saddlenode[o1] = -1
 
 @ti.kernel
 def reroute_jump(rec:ti.template(), outlet:ti.template()):
@@ -356,6 +325,99 @@ def reroute_jump(rec:ti.template(), outlet:ti.template()):
 		# print('YOLO')
 		temp, rrec = unpack_float_index(outlet[i])
 		rec[i-1] = rrec
+
+
+@ti.kernel
+def init_reroute_carve(tag:ti.template(), tag_:ti.template(), saddlenode:ti.template()):
+	'''
+	'''
+	# invalid = pack_float_index(1e8,42)
+
+	# First pass
+	for i in tag:	
+		tag[i] = False
+		# tag_[i] = False
+
+	for i in tag:	
+		if saddlenode[i] == -1:
+			continue
+		tag[saddlenode[i]] = True
+		# tag_[saddlenode[i]] = True
+	for i in tag:
+		tag_[i] = tag[i]
+
+@ti.kernel
+def iteration_reroute_carve(tag:ti.template(), tag_:ti.template(), rec:ti.template(), rec_:ti.template(), change:ti.template()):
+	'''
+	'''
+
+	for i in tag:
+		if(tag[i]):
+			tag_[rec[i]] = True
+			# rec[i] = rec[rec[rec[rec[rec[i]]]]]
+			# rec[i] = rec[rec[rec[i]]]
+			temp = i
+			for k in range(10):
+				temp = rec[temp]
+				tag_[temp] = True
+
+			rec[i] = temp
+			tag_[temp] = True
+
+			# rec[i] = rec_[rec_[rec_[i]]]
+
+			# temp = rec[i]
+			# tag[temp] = True
+			# temp = i
+			# for k in range(50):
+			# 	temp = rec_[temp]
+			# 	tag[temp] = True
+
+
+			# 	tag[rec_[rec_[i]]] = True
+			# 	tag[rec_[rec_[rec_[i]]]] = True
+			# # rec[i] = rec_[rec_[i]]
+	for i in tag:
+
+		if(tag[i] != tag_[i]):
+			change[None] = True
+
+		tag[i]=tag_[i]
+
+
+@ti.kernel
+def finalise_reroute_carve(rec:ti.template(), rec_:ti.template(), tag:ti.template(), saddlenode:ti.template(), outlet:ti.template()):
+	'''
+	'''
+	invalid = pack_float_index(1e8,42)
+
+	for i in rec:
+		if tag[rec_[i]] and tag[i] and i != rec_[i]:
+			rec[rec_[i]] = i
+
+	for i in rec:
+		if outlet[i] != invalid:
+			temp, node = unpack_float_index(outlet[i])
+			rec[saddlenode[i]] = node
+
+def reroute_carve(rec, rec_, tag, tag_, saddlenode, outlet, N, change:ti.template()):
+	'''
+	'''
+
+	init_reroute_carve(tag, tag_, saddlenode)
+	# for _ in range(math.ceil(math.log2(N))+1):
+	change[None] = True
+	it = 0
+	while change[None]:
+		it += 1
+		change[None] = False
+		iteration_reroute_carve(tag, tag_, rec, rec_, change)
+
+	# print('converged in', it)
+	finalise_reroute_carve(rec, rec_, tag, saddlenode, outlet)
+
+
+
 
 
 
@@ -371,23 +433,26 @@ def count_N_valid(arr:ti.template()) -> int:
 
 def _reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec__:ti.template(),
 	edges:ti.template(), active_basin:ti.template(), z:ti.template(), z_prime:ti.template(),
-	is_border:ti.template(), outlet:ti.template(), basin_saddle:ti.template(), basin_saddlenode:ti.template(),
-	nx: int, ny: int):
+	is_border:ti.template(), outlet:ti.template(), basin_saddle:ti.template(), basin_saddlenode:ti.template(), tag:ti.template(), tag_:ti.template(), change:ti.template(),
+	nx: int, ny: int, carve = True):
 	
 	rec_.copy_from(rec)
 	N = nx*ny
 	Ndep = count_Ndep(rec,edges) # works
+	if(Ndep == 0):
+		return
 
-	nump = rec.to_numpy()
+	# nump = rec.to_numpy()
 	# nump = rec.to_numpy().reshape(ny,nx)[1:-1,1:-1].ravel()
 	# arr = np.arange(N).reshape(ny,nx)[1:-1,1:-1].ravel()
 	# print(f"DEBUG::{Ndep} depressions found initially, should be {nump[nump==arr].shape[0]}")
-	print(f"DEBUG::{Ndep} depressions found initially")
+	# print(f"DEBUG::{Ndep} depressions found initially")
 
-	for _ in range(math.ceil(math.log2(Ndep))+1000):
+	# flag_carve = False
+	for _ in range(math.ceil(math.log2(Ndep))+1):
 	# for _ in range(1):
 		Ndep_bis = count_Ndep(rec_, edges)
-		print('Number of depressions :',Ndep_bis, '\n\n')
+		# print('Number of depressions :',Ndep_bis, '\n\n')
 
 
 		####################################
@@ -411,8 +476,20 @@ def _reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec_
 		saddlesort(bid, is_border, z_prime, basin_saddle, basin_saddlenode, active_basin, outlet, z, nx, ny)
 
 		# print(f'{count_N_valid(basin_saddle)} -- {count_N_valid(outlet)}')
-		
-		reroute_jump(rec_, outlet)
+		if(carve):
+			
+			# flag_carve = not flag_carve
+
+			# if(flag_carve):
+				# reroute_carve(rec, rec_, tag, basin_saddlenode, outlet, N)
+			# else:
+				# reroute_carve(rec_, rec, tag, basin_saddlenode, outlet, N)
+			reroute_carve(rec, rec_, tag, tag_, basin_saddlenode, outlet, N, change)
+			# swap_arrays(rec_, rec, N)
+			rec_.copy_from(rec)
+			
+		else:
+			reroute_jump(rec_, outlet)
 		# print (np.unique(rec_.to_numpy() - nump).shape)
 
 
@@ -425,7 +502,8 @@ def _reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec_
 	for _ in range(math.ceil(math.log2(N))):
 		propagate_basin(bid, rec__, edges, active_basin)
 
-	swap_arrays(rec, rec_, N)
+	# swap_arrays(rec, rec_, N) if (flag_carve == False or carve == False) else 0
+	swap_arrays(rec, rec_, N) #if (flag_carve == False or carve == False) else 0
 	# rec, rec_ = rec_, rec
 
 	# print (np.unique(rec.to_numpy() - nump))

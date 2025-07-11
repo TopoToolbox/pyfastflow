@@ -9,14 +9,14 @@ import torch
 import math
 import taichi as ti
 import dg2
-from fastflow.unified_fields import UnifiedFlowFields
-from fastflow.flow_accumulation import compute_drainage_accumulation
-from fastflow.lakeflow import lakeflow
-from fastflow.compute_receivers import compute_receivers
-from fastflow.fillinig_topo import fill_dem
-from fastflow.kernels.rcv import make_rcv
-from fastflow.kernels.tree_accum_up import rcv2donor, rake_compress_accum, fuse
-from fastflow.kernels.lakeflow_bg import basin_identification, _reroute_flow, unpack_full_float_index, pack_full_float_index
+from   fastflow.unified_fields        import UnifiedFlowFields
+from   fastflow.flow_accumulation     import compute_drainage_accumulation
+from   fastflow.lakeflow              import lakeflow
+from   fastflow.compute_receivers     import compute_receivers
+from   fastflow.fillinig_topo         import fill_dem
+from   fastflow.kernels.rcv           import make_rcv
+from   fastflow.kernels.tree_accum_up import rcv2donor, rake_compress_accum, fuse
+from   fastflow.kernels.lakeflow_bg   import basin_identification, _reroute_flow, unpack_full_float_index, pack_full_float_index
 
 ti.init(arch=ti.gpu, debug = False)  # Using default ti.i32 to suppress warnings
 
@@ -24,14 +24,14 @@ ti.init(arch=ti.gpu, debug = False)  # Using default ti.i32 to suppress warnings
 
 
 # --- Main execution ---
-nx, ny = 2048, 2048
+nx, ny = 1024, 1024
 N = nx * ny
 # np.random.seed(42)
 
 print("Generating terrain...")
-noise = dg2.PerlinNoiseF32(frequency=0.01, amplitude=1.0, octaves=6)
-z = noise.create_noise_grid(nx, ny, 0, 0, 1000, 1000).as_numpy()
-z+=np.random.rand(ny,nx)
+noise =  dg2.PerlinNoiseF32(frequency=0.01, amplitude=1.0, octaves=6)
+z     =  noise.create_noise_grid(nx, ny, 0, 0, 100, 100).as_numpy()
+z    +=  np.random.rand(ny,nx)
 
 # z[100:103,100:107] -= 2
 # z[101,[100,102,104,106]] -= 1
@@ -43,22 +43,32 @@ z = (z - z.min()) / (z.max() - z.min()) * 1000
 # Boundary conditions
 z[0, :] = z[-1, :] = z[:, 0] = z[:, -1] = 0.15
 z = np.maximum(z, 0.01)
-# z[3:6,3:6] -= 5000
+# z[5,5] -= 5000
 
 # plt.imshow(z)
 # plt.show()
+print('done')
+
+
+import time
+
+import fastscapelib as fs
+
+dx = 100.
+grid = fs.RasterGrid([ny, nx], [dx,dx], [fs.NodeStatus.FIXED_VALUE, fs.NodeStatus.FIXED_VALUE,fs.NodeStatus.FIXED_VALUE,fs.NodeStatus.FIXED_VALUE])
+flow_graph = fs.FlowGraph(grid, [fs.SingleFlowRouter(), fs.MSTSinkResolver()])
+
+# print("Fastscapelib routing:")
+# st = time.time() 
+# for i in range(100):
+#     flow_graph.update_routes(z.ravel())
+# print(f'took {(time.time() - st)/100} - average of 100')
 
 
 
 unified_fields = UnifiedFlowFields(N)
 unified_fields.load_terrain(z)
 unified_fields.set_boundary_edges()
-
-make_rcv(unified_fields.z, unified_fields.res, unified_fields.N, 
-                    unified_fields.boundary, unified_fields.rcv, unified_fields.W)
-
-rcv_before_flow = unified_fields.get_receivers_2d()
-
 
 
 is_border = ti.field(ti.u1, shape = (N))
@@ -79,10 +89,28 @@ z_prime = ti.field(ti.f32, shape = (N))
 debug_i = ti.field(ti.i32, shape = (N))
 debug_f = ti.field(ti.f32, shape = (N))
 
-_reroute_flow(bid, unified_fields.rcv, rec_2, rec_3, 
-    unified_fields.boundary, active_basin, unified_fields.z, 
-    z_prime, is_border, outlet, basin_saddle,basin_saddlenode,
-     nx, ny)
+tag = ti.field(ti.u1, shape = (N))
+tag_ = ti.field(ti.u1, shape = (N))
+
+change = ti.field(ti.u1, shape = ())
+
+
+print("fastflow taichi v1 routing:")
+st = time.time() 
+for i in range(100):
+    make_rcv(unified_fields.z, unified_fields.res, unified_fields.N, 
+                        unified_fields.boundary, unified_fields.rcv, unified_fields.W)
+
+
+    _reroute_flow(bid, unified_fields.rcv, rec_2, rec_3, 
+        unified_fields.boundary, active_basin, unified_fields.z, 
+        z_prime, is_border, outlet, basin_saddle,basin_saddlenode, tag, tag_, change,
+         nx, ny, carve = True)
+
+print(f'took {(time.time() - st)/100} - average of 100')
+
+
+
 
 # debug_f.fill(25.)
 # debug_i.fill(41)
@@ -150,6 +178,7 @@ ax[0].imshow(np.log10(drain), cmap = 'Blues')
 # ax[2].imshow(unified_fields.get_receivers_2d() - rcv_before_flow)
 ax[1].imshow(z, cmap = 'terrain')
 ax[2].imshow(bid.to_numpy().reshape(ny,nx), cmap = 'jet')
+# ax[2].imshow(tag.to_numpy().reshape(ny,nx), cmap = 'jet')
 
 
 # print(np.unique(unified_fields.b.to_numpy()))
