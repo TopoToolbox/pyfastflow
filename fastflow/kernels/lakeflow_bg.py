@@ -349,40 +349,59 @@ def init_reroute_carve(tag:ti.template(), tag_:ti.template(), saddlenode:ti.temp
 @ti.kernel
 def iteration_reroute_carve(tag:ti.template(), tag_:ti.template(), rec:ti.template(), rec_:ti.template(), change:ti.template()):
 	'''
+	OPTIMISATION:
+	Tehre should be a ping pong scheme
+	Algorithm 4 in paper ligne 15 and 16 should be switched (error in the paper)
+	so then beware of race condition between recs
+	
 	'''
 
 	for i in tag:
 		if(tag[i]):
 			tag_[rec[i]] = True
-			# rec[i] = rec[rec[rec[rec[rec[i]]]]]
-			# rec[i] = rec[rec[rec[i]]]
-			temp = i
-			for k in range(10):
-				temp = rec[temp]
-				tag_[temp] = True
 
-			rec[i] = temp
-			tag_[temp] = True
+		rec_[i] = rec[i]
 
-			# rec[i] = rec_[rec_[rec_[i]]]
-
-			# temp = rec[i]
-			# tag[temp] = True
-			# temp = i
-			# for k in range(50):
-			# 	temp = rec_[temp]
-			# 	tag[temp] = True
-
-
-			# 	tag[rec_[rec_[i]]] = True
-			# 	tag[rec_[rec_[rec_[i]]]] = True
-			# # rec[i] = rec_[rec_[i]]
 	for i in tag:
+		# if(tag_[i]):
+		rec[i] = rec_[rec_[i]]
 
 		if(tag[i] != tag_[i]):
 			change[None] = True
+		tag[i] = tag_[i]
 
-		tag[i]=tag_[i]
+	# for i in tag:
+	# 	if(tag[i]):
+	# 		tag_[rec[i]] = True
+	# 		# rec[i] = rec[rec[rec[rec[rec[i]]]]]
+	# 		# rec[i] = rec[rec[rec[i]]]
+	# 		temp = i
+	# 		for k in range(10):
+	# 			temp = rec[temp]
+	# 			tag_[temp] = True
+
+	# 		rec[i] = temp
+	# 		tag_[temp] = True
+
+	# 		# rec[i] = rec_[rec_[rec_[i]]]
+
+	# 		# temp = rec[i]
+	# 		# tag[temp] = True
+	# 		# temp = i
+	# 		# for k in range(50):
+	# 		# 	temp = rec_[temp]
+	# 		# 	tag[temp] = True
+
+
+	# 		# 	tag[rec_[rec_[i]]] = True
+	# 		# 	tag[rec_[rec_[rec_[i]]]] = True
+	# 		# # rec[i] = rec_[rec_[i]]
+	# for i in tag:
+
+	# 	if(tag[i] != tag_[i]):
+	# 		change[None] = True
+
+	# 	tag[i]=tag_[i]
 
 
 @ti.kernel
@@ -392,6 +411,8 @@ def finalise_reroute_carve(rec:ti.template(), rec_:ti.template(), tag:ti.templat
 	invalid = pack_float_index(1e8,42)
 
 	for i in rec:
+		rec[i] = rec_[i]
+	for i in rec:
 		if tag[rec_[i]] and tag[i] and i != rec_[i]:
 			rec[rec_[i]] = i
 
@@ -400,7 +421,7 @@ def finalise_reroute_carve(rec:ti.template(), rec_:ti.template(), tag:ti.templat
 			temp, node = unpack_float_index(outlet[i])
 			rec[saddlenode[i]] = node
 
-def reroute_carve(rec, rec_, tag, tag_, saddlenode, outlet, N, change:ti.template()):
+def reroute_carve(rec, rec_, rec__, tag, tag_, saddlenode, outlet, N, change:ti.template()):
 	'''
 	'''
 
@@ -408,13 +429,15 @@ def reroute_carve(rec, rec_, tag, tag_, saddlenode, outlet, N, change:ti.templat
 	# for _ in range(math.ceil(math.log2(N))+1):
 	change[None] = True
 	it = 0
+	rec.copy_from(rec_)
+	rec__.copy_from(rec_)
 	while change[None]:
 		it += 1
 		change[None] = False
 		iteration_reroute_carve(tag, tag_, rec, rec_, change)
 
-	# print('converged in', it)
-	finalise_reroute_carve(rec, rec_, tag, saddlenode, outlet)
+	# print('converged in', it, 'vs', math.ceil(math.log2(N))+1)
+	finalise_reroute_carve(rec, rec__, tag, saddlenode, outlet)
 
 
 
@@ -484,7 +507,8 @@ def _reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec_
 				# reroute_carve(rec, rec_, tag, basin_saddlenode, outlet, N)
 			# else:
 				# reroute_carve(rec_, rec, tag, basin_saddlenode, outlet, N)
-			reroute_carve(rec, rec_, tag, tag_, basin_saddlenode, outlet, N, change)
+			# rec.copy_from(rec_)
+			reroute_carve(rec, rec_, rec__, tag, tag_, basin_saddlenode, outlet, N, change)
 			# swap_arrays(rec_, rec, N)
 			rec_.copy_from(rec)
 			
