@@ -1,15 +1,8 @@
 """
-FastFlow Taichi - GPU-accelerated flow routing algorithms.
+Flow algorithms submodule for FastFlow Taichi.
 
-A high-performance Python package for hydrological flow routing on digital elevation models
-using Taichi for GPU acceleration. Implements parallel algorithms for:
+Contains all flow routing algorithms and utilities:
 
-- Steepest descent flow routing
-- Lake/depression handling (priority flood, carving)
-- Flow accumulation using rake-and-compress algorithms
-- Multiple boundary condition modes (open, periodic, custom)
-
-Key modules:
 - constants: Compile-time parameters and grid configuration
 - neighbourer_flat: Vectorized grid navigation with boundary handling
 - receivers: Steepest descent receiver computation
@@ -18,21 +11,27 @@ Key modules:
 - f32_i32_struct: Utility for lexicographic atomic operations
 - util_taichi: General Taichi utility functions
 
+Usage:
+    import fastflow_taichi as ff
+    
+    # Access individual modules
+    ff.flow.constants.NX
+    ff.flow.lakeflow.depression_counter(rec)
+    ff.flow.receivers.compute_receivers(z, rec, grad)
+
 Author: B.G.
 """
 
-__version__ = "0.1.0"
-__author__ = "B.G."
+# Import all flow modules - accessible as ff.flow.module_name
+from .constants import *
+from .neighbourer_flat import *
+from .receivers import *
+from .downstream_propag import *
+from .lakeflow import *
+from .f32_i32_struct import *
+from .util_taichi import *
 
-# Import main modules for easier access
-from . import constants
-from . import neighbourer_flat
-from . import receivers
-from . import downstream_propag
-from . import lakeflow
-from . import f32_i32_struct
-from . import util_taichi
-
+# Export all modules
 __all__ = [
     "constants",
     "neighbourer_flat", 

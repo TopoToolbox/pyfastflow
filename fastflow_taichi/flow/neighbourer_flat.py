@@ -10,8 +10,8 @@ Author: B.G.
 """
 
 import taichi as ti
-import constants as cte
-from constants import BOUND_MODE
+from . import constants as cte
+from .constants import BOUND_MODE
 
 
 
