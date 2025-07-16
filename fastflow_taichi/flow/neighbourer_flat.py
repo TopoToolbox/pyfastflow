@@ -423,6 +423,7 @@ def neighbour(i:ti.i32, tdir:ti.template()):
 		
 	Author: B.G.
 	"""
+	print(BOUND_MODE)
 	return neighbour_n(i,tdir) if ti.static(BOUND_MODE == 0) else (neighbour_pew(i,tdir) if ti.static(BOUND_MODE == 1) else (neighbour_pns(i,tdir) if ti.static(BOUND_MODE == 2) else (neighbour_custom(i,tdir) if ti.static(BOUND_MODE == 3) else -1)))
 
 @ti.func
