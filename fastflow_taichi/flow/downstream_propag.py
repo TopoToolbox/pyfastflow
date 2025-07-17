@@ -1,3 +1,18 @@
+"""
+Parallel downstream propagation algorithms for flow accumulation.
+
+Implements the rake-and-compress algorithm from Jain et al. 2024 for efficient
+parallel computation of flow accumulation on GPU. Uses ping-pong buffering
+to enable data-parallel processing of donor-receiver relationships.
+
+Key algorithms:
+- Rake: Process leaf nodes (≤1 donor) to accumulate values
+- Compress: Reduce tree depth by pointer jumping
+- Ping-pong: Alternate between buffer sets for parallelization
+
+Author: B.G.
+"""
+
 import taichi as ti
 from . import constants as cte
 from . import neighbourer_flat as nei
