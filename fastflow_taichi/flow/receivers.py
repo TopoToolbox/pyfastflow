@@ -22,8 +22,10 @@ def compute_receivers(z: ti.template(), receivers: ti.template(), gradient: ti.t
             # Fetch the receiver and compute gradient
             tr    :ti.i32  = nei.neighbour(i,k)
             valid :ti.u1   = (tr != -1)
-            tsr   :ti.f32  = (z[i]-z[tr])/cte.DX if valid else -1e9
-            
+            # tsr = -1.
+            # if valid:
+            tsr = (z[i]-z[tr])/cte.DX if valid else -1.
+
             # Apply stocastic neighbouring if needed
             if(ti.static(cte.RAND_RCV==1)):
                 tsr *= ti.random()
@@ -35,4 +37,8 @@ def compute_receivers(z: ti.template(), receivers: ti.template(), gradient: ti.t
 
         # Register
         receivers[i] = r
+        if(r==-1):
+            print('???')
+        # if i%(cte.NX)==1023 and r != i:
+        #     print(r % cte.NX, r == i)
         gradient[i]  = sr

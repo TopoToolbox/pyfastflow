@@ -11,7 +11,6 @@ Author: B.G.
 
 import taichi as ti
 from . import constants as cte
-from .constants import BOUND_MODE
 
 
 
@@ -65,7 +64,7 @@ def is_on_edge(i:ti.i32):
 	Author: B.G.
 	"""
 	res = False
-	tx,ty = rc_from_i(i)
+	ty,tx = rc_from_i(i)
 	
 	if(tx == 0 or tx == cte.NX-1 or ty ==0 or ty == cte.NY -1):
 		res = True
@@ -86,29 +85,34 @@ def which_edge(i:ti.i32) -> ti.u8:
 	
 	res:ti.u8 = 0
 
-	tx,ty = rc_from_i(i)
+	ty,tx = rc_from_i(i)
 
 	
 	if (i==0):
-		res = 1
+		res = ti.u8(1)
 	elif (i<cte.NX-1):
-		res = 2
+		res = ti.u8(2)
 	elif (i==cte.NX-1):
-		res = 3
+		res = ti.u8(3)
 	elif (i < cte.NX*cte.NY - cte.NX):
 		if (tx == 0):
-			res = 4
+			res = ti.u8(4)
 		elif (tx == cte.NX-1):
-			res = 5
+			res = ti.u8(5)
 	elif ty == cte.NY-1:
 		if (tx == 0):
-			res = 6
+			res = ti.u8(6)
 		elif (tx == cte.NX-1):
-			res = 8
+			res = ti.u8(8)
 		else:
-			res = 7
+			res = ti.u8(7)
 
 	return res
+
+@ti.kernel
+def fill_edges(edges:ti.template()):
+	for i in edges:
+		edges[i] = which_edge(i)
 
 
 #########################################
@@ -158,8 +162,22 @@ def validate_link_n(i:ti.i32, tdir:ti.template()):
 @ti.func
 def neighbour_n(i:ti.i32, tdir:ti.template()):
 	"""Get neighbor with normal boundary validation."""
-	j:ti.i32 = top_n(i) if tdir==0 else (left_n(i) if tdir==1 else (right_n(i) if tdir==2 else bottom_n(i)))
-	return j if validate_link_n(i,tdir) else -1
+	j:ti.i32 = -1
+	if tdir == 0:
+		j = top_n(i)
+	elif tdir == 1:
+		j = left_n(i)
+	elif tdir == 2:
+		j = right_n(i)
+	else:
+		j = bottom_n(i)
+	
+	res = -1
+	if validate_link_n(i,tdir):
+		res = j
+	else:
+		res = -1
+	return res
 
 @ti.func
 def can_leave_domain_n(i:ti.i32):
@@ -181,13 +199,23 @@ def top_pew(i:ti.i32):
 def left_pew(i:ti.i32):
 	"""Get left neighbor with EW wrapping."""
 	row, col = rc_from_i(i)
-	return i-1 if col > 0 else i + cte.NX - 1
+	res = -1
+	if col > 0:
+		res = i-1
+	else:
+		res = i + cte.NX - 1
+	return res
 
 @ti.func
 def right_pew(i:ti.i32):
 	"""Get right neighbor with EW wrapping."""
 	row, col = rc_from_i(i)
-	return i+1 if col < cte.NX-1 else i - cte.NX + 1
+	res = -1
+	if col < cte.NX-1:
+		res = i+1
+	else:
+		res = i - cte.NX + 1
+	return res
 
 @ti.func
 def bottom_pew(i:ti.i32):
@@ -204,21 +232,34 @@ def validate_link_pew(i:ti.i32, tdir:ti.template()):
 	if edge > 0:
 		if (tdir == 0 and edge <= 3):  # Top direction blocked at top edge
 			res = False
-		elif (tdir==3 and (edge >= 6)):  # Bottom direction blocked at bottom edge
+		elif (tdir==3 and edge >= 6):  # Bottom direction blocked at bottom edge
 			res = False
 	return res
 
 @ti.func
 def neighbour_pew(i:ti.i32, tdir:ti.template()):
 	"""Get neighbor with periodic EW boundary validation."""
-	j:ti.i32 = top_pew(i) if tdir==0 else (left_pew(i) if tdir==1 else (right_pew(i) if tdir==2 else bottom_pew(i)))
-	return j if validate_link_pew(i,tdir) else -1
+	j:ti.i32 = -1
+	if tdir == 0:
+		j = top_pew(i)
+	elif tdir == 1:
+		j = left_pew(i)
+	elif tdir == 2:
+		j = right_pew(i)
+	else:
+		j = bottom_pew(i)
+	
+	res = -1
+	if validate_link_pew(i,tdir):
+		res = j
+
+	return res
 
 @ti.func
 def can_leave_domain_pew(i:ti.i32):
 	"""Check if flow can leave domain (only through top/bottom edges)."""
 	edge = which_edge(i)
-	return edge == 2 or edge == 7
+	return (edge <= 3 or edge >= 6) and edge != 0
 
 
 #########################################
@@ -230,7 +271,12 @@ def can_leave_domain_pew(i:ti.i32):
 def top_pns(i:ti.i32):
 	"""Get top neighbor with NS wrapping."""
 	row, col = rc_from_i(i)
-	return i-cte.NX if row > 0 else i + cte.NX * (cte.NY - 1)
+	res = -1
+	if row > 0:
+		res = i-cte.NX
+	else:
+		res = i + cte.NX * (cte.NY - 1)
+	return res
 
 @ti.func
 def left_pns(i:ti.i32):
@@ -246,7 +292,12 @@ def right_pns(i:ti.i32):
 def bottom_pns(i:ti.i32):
 	"""Get bottom neighbor with NS wrapping."""
 	row, col = rc_from_i(i)
-	return i+cte.NX if row < cte.NY-1 else i - cte.NX * (cte.NY - 1)
+	res = -1
+	if row < cte.NY-1:
+		res = i+cte.NX
+	else:
+		res = i - cte.NX * (cte.NY - 1)
+	return res
 
 
 
@@ -265,14 +316,28 @@ def validate_link_pns(i:ti.i32, tdir:ti.template()):
 @ti.func
 def neighbour_pns(i:ti.i32, tdir:ti.template()):
 	"""Get neighbor with periodic NS boundary validation."""
-	j:ti.i32 = top_pns(i) if tdir==0 else (left_pns(i) if tdir==1 else (right_pns(i) if tdir==2 else bottom_pns(i)))
-	return j if validate_link_pns(i,tdir) else -1
+	j:ti.i32 = -1
+	if tdir == 0:
+		j = top_pns(i)
+	elif tdir == 1:
+		j = left_pns(i)
+	elif tdir == 2:
+		j = right_pns(i)
+	else:
+		j = bottom_pns(i)
+	
+	res = -1
+	if validate_link_pns(i,tdir):
+		res = j
+	else:
+		res = -1
+	return res
 
 @ti.func
 def can_leave_domain_pns(i:ti.i32):
-	"""Check if flow can leave domain (only through left/right edges)."""
+	"""Check if flow can leave domain (only through left/right edges including corners)."""
 	edge = which_edge(i)
-	return edge == 4 or edge == 5
+	return edge == 1 or edge == 3 or edge == 4 or edge == 5 or edge == 6 or edge == 8
 
 
 
@@ -301,8 +366,10 @@ def top_custom(i:ti.i32):
 		node = top_pns(i)
 	elif(tb>0):
 		node = top_n(i)
-	if (cte.boundaries[node] == 0):
-		node = -1
+
+	if node > -1 and node < cte.NX*cte.NY:
+		if (cte.boundaries[node] == 0):
+			node = -1
 	return node
 
 
@@ -315,8 +382,9 @@ def left_custom(i:ti.i32):
 		node = left_pew(i)
 	elif(tb>0):
 		node = left_n(i)
-	if (cte.boundaries[node] == 0):
-		node = -1
+	if node > -1 and node < cte.NX*cte.NY:
+		if (cte.boundaries[node] == 0):
+			node = -1
 	return node
 
 @ti.func
@@ -328,8 +396,9 @@ def right_custom(i:ti.i32):
 		node = right_pew(i)
 	elif(tb>0):
 		node = right_n(i)
-	if (cte.boundaries[node] == 0):
-		node = -1
+	if node > -1 and node < cte.NX*cte.NY:
+		if (cte.boundaries[node] == 0):
+			node = -1
 	return node
 
 @ti.func
@@ -341,8 +410,11 @@ def bottom_custom(i:ti.i32):
 		node = bottom_pns(i)
 	elif(tb>0):
 		node = bottom_n(i)
-	if (cte.boundaries[node] == 0):
-		node = -1
+
+	if node > -1 and node < cte.NX*cte.NY:
+		if (cte.boundaries[node] == 0):
+			node = -1
+	
 	return node
 
 
@@ -359,7 +431,9 @@ def validate_link_custom(i:ti.i32, tdir:ti.template()):
 		res = validate_link_n(i,tdir)
 	else:
 		edge = which_edge(i)
-		if(edge<=3 or edge>=6):
+		if(edge == 0):
+			res = validate_link_n(i,tdir)
+		elif(edge<=3 or edge>=6):
 			res = validate_link_pns(i,tdir)
 		else:
 			res = validate_link_pew(i,tdir)
@@ -368,13 +442,29 @@ def validate_link_custom(i:ti.i32, tdir:ti.template()):
 @ti.func
 def neighbour_custom(i:ti.i32, tdir:ti.template()):
 	"""Get neighbor with periodic NS boundary validation."""
-	j:ti.i32 = top_custom(i) if tdir==0 else (left_custom(i) if tdir==1 else (right_custom(i) if tdir==2 else bottom_custom(i)))
-	return j if validate_link_custom(i,tdir) else -1
+	j:ti.i32 = -1
+	if tdir == 0:
+		j = top_custom(i)
+	elif tdir == 1:
+		j = left_custom(i)
+	elif tdir == 2:
+		j = right_custom(i)
+	else:
+		j = bottom_custom(i)
+	
+	res = -1
+	if validate_link_custom(i,tdir):
+		res = j
+		if(cte.boundaries[j] == 0):
+			res = -1
+	else:
+		res = -1
+	return res
 
 @ti.func
 def can_leave_domain_custom(i:ti.i32):
 	"""Check if flow can leave domain (only through left/right edges)."""
-	return tb == 3
+	return cte.boundaries[i] == 3
 
 
 
@@ -383,33 +473,72 @@ def can_leave_domain_custom(i:ti.i32):
 ###### EXPOSED FUNCTIONS ################
 #########################################
 
-# Main API functions - automatically switch based on BOUND_MODE
-@ti.func
+
 def top(i:ti.i32):
 	"""Get top neighbor - switches between boundary modes."""
-	return top_n(i) if ti.static(BOUND_MODE == 0) else (top_pew(i) if ti.static(BOUND_MODE == 1) else (top_pns(i) if ti.static(BOUND_MODE == 2) else (top_custom(i) if ti.static(BOUND_MODE == 3) else -1)))
+	res = -1
+	if ti.static(cte.BOUND_MODE == 0):
+		res = top_n(i)
+	elif ti.static(cte.BOUND_MODE == 1):
+		res = top_pew(i)
+	elif ti.static(cte.BOUND_MODE == 2):
+		res = top_pns(i)
+	elif ti.static(cte.BOUND_MODE == 3):
+		res = top_custom(i)
+	return res
 
-@ti.func
 def left(i:ti.i32):
 	"""Get left neighbor - switches between boundary modes."""
-	return left_n(i) if ti.static(BOUND_MODE == 0) else (left_pew(i) if ti.static(BOUND_MODE == 1) else (left_pns(i) if ti.static(BOUND_MODE == 2) else (left_custom(i) if ti.static(BOUND_MODE == 3) else -1)))
+	res = -1
+	if ti.static(cte.BOUND_MODE == 0):
+		res = left_n(i)
+	elif ti.static(cte.BOUND_MODE == 1):
+		res = left_pew(i)
+	elif ti.static(cte.BOUND_MODE == 2):
+		res = left_pns(i)
+	elif ti.static(cte.BOUND_MODE == 3):
+		res = left_custom(i)
+	return res
 
-@ti.func
 def right(i:ti.i32):
 	"""Get right neighbor - switches between boundary modes."""
-	return right_n(i) if ti.static(BOUND_MODE == 0) else (right_pew(i) if ti.static(BOUND_MODE == 1) else (right_pns(i) if ti.static(BOUND_MODE == 2) else (right_custom(i) if ti.static(BOUND_MODE == 3) else -1)))
+	res = -1
+	if ti.static(cte.BOUND_MODE == 0):
+		res = right_n(i)
+	elif ti.static(cte.BOUND_MODE == 1):
+		res = right_pew(i)
+	elif ti.static(cte.BOUND_MODE == 2):
+		res = right_pns(i)
+	elif ti.static(cte.BOUND_MODE == 3):
+		res = right_custom(i)
+	return res
 
-@ti.func
 def bottom(i:ti.i32):
 	"""Get bottom neighbor - switches between boundary modes."""
-	return bottom_n(i) if ti.static(BOUND_MODE == 0) else (bottom_pew(i) if ti.static(BOUND_MODE == 1) else (bottom_pns(i) if ti.static(BOUND_MODE == 2) else (bottom_custom(i) if ti.static(BOUND_MODE == 3) else -1)))
+	res = -1
+	if ti.static(cte.BOUND_MODE == 0):
+		res = bottom_n(i)
+	elif ti.static(cte.BOUND_MODE == 1):
+		res = bottom_pew(i)
+	elif ti.static(cte.BOUND_MODE == 2):
+		res = bottom_pns(i)
+	elif ti.static(cte.BOUND_MODE == 3):
+		res = bottom_custom(i)
+	return res
 
-@ti.func
 def validate_link(i:ti.i32, tdir:ti.template()):
 	"""Validate link direction - switches between boundary modes."""
-	return validate_link_n(i,tdir) if ti.static(BOUND_MODE == 0) else (validate_link_pew(i,tdir) if ti.static(BOUND_MODE == 1) else (validate_link_pns(i,tdir) if ti.static(BOUND_MODE == 2) else (validate_link_custom(i,tdir) if ti.static(BOUND_MODE == 3) else -1)))
+	res = -1
+	if ti.static(cte.BOUND_MODE == 0):
+		res = validate_link_n(i,tdir)
+	elif ti.static(cte.BOUND_MODE == 1):
+		res = validate_link_pew(i,tdir)
+	elif ti.static(cte.BOUND_MODE == 2):
+		res = validate_link_pns(i,tdir)
+	elif ti.static(cte.BOUND_MODE == 3):
+		res = validate_link_custom(i,tdir)
+	return res
 
-@ti.func
 def neighbour(i:ti.i32, tdir:ti.template()):
 	"""
 	Get validated neighbor - switches between boundary modes.
@@ -423,10 +552,22 @@ def neighbour(i:ti.i32, tdir:ti.template()):
 		
 	Author: B.G.
 	"""
-	print(BOUND_MODE)
-	return neighbour_n(i,tdir) if ti.static(BOUND_MODE == 0) else (neighbour_pew(i,tdir) if ti.static(BOUND_MODE == 1) else (neighbour_pns(i,tdir) if ti.static(BOUND_MODE == 2) else (neighbour_custom(i,tdir) if ti.static(BOUND_MODE == 3) else -1)))
+	res = -1
+	if ti.static(cte.BOUND_MODE == 0):
+		# ti.static_print('RAN A', cte.BOUND_MODE)
+		res = neighbour_n(i,tdir)
+	elif ti.static(cte.BOUND_MODE == 1):
+		# ti.static_print('RAN B', cte.BOUND_MODE)
+		res = neighbour_pew(i,tdir)
+	elif ti.static(cte.BOUND_MODE == 2):
+		# ti.static_print('RAN C', cte.BOUND_MODE)
+		res = neighbour_pns(i,tdir)
+	elif ti.static(cte.BOUND_MODE == 3):
+		# ti.static_print('RAN D', cte.BOUND_MODE)
+		res = neighbour_custom(i,tdir)
 
-@ti.func
+	return res
+
 def can_leave_domain(i:ti.i32):
 	"""
 	Check if flow can leave domain - switches between boundary modes.
@@ -439,6 +580,32 @@ def can_leave_domain(i:ti.i32):
 		
 	Author: B.G.
 	"""
-	return can_leave_domain_n(i) if ti.static(BOUND_MODE == 0) else (can_leave_domain_pew(i) if ti.static(BOUND_MODE == 1) else (can_leave_domain_pns(i) if ti.static(BOUND_MODE == 2) else (can_leave_domain_custom(i) if ti.static(BOUND_MODE == 3) else -1)))
+	res = -1
+	if ti.static(cte.BOUND_MODE == 0):
+		res = can_leave_domain_n(i)
+	elif ti.static(cte.BOUND_MODE == 1):
+		res = can_leave_domain_pew(i)
+	elif ti.static(cte.BOUND_MODE == 2):
+		res = can_leave_domain_pns(i)
+	elif ti.static(cte.BOUND_MODE == 3):
+		res = can_leave_domain_custom(i)
+	return res
+
+# Main API functions - automatically switch based on cte.BOUND_MODE
+def compile_neighbourer():
+	global top,left,right,bottom,validate_link,neighbour,can_leave_domain
+
+	top = ti.func(top)
+	left = ti.func(left)
+	right = ti.func(right)
+	bottom = ti.func(bottom)
+	validate_link = ti.func(validate_link)
+	neighbour = ti.func(neighbour)
+	can_leave_domain = ti.func(can_leave_domain)
 
 
+
+@ti.kernel
+def flow_out_nodes(outnodes:ti.template()):
+	for i in outnodes:
+		outnodes[i] = can_leave_domain(i)

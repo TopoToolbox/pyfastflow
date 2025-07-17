@@ -124,7 +124,7 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 	"""
 	
 	# Generic invalid value for packing
-	invalid = ti.static(pack_float_index(1e8,42))
+	invalid = pack_float_index(1e8,42)
 
 	####################################
 	# First pass: Identify basin borders and compute z_prime
@@ -143,6 +143,7 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 		# Check all 4 neighbors
 		for k in range(4):
 			j = nei.neighbour(i,k)
+
 			if(j == -1):  # Invalid neighbor
 				continue
 
@@ -177,6 +178,7 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 		# Check all neighbors for saddle candidates
 		for k in range(4):
 			j = nei.neighbour(i,k)
+
 			if(j == -1):
 				continue
 
@@ -206,6 +208,7 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 		ishere = False
 		for k in range(4):
 			j = nei.neighbour(i,k)
+
 			if(j == -1):
 				continue
 			# This is the saddle if neighbor basin matches target and elevation matches
@@ -233,6 +236,7 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 		# Find lowest neighbor of saddle node in different basin
 		for k in range(4):
 			j = nei.neighbour(node,k)
+
 			if(j == -1):
 				continue
 			# Look for neighbors in different basins with lower elevation
@@ -458,7 +462,7 @@ def count_N_valid(arr:ti.template()) -> int:
 	return Ninv
 
 
-def _reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec__:ti.template(),
+def reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec__:ti.template(),
 	z:ti.template(), z_prime:ti.template(),	is_border:ti.template(), outlet:ti.template(), basin_saddle:ti.template(), 
 	basin_saddlenode:ti.template(), tag:ti.template(), tag_:ti.template(), change:ti.template(), carve = True):
 	"""
@@ -486,12 +490,15 @@ def _reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec_
 	rec_.copy_from(rec)  # Initialize working copy
 	N = cte.NX * cte.NY  # Total number of nodes
 	Ndep = depression_counter(rec)  # Count initial depressions
+
+	# print(f'Ndep:{Ndep}')
 	if(Ndep == 0):
 		return  # No depressions to process
 
 	# Main iterative loop - process depressions until convergence
 	for _ in range(math.ceil(math.log2(Ndep))+1):
 		Ndep_bis = depression_counter(rec_)  # Count remaining depressions
+		# print(f'HERE::{Ndep_bis}')
 
 		####################################
 		# Algorithm 2: Basin identification
@@ -501,8 +508,8 @@ def _reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec_
 		# Propagate basin IDs upstream using pointer jumping
 		for _ in range((math.ceil(math.log2(N))+1)):
 			propagate_basin(bid, rec__)
-
 		if Ndep_bis == 0:
+			# print(f'HERE::{Ndep_bis}')
 			break  # All depressions resolved
 
 		####################################
@@ -527,6 +534,7 @@ def _reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec_
 
 	# Final basin identification and cleanup
 	basin_id_init(bid)
+	return
 	rec__.copy_from(rec_)
 	for _ in range(math.ceil(math.log2(N))):
 		propagate_basin(bid, rec__)

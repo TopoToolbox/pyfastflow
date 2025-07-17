@@ -42,7 +42,7 @@ def updateSrc(src: ti.template(), tid: int, iteration: int, flip: bool):
 
 
 @ti.kernel
-def fuse(A: ti.template(), src: ti.template(), B: ti.template()):
+def fuse(A: ti.template(), src: ti.template(), B: ti.template(), iteration:ti.template()):
     """
     Copy values from B to A based on ping-pong state.
     

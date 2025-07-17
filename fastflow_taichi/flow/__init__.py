@@ -30,6 +30,7 @@ from .downstream_propag import *
 from .lakeflow import *
 from .f32_i32_struct import *
 from .util_taichi import *
+from .environment import *
 
 # Export all modules
 __all__ = [
