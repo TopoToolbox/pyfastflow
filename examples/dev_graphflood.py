@@ -8,16 +8,16 @@ import matplotlib.pyplot as plt
 
 MANNING = 0.033
 S_out = 1e-2
-DT = 1e-3
+DT = 5e-3
 
-PREC = 50 *1e-3/3600
+PREC = 10 *1e-3/3600
 ALPHA = 0.
 
 
 ti.init(ti.gpu, debug = False)
 
-# dem = scb.io.load_raster('/home/bgailleton/Desktop/data/green_river_1.tif')
-dem = scb.io.load_raster('/home/bgailleton/Desktop/data/NZ/archive/points_v2_6.tif')
+dem = scb.io.load_raster('/home/bgailleton/Desktop/data/green_river_1.tif')
+# dem = scb.io.load_raster('/home/bgailleton/Desktop/data/NZ/archive/points_v2_6.tif')
 
 nx,ny=dem.geo.nx,dem.geo.ny
 router = pf.flow.FlowRouter(dem.geo.nx, dem.geo.ny, dem.geo.dx, boundary_mode = 'normal', boundaries = None, lakeflow = True, stochastic_receivers = False)
@@ -89,7 +89,7 @@ def graphflood(h:ti.template(), zh:ti.template(), dh:ti.template(), rec:ti.templ
 
 fig,ax = plt.subplots()
 
-im=ax.imshow(h.to_numpy().reshape(ny,nx), cmap = 'Blues', vmin = 0., vmax = 3.)
+im=ax.imshow(h.to_numpy().reshape(ny,nx), cmap = 'Blues', vmin = 0., vmax = 1.)
 plt.colorbar(im, label='flow depth')
 fig.show()
 

@@ -81,3 +81,23 @@ def init_custom_boundaries(tboundaries: np.ndarray):
 	_snodetree_boundaries = fb1.finalize()  # Finalize field structure
 	boundaries.from_numpy(tboundaries)  # Copy boundary data
 	BOUND_MODE = 3  # Switch to custom boundary mode
+
+
+
+
+#########################################
+###### HYDRO CONSTANTS ##################
+#########################################
+
+
+# Precipitation rates (in case of constant)
+PREC = 10*1e-3/3600 # Default 10mm/h of effective precs
+
+# Manning's roughness
+MANNING = 0.033 # Default to common value on open flows
+
+# Edge slope for node leaving the domain
+EDGESW = 1e-2
+
+# Edge slope for node leaving the domain
+DT_HYDRO = 5e-3

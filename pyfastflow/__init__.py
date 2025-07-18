@@ -8,6 +8,7 @@ using Taichi for GPU acceleration. Implements parallel algorithms for:
 - Lake/depression handling (priority flood, carving)
 - Flow accumulation using rake-and-compress algorithms
 - Multiple boundary condition modes (open, periodic, custom)
+- 2D shallow water flow modeling (GraphFlood)
 
 Usage:
     import pyfastflow as ff
@@ -15,8 +16,12 @@ Usage:
     # Access flow functions through the flow submodule
     ff.flow.lakeflow.depression_counter(...)
     ff.flow.receivers.compute_receivers(...)
+    
     # Access constants directly
     ff.constants.NX
+    
+    # Access GraphFlood for 2D shallow water modeling
+    flooder = ff.graphflood.Flooder(router, precipitation_rates=10e-3/3600)
 
 Author: B.G.
 """
@@ -24,9 +29,14 @@ Author: B.G.
 __version__ = "0.1.0"
 __author__ = "B.G."
 
-# Import the flow submodule and constants - users access functions as ff.flow.module.function()
-from . import flow
+# Import all submodules in alphabetical order
 from . import constants
+from . import flow  
+from . import graphflood
 
-# Export the flow submodule and constants
-__all__ = ["flow", "constants"]
+# Export all submodules
+__all__ = [
+    "constants",
+    "flow", 
+    "graphflood"
+]
