@@ -10,7 +10,7 @@ using Taichi for GPU acceleration. Implements parallel algorithms for:
 - Multiple boundary condition modes (open, periodic, custom)
 
 Usage:
-    import fastflow_taichi as ff
+    import pyfastflow as ff
     
     # Access flow functions through the flow submodule
     ff.flow.lakeflow.depression_counter(...)
