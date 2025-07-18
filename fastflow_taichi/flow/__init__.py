@@ -31,6 +31,7 @@ from .lakeflow import *
 from .f32_i32_struct import *
 from .util_taichi import *
 from .flowfields import *
+from .fill_topo import *
 from .environment import *
 
 # Export all modules

@@ -36,4 +36,9 @@ def swap_arrays(array1: ti.template(), array2: ti.template()):
 
 
 
-
+@ti.kernel
+def init_arange(array: ti.template()):
+    """
+    """
+    for i in array:
+        array[i] = i

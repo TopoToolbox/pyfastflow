@@ -17,6 +17,7 @@ from . import constants as cte
 from . import downstream_propag as dpr
 from . import lakeflow as lf
 from . import util_taichi as ut
+from . import fill_topo as fl
 from . import receivers as rcv
 
 
@@ -120,8 +121,10 @@ class FlowRouter:
 			self.fb_lake = ti.FieldsBuilder()
 
 			# Modified elevation field for lake outlet computation
-			self.z_prime = ti.field(ti.f32)
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.z_prime)
+			self.z_ = ti.field(ti.f32)
+			self.fb_lake.dense(ti.i,(nx*ny)).place(self.z_)
+			self.z__ = ti.field(ti.f32)
+			self.fb_lake.dense(ti.i,(nx*ny)).place(self.z__)
 
 			# Additional receiver arrays for lake flow processing
 			self.receivers_ = ti.field(ti.i32)  # Temporary receiver storage
@@ -245,7 +248,7 @@ class FlowRouter:
 
 		# Call the main lake flow routing algorithm
 		lf.reroute_flow(self.bid, self.receivers, self.receivers_, self.receivers__,
-        self.z, self.z_prime, self.is_border, self.outlet, self.basin_saddle, 
+        self.z, self.z_, self.is_border, self.outlet, self.basin_saddle, 
         self.basin_saddlenode, self.tag, self.tag_, self.change, carve = carve)
 
 	def accumulate_constant_Q(self, value, area = True):
@@ -288,6 +291,10 @@ class FlowRouter:
 		# Merge accumulated values from working arrays back to primary array
 		dpr.fuse(self.Q, self.src, self.Q_, logn)
 
+
+	def fill_z(self, epsilon=1e-4):
+		fl.topofill(self, epsilon=epsilon, custom_z = None)
+
 	def get_Q(self):
 		"""
 		Get flow accumulation results as 2D numpy array.
@@ -298,3 +305,15 @@ class FlowRouter:
 		Author: B.G.
 		"""
 		return self.Q.to_numpy().reshape(self.rshp)
+
+
+	def get_Z(self):
+		"""
+		Get flow accumulation results as 2D numpy array.
+		
+		Returns:
+			numpy.ndarray: 2D array of flow accumulation values (ny, nx)
+			
+		Author: B.G.
+		"""
+		return self.z.to_numpy().reshape(self.rshp)
