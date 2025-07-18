@@ -23,7 +23,7 @@ Author: B.G.
 """
 
 # Import all flow modules - accessible as ff.flow.module_name
-from .constants import *
+from ..constants import *
 from .neighbourer_flat import *
 from .receivers import *
 from .downstream_propag import *
@@ -36,11 +36,13 @@ from .environment import *
 
 # Export all modules
 __all__ = [
-    "constants",
     "neighbourer_flat", 
     "receivers",
     "downstream_propag",
     "lakeflow",
     "f32_i32_struct",
-    "util_taichi"
+    "util_taichi",
+    "flowfields",
+    "fill_topo",
+    "environment"
 ]

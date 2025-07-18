@@ -9,7 +9,7 @@ Author: B.G.
 
 import taichi as ti
 import math
-from . import constants as cte
+from .. import constants as cte
 from . import util_taichi as ut
 
 

@@ -2,7 +2,7 @@ import taichi as ti
 import numpy as np
 import scabbard as scb
 import pyfastflow as pf
-import pyfastflow.flow.constants as cte
+import pyfastflow.constants as cte
 import matplotlib.pyplot as plt
 
 

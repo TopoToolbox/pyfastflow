@@ -43,9 +43,10 @@ TODO
 
 MIT License - see LICENSE file for details.
 
-## Author
+## Authors
 
-Boris Gailleton - boris.gailleton@univ-rennes.fr
+Boris Gailleton - Géosciences Rennes - boris.gailleton@univ-rennes.fr
+Guillaume Cordonnier - INRIA Sofia Antipolis Nice
 
 ## Citation
 

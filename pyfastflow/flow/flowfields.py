@@ -13,7 +13,7 @@ import taichi as ti
 import numpy as np
 import math
 from . import environment as env
-from . import constants as cte
+from .. import constants as cte
 from . import downstream_propag as dpr
 from . import lakeflow as lf
 from . import util_taichi as ut

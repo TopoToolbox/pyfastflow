@@ -15,7 +15,8 @@ Usage:
     # Access flow functions through the flow submodule
     ff.flow.lakeflow.depression_counter(...)
     ff.flow.receivers.compute_receivers(...)
-    ff.flow.constants.NX
+    # Access constants directly
+    ff.constants.NX
 
 Author: B.G.
 """
@@ -23,8 +24,9 @@ Author: B.G.
 __version__ = "0.1.0"
 __author__ = "B.G."
 
-# Import the flow submodule - users access functions as ff.flow.module.function()
+# Import the flow submodule and constants - users access functions as ff.flow.module.function()
 from . import flow
+from . import constants
 
-# Only export the flow submodule
-__all__ = ["flow"]
+# Export the flow submodule and constants
+__all__ = ["flow", "constants"]

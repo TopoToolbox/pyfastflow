@@ -14,7 +14,7 @@ Author: B.G.
 """
 
 import taichi as ti
-from . import constants as cte
+from .. import constants as cte
 from . import neighbourer_flat as nei
 
 @ti.func
