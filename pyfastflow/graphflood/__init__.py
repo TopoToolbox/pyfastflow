@@ -5,6 +5,7 @@ Contains all shallow water flow algorithms and utilities:
 
 - gf_fields: Field management and data structures for flow variables
 - gf_hydrodynamics: Core hydrodynamic computation kernels with Manning's friction
+- gf_ls: Local-Step method implementation for 2D shallow water flow
 - Flooder: High-level interface for flood modeling workflows
 
 Key Features:
@@ -32,8 +33,9 @@ Author: B.G.
 """
 
 # Import all graphflood modules - accessible as pf.graphflood.module_name
-from .gf_fields import *
+from .gf_fields        import *
 from .gf_hydrodynamics import *
+from .gf_ls            import *
 
 # Export all modules
 __all__ = [
@@ -43,8 +45,11 @@ __all__ = [
     # Individual functions
     "diffuse_Q_constant_prec",
     "graphflood_core_cte_mannings",
+    "flow_route",
+    "depth_update",
     
     # Module names
     "gf_fields",
-    "gf_hydrodynamics"
+    "gf_hydrodynamics",
+    "gf_ls"
 ]

@@ -99,5 +99,24 @@ MANNING = 0.033 # Default to common value on open flows
 # Edge slope for node leaving the domain
 EDGESW = 1e-2
 
-# Edge slope for node leaving the domain
+# Specific tographflood
+
+# Time step for the hydro (graphflood)
 DT_HYDRO = 5e-3
+
+# Specific to lisflood
+
+# Time step for the hydro (Lisflood)
+DT_HYDRO_LS = 1e-1
+
+# Time step for the hydro (Lisflood)
+HFLOW_THRESHOLD = 1e-3
+FROUDE_LIMIT = 1.0
+
+
+#########################################
+###### GENERAL CONSTANTS ################
+#########################################
+
+
+GRAVITY = 9.81
