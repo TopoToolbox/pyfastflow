@@ -1,5 +1,5 @@
 """
-Hydrodynamic computation kernels for GraphFlood shallow water flow.
+Hydrodynamic computation kernels for Flood shallow water flow.
 
 This module implements the core hydrodynamic algorithms for 2D shallow water
 flow simulation using GPU-accelerated Taichi kernels. It provides methods for
@@ -10,8 +10,8 @@ Key algorithms:
 - Manning's equation for flow resistance and depth updates
 - Integration with FastFlow's flow routing system
 
-Based on methods from Gailleton et al. 2024 for efficient GPU-based
-shallow water flow modeling.
+Based on methods from Gailleton et al. 2024 for efficient
+shallow water flow approximation, adapted to GPU (Gailleton et al., in prep).
 
 Author: B.G.
 """

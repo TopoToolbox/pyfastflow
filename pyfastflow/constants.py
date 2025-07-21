@@ -99,7 +99,7 @@ MANNING = 0.033 # Default to common value on open flows
 # Edge slope for node leaving the domain
 EDGESW = 1e-2
 
-# Specific tographflood
+# Specific to flood
 
 # Time step for the hydro (graphflood)
 DT_HYDRO = 5e-3

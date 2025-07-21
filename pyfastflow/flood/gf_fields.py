@@ -1,5 +1,5 @@
 """
-GraphFlood field management and data structures for 2D shallow water flow.
+Flood field management and data structures for 2D shallow water flow.
 
 This module provides the Flooder class which manages field allocation and 
 orchestrates the 2D shallow water flow computation pipeline. It handles
@@ -110,7 +110,7 @@ class Flooder:
 
 	def run_graphflood(self, N=10):
 		"""
-		Execute graphfloodflood simulation workflow.
+		Execute graphflood simulation workflow.
 		
 		Performs the following steps:
 		1. Compute flow receivers using steepest descent
@@ -135,10 +135,10 @@ class Flooder:
 
 			# Diffuse discharge field to simulate multiple flow paths
 			for i in range(5):
-				pf.graphflood.diffuse_Q_constant_prec(self.router.z, self.router.Q, self.router.Q_)
+				pf.flood.diffuse_Q_constant_prec(self.router.z, self.router.Q, self.router.Q_)
 
 			# Apply shallow water equations with Manning's friction
-			pf.graphflood.graphflood_core_cte_mannings(self.h,self.router.z,self.dh, self.router.receivers, self.router.Q)
+			pf.flood.graphflood_core_cte_mannings(self.h,self.router.z,self.dh, self.router.receivers, self.router.Q)
 
 	def set_h(self, val):
 		"""

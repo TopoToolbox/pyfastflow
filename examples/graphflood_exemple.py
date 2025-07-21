@@ -15,7 +15,7 @@ nx,ny=dem.geo.nx,dem.geo.ny
 router = pf.flow.FlowRouter(dem.geo.nx, dem.geo.ny, dem.geo.dx, boundary_mode = 'normal', boundaries = None, lakeflow = True, stochastic_receivers = False)
 router.set_z(dem.Z.ravel())
 
-gf = pf.graphflood.Flooder(router, precipitation_rates = 10e-3/3600, manning=0.033, edge_slope = 1e-2)
+gf = pf.flood.Flooder(router, precipitation_rates = 10e-3/3600, manning=0.033, edge_slope = 1e-2)
 
 gf.run_graphflood(1000)
 

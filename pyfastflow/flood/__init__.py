@@ -1,5 +1,5 @@
 """
-GraphFlood algorithms submodule for FastFlow Taichi.
+Flood algorithms submodule for FastFlow Taichi.
 
 Contains all shallow water flow algorithms and utilities:
 
@@ -22,7 +22,7 @@ Usage:
     router = pf.flow.FlowRouter(nx=100, ny=100, dx=1.0)
     
     # Create flood model
-    flooder = pf.graphflood.Flooder(
+    flooder = pf.flood.Flooder(
         router=router,
         precipitation_rates=10e-3/3600,  # m/s
         manning=1e-3,                    # Manning's n
@@ -32,7 +32,7 @@ Usage:
 Author: B.G.
 """
 
-# Import all graphflood modules - accessible as pf.graphflood.module_name
+# Import all flood modules - accessible as pf.flood.module_name
 from .gf_fields        import *
 from .gf_hydrodynamics import *
 from .gf_ls            import *

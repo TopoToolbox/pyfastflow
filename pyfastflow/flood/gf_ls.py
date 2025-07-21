@@ -1,18 +1,21 @@
 """
-GraphFlood Local-Step (LS) shallow water flow computation kernels.
+Flood LisFlood (LS) shallow water flow computation kernels.
 
-This module implements the Local-Step method for 2D shallow water flow simulation
+Method implementation adapted from HAIL-CAESAR (https://github.com/dvalters/HAIL-CAESAR) to GPU
+Method described in Bates et al. 2010: A simple inertial formulation of the shallow water equations for efficient two-dimensional flood inundation modelling
+
+This module implements the LisFlood method for 2D shallow water flow simulation
 using GPU-accelerated Taichi kernels. The LS method uses explicit time integration
 with local time stepping for stability and efficiency.
 
 Key Features:
-- Local-step time integration for shallow water equations
+- LisFlood time integration for shallow water equations
 - Manning's friction implementation with stability checks
 - Froude number limiting for numerical stability
 - Discharge magnitude checks to prevent excessive flow
 - 2D flow routing in both x and y directions
 
-The implementation follows the Local-Step method principles:
+The implementation follows the LisFlood method principles:
 1. Flow routing: Compute discharge in x and y directions
 2. Depth update: Update water depths based on discharge divergence
 
@@ -22,7 +25,7 @@ Constants used from constants module:
 - MANNING: Manning's roughness coefficient (0.033)
 - NY: Number of grid rows (512)
 - NX: Number of grid columns (512)
-- DT_HYDRO_LS: Time step for Local-Step hydro (1e-1 s)
+- DT_HYDRO_LS: Time step for LisFlood hydro (1e-1 s)
 - GRAVITY: Gravitational acceleration (9.81 m/s²)
 - FROUDE_LIMIT: Maximum Froude number (1.0)
 
@@ -44,7 +47,7 @@ def flow_route(
 	qy: ti.template(),
 ):
 	"""
-	Compute flow routing in x and y directions using Local-Step method.
+	Compute flow routing in x and y directions using LisFlood method.
 	
 	Updates discharge fields (qx, qy) based on water surface gradients,
 	Manning's friction, and stability constraints. The method applies:
