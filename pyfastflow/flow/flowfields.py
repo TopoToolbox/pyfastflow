@@ -151,6 +151,8 @@ class FlowRouter:
 			self.fb_lake.dense(ti.i,(nx*ny)).place(self.tag)
 			self.tag_ = ti.field(ti.u1)  # Alternate tagging for carving
 			self.fb_lake.dense(ti.i,(nx*ny)).place(self.tag_)
+			self.rerouted = ti.field(ti.u1)  # Keep track of rerouted nodes
+			self.fb_lake.dense(ti.i,(nx*ny)).place(self.rerouted)
 
 			# Finalize lake flow field structure
 			self.snodetree_lake = self.fb_lake.finalize()
@@ -225,6 +227,18 @@ class FlowRouter:
 		"""
 		rcv.compute_receivers(self.z, self.receivers, self.gradient)
 
+	def recompute_receivers_ignore_rerouted(self):
+		"""
+		Compute steepest descent receivers for all grid nodes.
+		
+		Determines the downstream flow direction for each node based on
+		steepest descent algorithm. Results are stored in self.receivers
+		and gradients in self.gradient.
+		
+		Author: B.G.
+		"""
+		rcv.compute_receivers_ignore_rerouted(self.z, self.receivers, self.gradient, self.rerouted)
+
 	def reroute_flow(self, carve = True):
 		"""
 		Process lake flow to handle depressions and closed basins.
@@ -249,7 +263,7 @@ class FlowRouter:
 		# Call the main lake flow routing algorithm
 		lf.reroute_flow(self.bid, self.receivers, self.receivers_, self.receivers__,
         self.z, self.z_, self.is_border, self.outlet, self.basin_saddle, 
-        self.basin_saddlenode, self.tag, self.tag_, self.change, carve = carve)
+        self.basin_saddlenode, self.tag, self.tag_, self.change, self.rerouted, carve = carve)
 
 	def accumulate_constant_Q(self, value, area = True):
 		"""
@@ -290,6 +304,56 @@ class FlowRouter:
 		# Final fuse step to consolidate results from ping-pong buffers
 		# Merge accumulated values from working arrays back to primary array
 		dpr.fuse(self.Q, self.src, self.Q_, logn)
+
+
+	def accumulate_constant_Q_stochastic(self, value, area = True, N = 4):
+		"""
+		Accumulate constant flow values using parallel rake-compress algorithm.
+		
+		Performs flow accumulation with uniform input values using the
+		rake-and-compress algorithm for efficient parallel computation.
+		
+		Args:
+			value: Constant flow value to accumulate at each node
+			area: If True, multiply by grid cell area (dx²) for area-based flow
+			      If False, use raw value for unit-based flow
+			
+		Note:
+			Results are stored in self.Q and can be accessed via get_Q()
+			
+		Author: B.G.
+		"""
+		self.z_.fill(0.)
+
+		# Calculate number of iterations needed (log₂ of grid size)
+		logn = math.ceil(math.log2(self.nx*self.ny))+1
+		for __ in range(N):
+			self.compute_receivers()
+
+			# Initialize arrays for rake-compress algorithm
+			self.ndonors.fill(0)  # Reset donor counts
+			self.src.fill(0)      # Reset ping-pong state
+			
+			# Initialize flow values (multiply by area if requested)
+			self.Q.fill(value*(cte.DX * cte.DX if area else 1.))
+			
+			# Build donor-receiver relationships from receiver array
+			dpr.rcv2donor(self.receivers, self.donors, self.ndonors)
+
+			# Rake-compress iterations for parallel tree accumulation
+			# Each iteration doubles the effective path length being compressed
+			for i in range(logn+1):
+				dpr.rake_compress_accum(self.donors, self.ndonors, self.Q, self.src,
+				                   self.donors_, self.ndonors_, self.Q_, i)
+
+			# Final fuse step to consolidate results from ping-pong buffers
+			# Merge accumulated values from working arrays back to primary array
+			dpr.fuse(self.Q, self.src, self.Q_, logn)
+
+			ut.add_B_to_weighted_A(self.z_, self.Q, 1./N)
+
+		self.Q.copy_from(self.z_)
+
 
 
 	def fill_z(self, epsilon=1e-4):

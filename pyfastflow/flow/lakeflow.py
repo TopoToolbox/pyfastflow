@@ -282,7 +282,7 @@ def saddlesort(bid:ti.template(), is_border:ti.template(), z_prime:ti.template()
 
 
 @ti.kernel
-def reroute_jump(rec:ti.template(), outlet:ti.template()):
+def reroute_jump(rec:ti.template(), outlet:ti.template(), rerouted:ti.template()):
 	"""
 	Reroute flow by jumping directly to basin outlets (filling approach).
 	
@@ -296,12 +296,17 @@ def reroute_jump(rec:ti.template(), outlet:ti.template()):
 	Author: B.G.
 	"""
 	invalid = pack_float_index(1e8,42)
+
+	for i in rerouted:
+		rerouted[i] = False
+
 	for i in rec:
 		if(outlet[i] == invalid):
 			continue
 		# Extract outlet node and redirect flow
 		temp, rrec = unpack_float_index(outlet[i])
 		rec[i-1] = rrec  # Redirect to outlet node
+		rerouted[i-1] = True
 
 
 @ti.kernel
@@ -369,7 +374,7 @@ def iteration_reroute_carve(tag:ti.template(), tag_:ti.template(), rec:ti.templa
 
 
 @ti.kernel
-def finalise_reroute_carve(rec:ti.template(), rec_:ti.template(), tag:ti.template(), saddlenode:ti.template(), outlet:ti.template()):
+def finalise_reroute_carve(rec:ti.template(), rec_:ti.template(), tag:ti.template(), saddlenode:ti.template(), outlet:ti.template(), rerouted:ti.template()):
 	"""
 	Finalize carving by creating bidirectional links and connecting outlets.
 	
@@ -395,14 +400,17 @@ def finalise_reroute_carve(rec:ti.template(), rec_:ti.template(), tag:ti.templat
 	for i in rec:
 		if tag[rec_[i]] and tag[i] and i != rec_[i]:
 			rec[rec_[i]] = i  # Create reverse link
+			rerouted[rec_[i]] = True
 
 	# Connect saddle nodes to their outlets
 	for i in rec:
 		if outlet[i] != invalid:
 			temp, node = unpack_float_index(outlet[i])
 			rec[saddlenode[i]] = node  # Direct connection from saddle to outlet
+			rerouted[saddlenode[i]] = True
 
-def reroute_carve(rec, rec_, rec__, tag, tag_, saddlenode, outlet, change:ti.template()):
+
+def reroute_carve(rec, rec_, rec__, tag, tag_, saddlenode, outlet, change:ti.template(), rerouted:ti.template()):
 	"""
 	Main carving algorithm that creates channels through saddle points.
 	
@@ -435,7 +443,7 @@ def reroute_carve(rec, rec_, rec__, tag, tag_, saddlenode, outlet, change:ti.tem
 		iteration_reroute_carve(tag, tag_, rec, rec_, change)
 
 	# Finalize the carving process
-	finalise_reroute_carve(rec, rec__, tag, saddlenode, outlet)
+	finalise_reroute_carve(rec, rec__, tag, saddlenode, outlet, rerouted)
 
 
 
@@ -465,7 +473,7 @@ def count_N_valid(arr:ti.template()) -> int:
 
 def reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec__:ti.template(),
 	z:ti.template(), z_prime:ti.template(),	is_border:ti.template(), outlet:ti.template(), basin_saddle:ti.template(), 
-	basin_saddlenode:ti.template(), tag:ti.template(), tag_:ti.template(), change:ti.template(), carve = True):
+	basin_saddlenode:ti.template(), tag:ti.template(), tag_:ti.template(), change:ti.template(), rerouted:ti.template(), carve = True):
 	"""
 	Main lake flow algorithm implementing depression jumping and carving.
 	
@@ -491,6 +499,7 @@ def reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec__
 	rec_.copy_from(rec)  # Initialize working copy
 	N = cte.NX * cte.NY  # Total number of nodes
 	Ndep = depression_counter(rec)  # Count initial depressions
+	rerouted.fill(False)
 
 	# print(f'Ndep:{Ndep}')
 	if(Ndep == 0):
@@ -522,11 +531,11 @@ def reroute_flow(bid:ti.template(), rec:ti.template(), rec_:ti.template(), rec__
 		# Apply flow rerouting strategy
 		if(carve):
 			# Carving: create channels through saddle points
-			reroute_carve(rec, rec_, rec__, tag, tag_, basin_saddlenode, outlet, change)
+			reroute_carve(rec, rec_, rec__, tag, tag_, basin_saddlenode, outlet, change, rerouted)
 			rec_.copy_from(rec)
 		else:
 			# Filling: jump flow directly to outlets
-			reroute_jump(rec_, outlet)
+			reroute_jump(rec_, outlet, rerouted)
 		# print (np.unique(rec_.to_numpy() - nump).shape)
 
 

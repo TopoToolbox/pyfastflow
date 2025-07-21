@@ -45,8 +45,7 @@ def diffuse_Q_constant_prec(zh:ti.template(), Q:ti.template(), temp:ti.template(
 	# Initialize precipitation input and handle boundary conditions
 	for i in Q:
 		temp[i] = cte.PREC * cte.DX * cte.DX  # Add precipitation as volume input
-		if flow.neighbourer_flat.can_leave_domain(i):
-			Q[i] = 0.  # Set boundary cells to zero discharge
+
 	
 	# Diffuse discharge based on slope gradients
 	for i in zh:
@@ -118,9 +117,9 @@ def graphflood_core_cte_mannings(h:ti.template(), zh:ti.template(), dh:ti.templa
 		tdh = (Q[i] - Qo)/(cte.DX**2) * cte.DT_HYDRO  # Volume change per unit area
 
 		# Apply depth change and ensure non-negative depths
-		h[i] += tdh
-		if(h[i] < 0):  # Prevent negative depths
-			tdh += h[i]  # Adjust change to reach zero depth
+		# h[i] += tdh
+		if(h[i] + tdh < 0):  # Prevent negative depths
+			tdh = -h[i]  # Adjust change to reach zero depth
 		dh[i] = tdh
 
 	# Update water surface elevation (topography + depth)

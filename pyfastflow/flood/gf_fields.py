@@ -22,7 +22,7 @@ Author: B.G.
 import taichi as ti
 import pyfastflow as pf
 from .. import constants as cte
-
+from . import gf_ls as ls
 
 
 class Flooder:
@@ -59,7 +59,7 @@ class Flooder:
 	Author: B.G.
 	"""
 
-	def __init__(self, router, precipitation_rates = 10e-3/3600, manning=0.033, edge_slope = 1e-2):
+	def __init__(self, router, precipitation_rates = 10e-3/3600, manning=0.033, edge_slope = 1e-2, dt_hydro = 1e-3):
 		"""
 		Initialize the Flooder with grid parameters and hydrodynamic settings.
 		
@@ -100,12 +100,12 @@ class Flooder:
 		self.dh.fill(0.)
 
 
-
-		
-
 		cte.PREC = precipitation_rates
 		cte.MANNING = manning
 		cte.EDGESW = edge_slope
+		cte.DT_HYDRO = dt_hydro
+		cte.DT_HYDRO_LS = dt_hydro
+		# cte.RAND_RCV = True
 
 
 	def run_graphflood(self, N=10):
@@ -129,16 +129,49 @@ class Flooder:
 			
 			# Handle flow routing through lakes and depressions
 			self.router.reroute_flow()
-			
-			# Fill topography accounting for water depth
+
 			pf.flow.fill_z_add_delta(self.router.z,self.h,self.router.z_,self.router.receivers,self.router.receivers_,self.router.receivers__, epsilon=1e-3)
 
+			
+			self.router.accumulate_constant_Q_stochastic(cte.PREC, area = True, N=4)
+
+			# Test 1
+			# Fill topography accounting for water depth
+			# pf.flow.fill_z_add_delta(self.router.z,self.h,self.router.z_,self.router.receivers,self.router.receivers_,self.router.receivers__, epsilon=1e-3)
+
+			# self.router.accumulate_constant_Q(cte.PREC, area = True)
+
 			# Diffuse discharge field to simulate multiple flow paths
-			for i in range(5):
-				pf.flood.diffuse_Q_constant_prec(self.router.z, self.router.Q, self.router.Q_)
+			# for i in range(5):
+			# 	pf.flood.diffuse_Q_constant_prec(self.router.z, self.router.Q, self.router.Q_)
+
+
 
 			# Apply shallow water equations with Manning's friction
 			pf.flood.graphflood_core_cte_mannings(self.h,self.router.z,self.dh, self.router.receivers, self.router.Q)
+
+
+	def run_LS(self, N=1000, init_q = None):
+		'''
+		Runs Bates et al. 2010 for N iterations
+
+		uses self.dh for qx and self.router.Q_ for qy
+		'''
+
+		if init_q is not None:
+			# placeholder for initial qxqy calculation
+			pass
+		else:
+			self.router.Q_.fill(0.)
+			self.dh.fill(0.)
+
+		for _ in range(N):
+			# Temporary, will add more on later
+			ls.init_LS_on_hw_from_constant_effective_prec(self.h)
+			
+			ls.flow_route(self.h, self.router.z, self.router.Q_, self.dh)
+			ls.depth_update(self.h, self.router.z, self.router.Q_, self.dh)
+
 
 	def set_h(self, val):
 		"""
@@ -157,3 +190,22 @@ class Flooder:
 			numpy.ndarray: Flow depth values reshaped to 2D grid
 		"""
 		return self.h.to_numpy().reshape(self.rshp)
+
+	def get_dh(self):
+		"""
+		Get current flow depth field as numpy array.
+		
+		Returns:
+			numpy.ndarray: Flow depth values reshaped to 2D grid
+		"""
+		return self.dh.to_numpy().reshape(self.rshp)
+
+
+	def get_Q(self):
+		"""
+		Get current flow depth field as numpy array.
+		
+		Returns:
+			numpy.ndarray: Flow depth values reshaped to 2D grid
+		"""
+		return self.router.Q.to_numpy().reshape(self.rshp)

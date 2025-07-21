@@ -34,7 +34,17 @@ def swap_arrays(array1: ti.template(), array2: ti.template()):
         array1[I] = array2[I]  # Copy array2 value to array1
         array2[I] = temp  # Copy original array1 value to array2
 
+@ti.kernel
+def add_B_to_A(array1: ti.template(), array2: ti.template()):
 
+    for i in array1:
+        array1[i] += array2[i]
+
+@ti.kernel
+def add_B_to_weighted_A(array1: ti.template(), array2: ti.template(), weight:ti.f32):
+
+    for i in array1:
+        array1[i] += array2[i]*weight
 
 @ti.kernel
 def init_arange(array: ti.template()):

@@ -44,7 +44,8 @@ def compute_receivers(z: ti.template(), receivers: ti.template(), gradient: ti.t
 
             # Apply stochastic weighting if enabled
             if(ti.static(cte.RAND_RCV==1)):
-                tsr *= ti.random()
+                # tsr *= ti.random()
+                tsr = ti.random() * tsr**0.5
 
             # Update steepest receiver if this gradient is steeper
             valid = (valid and tsr > sr)

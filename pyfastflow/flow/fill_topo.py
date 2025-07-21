@@ -98,7 +98,9 @@ def _apply_fill_z_add_delta(z:ti.template(), h:ti.template(), z_:ti.template()):
 
 def fill_z_add_delta(zh,h,z_,receivers,receivers_,receivers__, epsilon=1e-4):
 	"""
-	Fill elevations and track height adjustments.
+	Fill elevations and adds height adjustments to ext. field.
+
+	Used in flood analysis to fill the topo with water or sed and not bedrock.
 	
 	Performs topographic filling on the elevation field and adds the elevation 
 	differences to a separate height field for tracking the adjustments made.

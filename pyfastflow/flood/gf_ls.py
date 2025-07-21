@@ -20,14 +20,14 @@ The implementation follows the LisFlood method principles:
 2. Depth update: Update water depths based on discharge divergence
 
 Constants used from constants module:
-- HFLOW_THRESHOLD: Minimum flow depth threshold (1e-3 m)
-- EDGESW: Boundary slope for edge conditions (1e-2 m/m)
-- MANNING: Manning's roughness coefficient (0.033)
-- NY: Number of grid rows (512)
-- NX: Number of grid columns (512)
-- DT_HYDRO_LS: Time step for LisFlood hydro (1e-1 s)
-- GRAVITY: Gravitational acceleration (9.81 m/s²)
-- FROUDE_LIMIT: Maximum Froude number (1.0)
+- HFLOW_THRESHOLD: Minimum flow depth threshold
+- EDGESW: Boundary slope for edge conditions 
+- MANNING: Manning's roughness coefficient 
+- NY: Number of grid rows
+- NX: Number of grid columns 
+- DT_HYDRO_LS: Time step for LisFlood hydro 
+- GRAVITY: Gravitational acceleration 
+- FROUDE_LIMIT: Maximum Froude number 
 
 Author: B.G.
 """
@@ -40,11 +40,28 @@ from .. import constants as cte
 
 
 @ti.kernel
+def init_LS_on_hw_from_constant_effective_prec(hw:ti.template()):
+	for i in hw:
+		hw[i] += cte.PREC * cte.DT_HYDRO_LS
+
+@ti.kernel
+def init_LS_on_hw_from_variable_effective_prec(hw:ti.template(), rate:ti.template()):
+	for i in hw:
+		hw[i] += rate[i] * cte.DT_HYDRO_LS
+
+
+# For later
+# @ti.kernel
+# def init_LS_q
+
+
+
+@ti.kernel
 def flow_route(
 	hw: ti.template(),
 	z: ti.template(),
 	qx: ti.template(),
-	qy: ti.template(),
+	qy: ti.template()
 ):
 	"""
 	Compute flow routing in x and y directions using LisFlood method.
