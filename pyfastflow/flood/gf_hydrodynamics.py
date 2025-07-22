@@ -21,7 +21,7 @@ from .. import constants as cte
 import pyfastflow.flow as flow 
 
 @ti.kernel
-def diffuse_Q_constant_prec(zh:ti.template(), Q:ti.template(), temp:ti.template()):
+def diffuse_Q_constant_prec(z:ti.template(), Q:ti.template(), temp:ti.template()):
 	"""
 	Diffuse discharge field to simulate multiple flow paths.
 	
@@ -35,7 +35,7 @@ def diffuse_Q_constant_prec(zh:ti.template(), Q:ti.template(), temp:ti.template(
 	3. Redistributes discharge proportionally to slope gradients
 	
 	Args:
-		zh (ti.template): Combined topography + water depth field
+		z (ti.template): Combined surface elevation field (topography + water depth)
 		Q (ti.template): Discharge field to diffuse
 		temp (ti.template): Temporary field for intermediate calculations
 	
@@ -48,7 +48,7 @@ def diffuse_Q_constant_prec(zh:ti.template(), Q:ti.template(), temp:ti.template(
 
 	
 	# Diffuse discharge based on slope gradients
-	for i in zh:
+	for i in z:
 		# Skip boundary cells
 		if flow.neighbourer_flat.can_leave_domain(i):
 			continue
@@ -57,7 +57,7 @@ def diffuse_Q_constant_prec(zh:ti.template(), Q:ti.template(), temp:ti.template(
 		sums = 0.
 		for k in range(4):  # Check all 4 neighbors
 			j = flow.neighbourer_flat.neighbour(i,k)
-			sums += ti.max(0., ((zh[i]-zh[j])/cte.DX) if j!=-1 else 0.)
+			sums += ti.max(0., (((z[i])-(z[j]))/cte.DX) if j!=-1 else 0.)
 		
 		# Skip cells with no downslope neighbors
 		if(sums == 0.):
@@ -66,7 +66,7 @@ def diffuse_Q_constant_prec(zh:ti.template(), Q:ti.template(), temp:ti.template(
 		# Distribute discharge proportionally to slope gradients
 		for k in range(4):
 			j = flow.neighbourer_flat.neighbour(i,k)
-			tS = ti.max(0., ((zh[i]-zh[j])/cte.DX) if j!=-1 else 0.)
+			tS = ti.max(0., (((z[i])-(z[j]))/cte.DX) if j!=-1 else 0.)
 			ti.atomic_add(temp[j], tS/sums * Q[i])  # Add proportional discharge
 
 	# Update discharge field with diffused values
@@ -75,7 +75,7 @@ def diffuse_Q_constant_prec(zh:ti.template(), Q:ti.template(), temp:ti.template(
 		
 
 @ti.kernel
-def graphflood_core_cte_mannings(h:ti.template(), zh:ti.template(), dh:ti.template(), rec:ti.template(), Q:ti.template()):
+def graphflood_core_cte_mannings(h:ti.template(), z:ti.template(), dh:ti.template(), rec:ti.template(), Q:ti.template()):
 	"""
 	Core shallow water flow computation using Manning's equation.
 	
@@ -88,13 +88,13 @@ def graphflood_core_cte_mannings(h:ti.template(), zh:ti.template(), dh:ti.templa
 	2. Calculates outflow capacity using Manning's equation
 	3. Updates water depth based on discharge balance
 	4. Ensures non-negative depth values
-	5. Updates combined topography + water surface
+	5. Maintains separate water depth field (bed elevation unchanged)
 	
 	Based on core methods from Gailleton et al. 2024.
 	
 	Args:
 		h (ti.template): Flow depth field
-		zh (ti.template): Combined topography + water depth field
+		z (ti.template): Combined surface elevation field (topography + water depth)
 		dh (ti.template): Depth change field for intermediate calculations
 		rec (ti.template): Flow receiver field from flow routing
 		Q (ti.template): Discharge field
@@ -107,7 +107,7 @@ def graphflood_core_cte_mannings(h:ti.template(), zh:ti.template(), dh:ti.templa
 		# Determine local slope
 		tS = cte.EDGESW  # Use edge slope for boundary/sink cells
 		if(rec[i] != i):  # Interior cells with valid receivers
-			tS = ti.max((zh[i]-zh[rec[i]])/cte.DX, 1e-4)  # Slope to receiver (minimum 1e-4)
+			tS = ti.max(((z[i]+h[i])-(z[rec[i]]+h[rec[i]]))/cte.DX, 1e-4)  # Slope to receiver (minimum 1e-4)
 
 		# Calculate outflow capacity using Manning's equation
 		# Q = (1/n) * A * R^(2/3) * S^(1/2), where R ≈ h for wide channels
@@ -122,7 +122,7 @@ def graphflood_core_cte_mannings(h:ti.template(), zh:ti.template(), dh:ti.templa
 			tdh = -h[i]  # Adjust change to reach zero depth
 		dh[i] = tdh
 
-	# Update water surface elevation (topography + depth)
+	# Apply final water depth changes
 	for i in h:
 		h[i] += dh[i]  # Apply final depth change
-		zh[i] += dh[i]  # Update water surface elevation
+		# Note: z field should be updated externally to maintain z = bed + h relationship

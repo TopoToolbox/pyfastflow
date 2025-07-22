@@ -14,6 +14,7 @@ Key Features:
 - Integration with FastFlow routing for initial conditions
 - Precipitation and boundary condition support
 - Configurable hydrodynamic parameters
+- Separate bed elevation and water depth fields for numerical stability
 
 Usage:
     import pyfastflow as pf
@@ -42,11 +43,15 @@ __all__ = [
     # Core classes
     "Flooder",
     
-    # Individual functions
-    "diffuse_Q_constant_prec",
-    "graphflood_core_cte_mannings",
+    # LisFlood kernels  
     "flow_route",
     "depth_update",
+    "init_LS_on_hw_from_constant_effective_prec",
+    "init_LS_on_hw_from_variable_effective_prec",
+    
+    # GraphFlood kernels
+    "diffuse_Q_constant_prec", 
+    "graphflood_core_cte_mannings",
     
     # Module names
     "gf_fields",
