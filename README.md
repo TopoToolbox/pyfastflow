@@ -43,8 +43,6 @@ TODO
 
 ## License
 
-MIT License - see LICENSE file for details.
-
 ## Authors
 
 Boris Gailleton - Géosciences Rennes - boris.gailleton@univ-rennes.fr
