@@ -436,10 +436,10 @@ def reroute_carve(rec, rec_, rec__, tag, tag_, saddlenode, outlet, change:ti.tem
 	rec__.copy_from(rec_)
 	
 	# Iterate until convergence
-	while change[None]:
-	# for i in range(math.ceil(math.log2(cte.NX*cte.NY))+1):
+	# while change[None]:
+	for i in range(math.ceil(math.log2(cte.NX*cte.NY))+1):
 		it += 1
-		change[None] = False
+		# change[None] = False
 		iteration_reroute_carve(tag, tag_, rec, rec_, change)
 
 	# Finalize the carving process

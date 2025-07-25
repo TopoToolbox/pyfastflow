@@ -64,7 +64,7 @@ dx = dem.cellsize
 router = pf.flow.FlowRouter(nx, ny, dx, boundary_mode = 'normal', boundaries = None, lakeflow = True, stochastic_receivers = True)
 router.set_z(dem.z.ravel())
 
-gf = pf.flood.Flooder(router, precipitation_rates = 50e-3/3600, manning=0.033, edge_slope = 0.01, dt_hydro = 5e-3, dt_hydro_ls = 2e-4)
+gf = pf.flood.Flooder(router, precipitation_rates = 50e-3/3600, manning=0.033, edge_slope = 0.01, dt_hydro = 5e-3, dt_hydro_ls = 1e-2)
 
 # gf.run_graphflood(1000)
 # hw = np.zeros_like(dem.z)
@@ -98,7 +98,7 @@ fig.show()
 it = 0
 while(True):
 	it+=1
-	if(it<5):
+	if(it<0):
 		ax.set_title('Graphlood'+str(it))
 		gf.run_graphflood(100)
 	else:

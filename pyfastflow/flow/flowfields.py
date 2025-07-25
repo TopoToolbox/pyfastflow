@@ -305,6 +305,30 @@ class FlowRouter:
 		# Merge accumulated values from working arrays back to primary array
 		dpr.fuse(self.Q, self.src, self.Q_, logn)
 
+	def accumulate_custom_donwstream(self, Acc:ti.template()):
+		"""
+		Acc needs to be accumulated to the OG value to accumulate
+		"""
+		# Calculate number of iterations needed (log₂ of grid size)
+		logn = math.ceil(math.log2(self.nx*self.ny))+1
+
+		# Initialize arrays for rake-compress algorithm
+		self.ndonors.fill(0)  # Reset donor counts
+		self.src.fill(0)      # Reset ping-pong state
+
+		# Build donor-receiver relationships from receiver array
+		dpr.rcv2donor(self.receivers, self.donors, self.ndonors)
+
+		# Rake-compress iterations for parallel tree accumulation
+		# Each iteration doubles the effective path length being compressed
+		for i in range(logn+1):
+			dpr.rake_compress_accum(self.donors, self.ndonors, Acc, self.src,
+			                   self.donors_, self.ndonors_, self.Q_, i)
+
+		# Final fuse step to consolidate results from ping-pong buffers
+		# Merge accumulated values from working arrays back to primary array
+		dpr.fuse(Acc, self.src, self.Q_, logn)
+
 
 	def accumulate_constant_Q_stochastic(self, value, area = True, N = 4):
 		"""
@@ -358,6 +382,12 @@ class FlowRouter:
 
 	def fill_z(self, epsilon=1e-4):
 		fl.topofill(self, epsilon=epsilon, custom_z = None)
+
+	def rec2rec_(self, second = False):
+
+		self.receivers_.copy_from(self.receivers)
+		if second:
+			self.receivers__.copy_from(self.receivers)
 
 	def get_Q(self):
 		"""

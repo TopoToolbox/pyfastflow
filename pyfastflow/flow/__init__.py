@@ -3,21 +3,25 @@ Flow algorithms submodule for FastFlow Taichi.
 
 Contains all flow routing algorithms and utilities:
 
-- constants: Compile-time parameters and grid configuration
 - neighbourer_flat: Vectorized grid navigation with boundary handling
 - receivers: Steepest descent receiver computation
 - downstream_propag: Parallel flow accumulation algorithms
 - lakeflow: Depression filling and carving algorithms
+- flowfields: FlowRouter class and field management
+- fill_topo: Topography filling and manipulation utilities
 - f32_i32_struct: Utility for lexicographic atomic operations
 - util_taichi: General Taichi utility functions
+- environment: System environment utilities
 
 Usage:
-    import fastflow_taichi as ff
+    import pyfastflow as pf
+    
+    # Create flow router
+    router = pf.flow.FlowRouter(nx=512, ny=512, dx=100.0)
     
     # Access individual modules
-    ff.flow.constants.NX
-    ff.flow.lakeflow.depression_counter(rec)
-    ff.flow.receivers.compute_receivers(z, rec, grad)
+    pf.flow.lakeflow.depression_counter(rec)
+    pf.flow.receivers.compute_receivers(z, rec, grad)
 
 Author: B.G.
 """

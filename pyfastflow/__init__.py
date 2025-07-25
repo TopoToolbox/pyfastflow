@@ -9,6 +9,8 @@ using Taichi for GPU acceleration. Implements parallel algorithms for:
 - Flow accumulation using rake-and-compress algorithms
 - Multiple boundary condition modes (open, periodic, custom)
 - 2D shallow water flow modeling (Flood)
+- Stream Power Law erosion and landscape evolution (Erodep)
+- Real-time 3D visualization and analysis tools (Visu)
 
 Usage:
     import pyfastflow as ff
@@ -22,6 +24,13 @@ Usage:
     
     # Access Flood for 2D shallow water modeling
     flooder = ff.flood.Flooder(router, precipitation_rates=10e-3/3600)
+    
+    # Access Erodep for landscape evolution
+    ff.erodep.SPL(router, alpha_, alpha__, Kr=1e-5)
+    
+    # Access Visu for 3D visualization
+    viewer = ff.visu.SurfaceViewer(terrain_data)
+    viewer.run()
 
 Author: B.G.
 """
@@ -31,12 +40,16 @@ __author__ = "B.G."
 
 # Import all submodules in alphabetical order
 from . import constants
+from . import erodep
 from . import flood
 from . import flow  
+from . import visu
 
 # Export all submodules
 __all__ = [
     "constants",
+    "erodep", 
     "flood",
-    "flow"
+    "flow",
+    "visu"
 ]

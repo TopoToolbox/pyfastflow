@@ -68,7 +68,6 @@ def topofill(flow_field, epsilon=1e-6, custom_z = None):
 		flow_field.z_.copy_from(flow_field.z)
 		flow_field.z__.copy_from(flow_field.z)
 		for it in range(math.ceil(math.log2(cte.NX*cte.NY))):
-			print(2**(it)*epsilon)  # Debug: print current increment
 			_topofill(flow_field.z, flow_field.z_, flow_field.receivers_, flow_field.receivers__, epsilon, it+1)
 		flow_field.z.copy_from(flow_field.z_)
 	else:
