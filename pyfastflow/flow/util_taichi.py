@@ -47,6 +47,12 @@ def add_B_to_weighted_A(array1: ti.template(), array2: ti.template(), weight:ti.
         array1[i] += array2[i]*weight
 
 @ti.kernel
+def weighted_mean_B_in_A(array1: ti.template(), array2: ti.template(), weight:ti.f32):
+
+    for i in array1:
+        array1[i] = array2[i]*weight + array1[i]*(1-weight)
+
+@ti.kernel
 def init_arange(array: ti.template()):
     """
     """

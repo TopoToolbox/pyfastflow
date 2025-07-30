@@ -14,6 +14,7 @@ import numpy as np
 import math
 from . import environment as env
 from .. import constants as cte
+from .. import general_algorithms as gena
 from . import downstream_propag as dpr
 from . import lakeflow as lf
 from . import util_taichi as ut
@@ -303,7 +304,7 @@ class FlowRouter:
 
 		# Final fuse step to consolidate results from ping-pong buffers
 		# Merge accumulated values from working arrays back to primary array
-		dpr.fuse(self.Q, self.src, self.Q_, logn)
+		gena.fuse(self.Q, self.src, self.Q_, logn)
 
 	def accumulate_custom_donwstream(self, Acc:ti.template()):
 		"""
@@ -327,7 +328,7 @@ class FlowRouter:
 
 		# Final fuse step to consolidate results from ping-pong buffers
 		# Merge accumulated values from working arrays back to primary array
-		dpr.fuse(Acc, self.src, self.Q_, logn)
+		gena.fuse(Acc, self.src, self.Q_, logn)
 
 
 	def accumulate_constant_Q_stochastic(self, value, area = True, N = 4):
@@ -372,7 +373,7 @@ class FlowRouter:
 
 			# Final fuse step to consolidate results from ping-pong buffers
 			# Merge accumulated values from working arrays back to primary array
-			dpr.fuse(self.Q, self.src, self.Q_, logn)
+			gena.fuse(self.Q, self.src, self.Q_, logn)
 
 			ut.add_B_to_weighted_A(self.z_, self.Q, 1./N)
 
@@ -380,7 +381,7 @@ class FlowRouter:
 
 
 
-	def fill_z(self, epsilon=1e-4):
+	def fill_z(self, epsilon=1e-3):
 		fl.topofill(self, epsilon=epsilon, custom_z = None)
 
 	def rec2rec_(self, second = False):

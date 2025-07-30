@@ -11,6 +11,7 @@ using Taichi for GPU acceleration. Implements parallel algorithms for:
 - 2D shallow water flow modeling (Flood)
 - Stream Power Law erosion and landscape evolution (Erodep)
 - Real-time 3D visualization and analysis tools (Visu)
+- General-purpose GPU algorithms (parallel scan, ping-pong buffers)
 
 Usage:
     import pyfastflow as ff
@@ -31,6 +32,9 @@ Usage:
     # Access Visu for 3D visualization
     viewer = ff.visu.SurfaceViewer(terrain_data)
     viewer.run()
+    
+    # Access general algorithms for parallel computing
+    ff.general_algorithms.inclusive_scan(input_arr, output_arr, work_arr, n)
 
 Author: B.G.
 """
@@ -42,7 +46,8 @@ __author__ = "B.G."
 from . import constants
 from . import erodep
 from . import flood
-from . import flow  
+from . import flow
+from . import general_algorithms
 from . import visu
 
 # Export all submodules
@@ -51,5 +56,6 @@ __all__ = [
     "erodep", 
     "flood",
     "flow",
+    "general_algorithms",
     "visu"
 ]

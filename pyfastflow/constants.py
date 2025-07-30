@@ -116,6 +116,16 @@ FROUDE_LIMIT = 1.0
 
 
 #########################################
+###### ERODEP CONSTANTS #################
+#########################################
+
+KD = 1e-2
+KR = 2e-5
+DT_SPL = 1e3
+MEXP = .45    # Drainage area exponent (m in SPL equation)
+NEXP = 1.     # Slope exponent (n in SPL equation) - currently unused
+
+#########################################
 ###### GENERAL CONSTANTS ################
 #########################################
 

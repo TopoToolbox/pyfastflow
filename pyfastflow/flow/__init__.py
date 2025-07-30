@@ -37,6 +37,7 @@ from .util_taichi import *
 from .flowfields import *
 from .fill_topo import *
 from .environment import *
+from .level_acc import *
 
 # Export all modules
 __all__ = [

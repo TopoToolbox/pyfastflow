@@ -48,6 +48,7 @@ Author: B.G.
 """
 
 from .SPL import *
+from .deposition import *
 
 # Export all functions and classes
 __all__ = [

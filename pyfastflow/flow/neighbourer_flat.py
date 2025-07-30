@@ -453,7 +453,7 @@ def neighbour_custom(i:ti.i32, tdir:ti.template()):
 		j = bottom_custom(i)
 	
 	res = -1
-	if validate_link_custom(i,tdir):
+	if validate_link_custom(i,tdir) and j>-1:
 		res = j
 		if(cte.boundaries[j] == 0):
 			res = -1

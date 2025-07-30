@@ -96,16 +96,23 @@ class Flooder:
 		self.dh = ti.field(ti.f32)
 		self.fb.dense(ti.i,(self.nx*self.ny)).place(self.dh)
 
+		self.nQ = ti.field(ti.f32)
+		self.fb.dense(ti.i,(self.nx*self.ny)).place(self.nQ)
+
 		# Finalize the flow field structure (allocates GPU memory)
 		self.snodetree = self.fb.finalize()
 
 		self.h.fill(0.)
 		self.dh.fill(0.)
+		self.nQ.fill(0.)
+		self.nQ_init = False
 
 		self.fb_LS = None
 		self.snodetree_LS = None
 		self.qx = None
 		self.qy = None
+
+		self.verbose = False
 
 
 		cte.PREC = precipitation_rates
@@ -116,7 +123,7 @@ class Flooder:
 		# cte.RAND_RCV = True
 
 
-	def run_graphflood(self, N=10):
+	def run_graphflood(self, N=10, N_stochastic = 4, N_diffuse = 0, temporal_filtering = 0.):
 		"""
 		Execute graphflood simulation workflow.
 		
@@ -130,8 +137,10 @@ class Flooder:
 		Args:
 			N (int): Number of iterations (currently not used, defaults to 10)
 		"""
-
 		for _ in range(N):
+
+			if(self.verbose):
+				print('Running iteration', _)
 
 			pf.flow.ut.add_B_to_A(self.router.z, self.h)
 
@@ -141,29 +150,34 @@ class Flooder:
 			# Handle flow routing through lakes and depressions
 			self.router.reroute_flow()
 
+			# fills with water
 			pf.flow.fill_z_add_delta(self.router.z,self.h,self.router.z_,self.router.receivers,self.router.receivers_,self.router.receivers__, epsilon=1e-3)
 			
-			self.router.accumulate_constant_Q_stochastic(cte.PREC, area = True, N=4)
+			# Accumulate with N stochastic routes if N_stochastic > 0else normal, accumulation
+			if(N_stochastic > 0):
+				self.router.accumulate_constant_Q_stochastic(cte.PREC, area = True, N=N_stochastic)
+			else:
+				self.router.accumulate_constant_Q(cte.PREC, area = True)
 
-			pf.flood.diffuse_Q_constant_prec(self.router.z, self.router.Q, self.router.Q_)
+			# Diffuse as multiple flow N times
+			for __ in range(N_diffuse):
+				pf.flood.diffuse_Q_constant_prec(self.router.z, self.router.Q, self.router.Q_)
 
+			# z is filled with h, I wanna remove the wxtra z
 			pf.flow.ut.add_B_to_weighted_A(self.router.z, self.h,-1.)
 
-# 
-			# Test 1
-			# Fill topography accounting for water depth
-			# pf.flow.fill_z_add_delta(self.router.z,self.h,self.router.z_,self.router.receivers,self.router.receivers_,self.router.receivers__, epsilon=1e-3)
 
-			# self.router.accumulate_constant_Q(cte.PREC, area = True)
+			if(temporal_filtering == 0.):
+				# Apply shallow water equations with Manning's friction
+				pf.flood.graphflood_core_cte_mannings(self.h,self.router.z,self.dh, self.router.receivers, self.router.Q)
+			else:
+				if(self.nQ_init == False):
+					self.nQ.copy_from(self.router.Q)
+				else:
+					pf.flow.ut.weighted_mean_B_in_A(self.nQ, self.router.Q, temporal_filtering)
 
-			# Diffuse discharge field to simulate multiple flow paths
-			# for i in range(5):
-			# 	pf.flood.diffuse_Q_constant_prec(self.router.z, self.router.Q, self.router.Q_)
+				pf.flood.graphflood_core_cte_mannings(self.h,self.router.z,self.dh, self.router.receivers, self.nQ)
 
-
-
-			# Apply shallow water equations with Manning's friction
-			pf.flood.graphflood_core_cte_mannings(self.h,self.router.z,self.dh, self.router.receivers, self.router.Q)
 
 
 	def run_LS(self, N=1000, input_mode = 'constant_prec', mode = None):

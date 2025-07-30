@@ -32,11 +32,7 @@ import numpy as np
 import pyfastflow as pf
 import math
 
-# Global constants for SPL computation
-# Note: These should be moved to constants module in future versions
-DT = 1e4      # Time step (years) - TEMPORARY CONSTANT FOR DEVELOPMENT
-MEXP = .45    # Drainage area exponent (m in SPL equation)
-NEXP = 1.     # Slope exponent (n in SPL equation) - currently unused
+
 
 
 @ti.kernel
@@ -61,7 +57,7 @@ def block_uplift(z:ti.template(), rate:ti.f32):
 	for i in z:
 		# Only apply uplift to interior nodes (not boundary outlets)
 		if(pf.flow.neighbourer_flat.can_leave_domain(i) == False):
-			z[i] += rate * DT  # Apply uplift over time step
+			z[i] += rate * pf.constants.DT_SPL  # Apply uplift over time step
 
 
 @ti.kernel
@@ -71,7 +67,7 @@ def ext_uplift_nobl(z:ti.template(), rate:ti.template()):
 	Author: B.G.
 	"""
 	for i in z:
-		z[i] += rate[i] * DT  # Apply uplift over time step
+		z[i] += rate[i] * pf.constants.DT_SPL  # Apply uplift over time step
 
 
 @ti.kernel
@@ -83,11 +79,12 @@ def ext_uplift_bl(z:ti.template(), rate:ti.template()):
 	for i in z:
 		# Only apply uplift to interior nodes (not boundary outlets)
 		if(pf.flow.neighbourer_flat.can_leave_domain(i) == False):
-			z[i] += rate[i] * DT  # Apply uplift over time step
+			z[i] += rate[i] * pf.constants.DT_SPL  # Apply uplift over time step
 
 
 @ti.kernel
-def init_erode_SPL(z:ti.template(), z_:ti.template(), z__:ti.template(), alpha_:ti.template(), alpha__:ti.template(), Q:ti.template(), Kr:ti.f32):
+def init_erode_SPL(z:ti.template(), z_:ti.template(), z__:ti.template(), 
+	alpha_:ti.template(), alpha__:ti.template(), Q:ti.template()):
 	"""
 	Initialize fields for implicit Stream Power Law erosion computation.
 	
@@ -105,7 +102,6 @@ def init_erode_SPL(z:ti.template(), z_:ti.template(), z__:ti.template(), alpha_:
 		alpha_ (ti.template): Primary erosion coefficient field
 		alpha__ (ti.template): Secondary erosion coefficient field
 		Q (ti.template): Discharge field (proxy for drainage area)
-		Kr (ti.f32): Base erodibility coefficient (m^(1-2m)/year)
 	
 	Note:
 		The implicit formulation: z_new = (z_old + K*z_downstream)/(1+K)
@@ -118,7 +114,7 @@ def init_erode_SPL(z:ti.template(), z_:ti.template(), z__:ti.template(), alpha_:
 			continue
 		# Compute dimensionless erosion coefficient
 		# K = erodibility * discharge^m * timestep / grid_spacing
-		K = Kr * Q[i]**MEXP * DT / pf.constants.DX
+		K = pf.constants.KR * Q[i]**pf.constants.MEXP * pf.constants.DT_SPL / pf.constants.DX
 		
 		# Implicit scheme coefficients
 		alpha_[i] = K / (1 + K)      # Erosion weight factor
@@ -177,7 +173,7 @@ def iteration_erode_SPL(z_:ti.template(), z__:ti.template(),
 
 
 
-def SPL(router, alpha_, alpha__, Kr):
+def SPL(router, alpha_, alpha__):
 	"""
 	Execute complete Stream Power Law erosion for one time step.
 	
@@ -193,7 +189,6 @@ def SPL(router, alpha_, alpha__, Kr):
 		router: FastFlow router object containing topography and flow routing
 		alpha_ (ti.field): Primary erosion coefficient field (ti.f32, shape=(N,))
 		alpha__ (ti.field): Secondary erosion coefficient field (ti.f32, shape=(N,))
-		Kr (float): Base erodibility coefficient (m^(1-2m)/year)
 	
 	Note:
 		The router object is modified in-place, with final eroded topography
@@ -215,7 +210,7 @@ def SPL(router, alpha_, alpha__, Kr):
 	log2 = math.ceil(math.log2(router.nx * router.ny))
 
 	# Initialize erosion coefficients and adjusted elevations
-	init_erode_SPL(router.z, router.z_, router.z__, alpha_, alpha__, router.Q, Kr)
+	init_erode_SPL(router.z, router.z_, router.z__, alpha_, alpha__, router.Q)
 	
 	# Setup receiver chains for efficient parallel traversal
 	router.rec2rec_(second=True)
@@ -255,52 +250,51 @@ def erosion_to_source(z:ti.template(), z_:ti.template(), Qs:ti.template()):
 	for i in z:
 		# Calculate eroded volume per cell
 		# Volume = elevation_change * cell_area
-		Qs[i] = (z[i] - z_[i]) * pf.constants.DX**2/DT
+		Qs[i] = (z[i] - z_[i]) * pf.constants.DX**2/pf.constants.DT_SPL
 
-@ti.kernel
-def iterate_deposition(z_:ti.template(), Qs:ti.template(), Q:ti.template(), kd:ti.template()):
-	"""
-	Apply sediment deposition to topography based on transport capacity.
+# @ti.kernel
+# def iterate_deposition(z_:ti.template(), Qs:ti.template(), Q:ti.template()):
+# 	"""
+# 	Apply sediment deposition to topography based on transport capacity.
 	
-	Calculates and applies deposition at each node based on local sediment flux
-	and transport capacity. Deposition occurs when sediment supply exceeds the
-	transport capacity of the flow.
+# 	Calculates and applies deposition at each node based on local sediment flux
+# 	and transport capacity. Deposition occurs when sediment supply exceeds the
+# 	transport capacity of the flow.
 	
-	The deposition amount is limited by:
-	1. Transport capacity: kd * Qs[i]/Q[i] (capacity-limited deposition)
-	2. Available sediment: Qs[i]/(DX²) (supply-limited deposition)
-	3. Non-negative constraint (no negative deposition)
+# 	The deposition amount is limited by:
+# 	1. Transport capacity: kd * Qs[i]/Q[i] (capacity-limited deposition)
+# 	2. Available sediment: Qs[i]/(DX²) (supply-limited deposition)
+# 	3. Non-negative constraint (no negative deposition)
 	
-	Args:
-		z_ (ti.template): Working elevation field to be modified by deposition
-		Qs (ti.template): Sediment flux field (m³/timestep)
-		Q (ti.template): Water discharge field (m³/s, proxy for transport capacity)
-		kd (ti.template): Deposition coefficient field (dimensionless)
+# 	Args:
+# 		z_ (ti.template): Working elevation field to be modified by deposition
+# 		Qs (ti.template): Sediment flux field (m³/timestep)
+# 		Q (ti.template): Water discharge field (m³/s, proxy for transport capacity)
 	
-	Note:
-		Deposition is applied only to interior nodes (boundary outlets excluded).
-		The formula combines transport capacity and sediment availability constraints.
+# 	Note:
+# 		Deposition is applied only to interior nodes (boundary outlets excluded).
+# 		The formula combines transport capacity and sediment availability constraints.
 	
-	Author: B.G.
-	"""
-	for i in z_:
-		if(pf.flow.neighbourer_flat.can_leave_domain(i)):
-			continue
+# 	Author: B.G.
+# 	"""
+# 	for i in z_:
+# 		if(pf.flow.neighbourer_flat.can_leave_domain(i)):
+# 			continue
 		
-		# Calculate deposition amount based on transport capacity and sediment flux
-		# Limited by both transport capacity and available sediment
-		deposition = ti.math.max(
-			ti.math.min(
-				kd * Qs[i]/Q[i],        # Transport capacity limit
-				Qs[i]/(pf.constants.DX**2)  # Available sediment limit
-			), 
-			0.  # Non-negative constraint
-		)
-		z_[i] += deposition * DT
+# 		# Calculate deposition amount based on transport capacity and sediment flux
+# 		# Limited by both transport capacity and available sediment
+# 		deposition = ti.math.max(
+# 			ti.math.min(
+# 				pf.constants.KD * Qs[i]/Q[i],        # Transport capacity limit
+# 				Qs[i]/(pf.constants.DX**2)  # Available sediment limit
+# 			), 
+# 			0.  # Non-negative constraint
+# 		)
+# 		z_[i] += deposition * pf.constants.DT_SPL
 
 
 
-def SPL_transport(router, alpha_, alpha__, Qs, kr, kd, Nit = 1):
+def SPL_transport_implicit(router, alpha_, alpha__, Qs, Nit = 5):
 	"""
 	Execute complete transport-limited SPL model with erosion and deposition.
 	
@@ -321,8 +315,6 @@ def SPL_transport(router, alpha_, alpha__, Qs, kr, kd, Nit = 1):
 		alpha_ (ti.field): Primary erosion coefficient field (ti.f32)
 		alpha__ (ti.field): Secondary erosion coefficient field (ti.f32)
 		Qs (ti.field): Sediment flux field (m³/timestep)
-		kr (float): Base erodibility coefficient (m^(1-2m)/year)
-		kd (float or ti.field): Deposition coefficient (dimensionless)
 		Nit (int): Number of erosion-transport-deposition iterations (default: 1)
 	
 	Note:
@@ -343,12 +335,12 @@ def SPL_transport(router, alpha_, alpha__, Qs, kr, kd, Nit = 1):
 	log2 = math.ceil(math.log2(router.nx * router.ny))
 
 	# Initialize erosion coefficients and adjusted elevations once per time step
-	init_erode_SPL(router.z, router.z_, router.z__, alpha_, alpha__, router.Q, kr)
+	init_erode_SPL(router.z, router.z_, router.z__, alpha_, alpha__, router.Q)
 
 	# Main erosion-transport-deposition iteration loop
 	change_max = 10000
 	it = 0
-	while(change_max > 1e-3):
+	while(change_max > 1e-3 or it<Nit):
 	# for iteration in range(Nit):
 		# Setup receiver chains for efficient parallel traversal
 		cp_Z = router.z_.to_numpy()
@@ -364,15 +356,95 @@ def SPL_transport(router, alpha_, alpha__, Qs, kr, kd, Nit = 1):
 		# Convert erosion volumes to sediment sources
 		erosion_to_source(router.z, router.z_, Qs)
 
-		# Route sediment downstream along flow paths
-		# This accumulates sediment flux at each node
-		router.accumulate_custom_donwstream(Qs)
+		# # Route sediment downstream along flow paths
+		# # This accumulates sediment flux at each node
+		# router.accumulate_custom_donwstream(Qs)
 
-		# Apply deposition based on transport capacity
-		iterate_deposition(router.z_, Qs, router.Q, kd)
+
+		# # Apply deposition based on transport capacity
+		# iterate_deposition(router.z_, Qs, router.Q)
+		router.rec2rec_(second=True)
+		for _ in range(log2):
+			pf.erodep.iterate_deposition_ptr_jmp_cte_kd(router.z_, Qs, router.Q, router.receivers_, router.receivers__)
+
+
+
 		change_max = np.mean(np.abs(cp_Z - router.z_.to_numpy()))
 		# print(change_max,end=' | ')
 		it+=1
-	print("Done in", it)
+	print("Done in", it, 'change_max =', change_max)
+	# Copy final landscape state back to main elevation field
+	router.z.copy_from(router.z_)
+
+def SPL_transport(router, alpha_, alpha__, Qs, Nit = 5):
+	"""
+	Execute complete transport-limited SPL model with erosion and deposition.
+	
+	Implements the full transport-limited Stream Power Law model that couples
+	erosion, sediment transport, and deposition processes. The model iterates
+	between erosion computation, sediment flux routing, and deposition to
+	achieve equilibrium between erosion and transport capacity.
+	
+	Workflow for each iteration:
+	1. Initialize erosion coefficients based on discharge
+	2. Compute erosion using implicit SPL solver
+	3. Convert erosion volumes to sediment sources
+	4. Route sediment downstream along flow paths
+	5. Apply deposition where transport capacity is exceeded
+	
+	Args:
+		router: FastFlow router object with topography and flow routing
+		alpha_ (ti.field): Primary erosion coefficient field (ti.f32)
+		alpha__ (ti.field): Secondary erosion coefficient field (ti.f32)
+		Qs (ti.field): Sediment flux field (m³/timestep)
+		Nit (int): Number of erosion-transport-deposition iterations (default: 1)
+	
+	Note:
+		Multiple iterations (Nit > 1) allow the system to approach equilibrium
+		between erosion and deposition within a single time step. This is
+		particularly important for transport-limited conditions.
+	
+	Example:
+		# Setup sediment flux field
+		Qs = ti.field(ti.f32, shape=(nx*ny,))
+		
+		# Run transport-limited erosion
+		SPL_transport(router, alpha_, alpha__, Qs, kr=1e-5, kd=1e-2, Nit=5)
+	
+	Author: B.G.
+	"""
+	# Calculate number of iterations for erosion solver
+	log2 = math.ceil(math.log2(router.nx * router.ny))
+
+	# Initialize erosion coefficients and adjusted elevations once per time step
+	init_erode_SPL(router.z, router.z_, router.z__, alpha_, alpha__, router.Q)
+
+	# Main erosion-transport-deposition iteration loop
+
+	# for iteration in range(Nit):
+	# Setup receiver chains for efficient parallel traversal
+	router.rec2rec_(second=True)
+	
+	# Perform iterative erosion computation
+	# Each iteration propagates erosion effects one step further upstream
+	for _ in range(log2):
+		iteration_erode_SPL(router.z_, router.z__, 
+						   router.receivers_, router.receivers__, 
+						   alpha_, alpha__)
+
+	# Convert erosion volumes to sediment sources
+	erosion_to_source(router.z, router.z_, Qs)
+
+	# # Route sediment downstream along flow paths
+	# # This accumulates sediment flux at each node
+	# router.accumulate_custom_donwstream(Qs)
+
+
+	# # Apply deposition based on transport capacity
+	# iterate_deposition(router.z_, Qs, router.Q)
+	router.rec2rec_(second=True)
+	for _ in range(log2):
+		pf.erodep.iterate_deposition_ptr_jmp_cte_kd(router.z_, Qs, router.Q, router.receivers_, router.receivers__)
+
 	# Copy final landscape state back to main elevation field
 	router.z.copy_from(router.z_)
