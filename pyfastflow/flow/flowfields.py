@@ -20,6 +20,7 @@ from . import lakeflow as lf
 import pyfastflow.general_algorithms.util_taichi as ut
 from . import fill_topo as fl
 from . import receivers as rcv
+import pyfastflow as pf
 
 
 
@@ -35,159 +36,46 @@ class FlowRouter:
 	Author: B.G.
 	"""
 
-	def __init__(self, lakeflow = True):
+	def __init__(self, grid, lakeflow = True):
 		"""
 		Initialize FlowRouter with grid parameters and boundary conditions.
 		
 		Args:
-			nx: Number of grid columns
-			ny: Number of grid rows
-			dx: Grid spacing
-			boundary_mode: 'normal', 'periodic_EW', 'periodic_NS', or 'custom'
-			boundaries: Custom boundary array (if boundary_mode='custom')
+			grid: the GridField dobject of the assiciated grid
 			lakeflow: Enable lake flow processing for depression handling
 			
 		Author: B.G.
 		"""
 
-				
+		self.grid = grid
+
 		# Store configuration parameters
-		self.boundary_mode = boundary_mode  # Boundary condition type
-		self.boundaries = boundaries  # Custom boundary array (if applicable)
 		self.lakeflow = lakeflow  # Enable depression handling
 
-		# Initialize Taichi field builders for memory management
-		self.fb_flow = ti.FieldsBuilder()  # Builder for flow computation fields
-		self.fb_lake = None  # Builder for lake flow fields
-		self.snodetree_flow = None  # Will hold finalized flow field structure
-		self.snodetree_lake = None  # Will hold finalized lake field structure
-
-		# ====== CORE FLOW COMPUTATION FIELDS ======
-		# These fields are required for all flow routing operations
-		
-		# Elevation field - input topography
-		self.z = ti.field(ti.f32)
-		self.fb_flow.dense(ti.i,(nx*ny)).place(self.z)
-		
 		# Flow accumulation fields (primary and ping-pong buffer)
-		self.Q = ti.field(ti.f32)  # Primary accumulation values
-		self.fb_flow.dense(ti.i,(nx*ny)).place(self.Q)
-		self.Q_ = ti.field(ti.f32)  # Alternate buffer for rake-compress
-		self.fb_flow.dense(ti.i,(nx*ny)).place(self.Q_)
-		
-		# Gradient field - stores steepest descent gradients
-		self.gradient = ti.field(ti.f32)
-		self.fb_flow.dense(ti.i,(nx*ny)).place(self.gradient)
-
-		# ====== FLOW GRAPH FIELDS ======
-		# These fields represent the drainage network structure
+		self.Q = pf.pool.taipool.get_tpfield(dtype = ti.f32, shape = (self.nx*self.ny) )
 		
 		# Receiver field - downstream flow direction for each node
-		self.receivers = ti.field(ti.i32)
-		self.fb_flow.dense(ti.i,(nx*ny)).place(self.receivers)
-		
-		# Ping-pong state tracking for rake-compress algorithm
-		self.src = ti.field(ti.i32)  # Tracks which buffer to use per node
-		self.fb_flow.dense(ti.i,(nx*ny)).place(self.src)
-		
-		# Donor counting fields (primary and alternate for ping-pong)
-		self.ndonors = ti.field(ti.i32)  # Number of upstream donors per node
-		self.fb_flow.dense(ti.i,(nx*ny)).place(self.ndonors)
-		self.ndonors_ = ti.field(ti.i32)  # Alternate buffer for ping-pong
-		self.fb_flow.dense(ti.i,(nx*ny)).place(self.ndonors_)
-
-		# Donor list fields (each node can have up to 4 donors)
-		self.donors = ti.field(ti.i32)  # Primary donor lists (4 per node)
-		self.fb_flow.dense(ti.i, (nx*ny*4)).place(self.donors)
-		self.donors_ = ti.field(ti.i32)  # Alternate donor lists for ping-pong
-		self.fb_flow.dense(ti.i, (nx*ny*4)).place(self.donors_)
-
-		# Finalize the flow field structure (allocates GPU memory)
-		self.snodetree_flow = self.fb_flow.finalize()
-
-		# Initialize gradient field to zero
-		self.gradient.fill(0.)
-
-		# ====== OPTIONAL LAKE FLOW FIELDS ======
-		# These fields are only allocated if depression handling is enabled
-		if self.lakeflow:
-
-			self.fb_lake = ti.FieldsBuilder()
-
-			# Modified elevation field for lake outlet computation
-			self.z_ = ti.field(ti.f32)
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.z_)
-			self.z__ = ti.field(ti.f32)
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.z__)
-
-			# Additional receiver arrays for lake flow processing
-			self.receivers_ = ti.field(ti.i32)  # Temporary receiver storage
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.receivers_)
-			self.receivers__ = ti.field(ti.i32)  # Second temporary receiver array
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.receivers__)
-
-			# Basin identification fields
-			self.bid = ti.field(ti.i32)  # Basin ID for each node
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.bid)
-			self.basin_saddlenode = ti.field(ti.i32)  # Saddle node per basin
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.basin_saddlenode)
-
-			# Packed saddle and outlet information (uses f32+i32 packing)
-			self.outlet = ti.field(ti.i64)  # Packed outlet info per basin
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.outlet)
-			self.basin_saddle = ti.field(ti.i64)  # Packed saddle info per basin
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.basin_saddle)
-
-			# Border detection and carving algorithm fields
-			self.is_border = ti.field(ti.u1)  # Marks basin border nodes
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.is_border)
-			self.tag = ti.field(ti.u1)  # Primary tagging for carving
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.tag)
-			self.tag_ = ti.field(ti.u1)  # Alternate tagging for carving
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.tag_)
-			self.rerouted = ti.field(ti.u1)  # Keep track of rerouted nodes
-			self.fb_lake.dense(ti.i,(nx*ny)).place(self.rerouted)
-
-			# Finalize lake flow field structure
-			self.snodetree_lake = self.fb_lake.finalize()
-
-			# Convergence flag for iterative algorithms (single scalar)
-			self.change = ti.field(ti.u1, shape = ())
+		self.receivers = pf.pool.taipool.get_tpfield(dtype = ti.i32, shape = (self.nx*self.ny) )
 
 		
 
-		
+	@property
+	def nx(self):
+		return self.grid.nx
 
+	@property
+	def ny(self):
+		return self.grid.ny
 
-	def free(self):
-		"""
-		Free allocated GPU memory and destroy field structures.
-		
-		Properly cleans up all allocated Taichi fields to prevent memory leaks.
-		Should be called when the FlowRouter is no longer needed.
-		
-		Author: B.G.
-		"""
-		# Free core flow computation fields
-		self.snodetree_flow.destroy()
-		
-		# Free lake flow fields if they were allocated
-		if(self.lakeflow):
-			self.snodetree_lake.destroy()
+	@property
+	def dx(self):
+		return self.grid.dx
 
-	def set_z(self, z):
-		"""
-		Set elevation data from numpy array.
-		
-		Converts 2D numpy elevation array to 1D Taichi field format.
-		Automatically handles type conversion to float32.
-		
-		Args:
-			z: 2D numpy array of elevation values (ny, nx)
-			
-		Author: B.G.
-		"""
-		self.z.from_numpy(z.ravel().astype(np.float32))
+	@property
+	def rshp(self):
+		return self.grid.rshp
+
 
 	def compute_receivers(self):
 		"""
@@ -199,9 +87,9 @@ class FlowRouter:
 		
 		Author: B.G.
 		"""
-		rcv.compute_receivers(self.z, self.receivers, self.gradient)
+		rcv.compute_receivers(self.grid.z, self.receivers)
 
-	def recompute_receivers_ignore_rerouted(self):
+	def compute_stochastic_receivers(self):
 		"""
 		Compute steepest descent receivers for all grid nodes.
 		
@@ -211,7 +99,7 @@ class FlowRouter:
 		
 		Author: B.G.
 		"""
-		rcv.compute_receivers_ignore_rerouted(self.z, self.receivers, self.gradient, self.rerouted)
+		rcv.compute_receivers_stochastic(self.grid.z, self.receivers)
 
 	def reroute_flow(self, carve = True):
 		"""
@@ -234,10 +122,37 @@ class FlowRouter:
 		if(self.lakeflow == False):
 			raise RuntimeError('Flow field not compiled for lakeflow')
 
+		# Querying fields from the pool
+		bid              = pf.pool.taipool.get_tpfield(dtype = ti.i32, shape = (self.nx*self.ny) )
+		receivers_       = pf.pool.taipool.get_tpfield(dtype = ti.i32, shape = (self.nx*self.ny) )
+		receivers__      = pf.pool.taipool.get_tpfield(dtype = ti.i32, shape = (self.nx*self.ny) )
+		z_               = pf.pool.taipool.get_tpfield(dtype = ti.f32, shape = (self.nx*self.ny) )
+		is_border        = pf.pool.taipool.get_tpfield(dtype = ti.u1,  shape = (self.nx*self.ny) )
+		outlet           = pf.pool.taipool.get_tpfield(dtype = ti.i64, shape = (self.nx*self.ny) )
+		basin_saddle     = pf.pool.taipool.get_tpfield(dtype = ti.i64, shape = (self.nx*self.ny) )
+		basin_saddlenode = pf.pool.taipool.get_tpfield(dtype = ti.i32, shape = (self.nx*self.ny) )
+		tag              = pf.pool.taipool.get_tpfield(dtype = ti.u1,  shape = (self.nx*self.ny) )
+		tag_             = pf.pool.taipool.get_tpfield(dtype = ti.u1,  shape = (self.nx*self.ny) )
+		change 			 = pf.pool.taipool.get_tpfield(dtype = ti.i32, shape =        ()         )
+		rerouted         = pf.pool.taipool.get_tpfield(dtype = ti.u1,  shape = (self.nx*self.ny) )
+
 		# Call the main lake flow routing algorithm
-		lf.reroute_flow(self.bid, self.receivers, self.receivers_, self.receivers__,
-        self.z, self.z_, self.is_border, self.outlet, self.basin_saddle, 
-        self.basin_saddlenode, self.tag, self.tag_, self.change, self.rerouted, carve = carve)
+		lf.reroute_flow(bid, self.receivers, receivers_, receivers__,
+        self.grid.z, z_, is_border, outlet, basin_saddle, 
+        basin_saddlenode, tag, tag_, change, rerouted, carve = carve)
+
+        bid.release()
+		receivers_.release()
+		receivers__.release()
+		z_.release()
+		is_border.release()
+		outlet.release()
+		basin_saddle.release()
+		basin_saddlenode.release()
+		tag.release()
+		tag_.release()
+		change.release()
+		rerouted.release()
 
 	def accumulate_constant_Q(self, value, area = True):
 		"""
@@ -259,49 +174,83 @@ class FlowRouter:
 		# Calculate number of iterations needed (log₂ of grid size)
 		logn = math.ceil(math.log2(self.nx*self.ny))+1
 
+		# Get temporary fields from pool for rake-compress algorithm
+		ndonors  = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
+		donors   = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny*4))
+		src      = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
+		donors_  = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny*4))
+		ndonors_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
+		Q_       = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx*self.ny))
+
 		# Initialize arrays for rake-compress algorithm
-		self.ndonors.fill(0)  # Reset donor counts
-		self.src.fill(0)      # Reset ping-pong state
+		ndonors.fill(0)  # Reset donor counts
+		src.fill(0)      # Reset ping-pong state
 		
 		# Initialize flow values (multiply by area if requested)
 		self.Q.fill(value*(cte.DX * cte.DX if area else 1.))
 		
 		# Build donor-receiver relationships from receiver array
-		dpr.rcv2donor(self.receivers, self.donors, self.ndonors)
+		dpr.rcv2donor(self.receivers, donors, ndonors)
 
 		# Rake-compress iterations for parallel tree accumulation
 		# Each iteration doubles the effective path length being compressed
 		for i in range(logn+1):
-			dpr.rake_compress_accum(self.donors, self.ndonors, self.Q, self.src,
-			                   self.donors_, self.ndonors_, self.Q_, i)
+			dpr.rake_compress_accum(donors, ndonors, self.Q, src,
+			                   donors_, ndonors_, Q_, i)
 
 		# Final fuse step to consolidate results from ping-pong buffers
 		# Merge accumulated values from working arrays back to primary array
-		gena.fuse(self.Q, self.src, self.Q_, logn)
+		gena.fuse(self.Q, src, Q_, logn)
+
+		# Release all temporary fields back to pool
+		ndonors.release()
+		donors.release()
+		src.release()
+		donors_.release()
+		ndonors_.release()
+		Q_.release()
 
 	def accumulate_custom_donwstream(self, Acc:ti.template()):
 		"""
 		Acc needs to be accumulated to the OG value to accumulate
+		
+		Author: B.G.
 		"""
 		# Calculate number of iterations needed (log₂ of grid size)
 		logn = math.ceil(math.log2(self.nx*self.ny))+1
 
+		# Get temporary fields from pool for rake-compress algorithm
+		ndonors    = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
+		donors     = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny*4))
+		src        = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
+		donors_    = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny*4))
+		ndonors_   = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
+		Q_         = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx*self.ny))
+
 		# Initialize arrays for rake-compress algorithm
-		self.ndonors.fill(0)  # Reset donor counts
-		self.src.fill(0)      # Reset ping-pong state
+		ndonors.fill(0)  # Reset donor counts
+		src.fill(0)      # Reset ping-pong state
 
 		# Build donor-receiver relationships from receiver array
-		dpr.rcv2donor(self.receivers, self.donors, self.ndonors)
+		dpr.rcv2donor(self.receivers, donors, ndonors)
 
 		# Rake-compress iterations for parallel tree accumulation
 		# Each iteration doubles the effective path length being compressed
 		for i in range(logn+1):
-			dpr.rake_compress_accum(self.donors, self.ndonors, Acc, self.src,
-			                   self.donors_, self.ndonors_, self.Q_, i)
+			dpr.rake_compress_accum(donors, ndonors, Acc, src,
+			                   donors_, ndonors_, Q_, i)
 
 		# Final fuse step to consolidate results from ping-pong buffers
 		# Merge accumulated values from working arrays back to primary array
-		gena.fuse(Acc, self.src, self.Q_, logn)
+		gena.fuse(Acc, src, Q_, logn)
+
+		# Release all temporary fields back to pool
+		ndonors.release()
+		donors.release()
+		src.release()
+		donors_.release()
+		ndonors_.release()
+		Q_.release()
 
 
 	def accumulate_constant_Q_stochastic(self, value, area = True, N = 4):
@@ -315,53 +264,77 @@ class FlowRouter:
 			value: Constant flow value to accumulate at each node
 			area: If True, multiply by grid cell area (dx²) for area-based flow
 			      If False, use raw value for unit-based flow
+			N: Number of stochastic iterations
 			
 		Note:
 			Results are stored in self.Q and can be accessed via get_Q()
 			
 		Author: B.G.
 		"""
-		self.z_.fill(0.)
+		# Get temporary accumulation field
+		fullQ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx*self.ny))
+		fullQ.fill(0.)
 
 		# Calculate number of iterations needed (log₂ of grid size)
 		logn = math.ceil(math.log2(self.nx*self.ny))+1
+		
+		# Get temporary fields from pool for rake-compress algorithm
+		ndonors  = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
+		donors   = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny*4))
+		src      = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
+		donors_  = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny*4))
+		ndonors_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
+		Q_       = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx*self.ny))
+
+
 		for __ in range(N):
-			self.compute_receivers()
+			self.compute_stochastic_receivers()
 
 			# Initialize arrays for rake-compress algorithm
-			self.ndonors.fill(0)  # Reset donor counts
-			self.src.fill(0)      # Reset ping-pong state
+			ndonors.fill(0)  # Reset donor counts
+			src.fill(0)      # Reset ping-pong state
 			
 			# Initialize flow values (multiply by area if requested)
 			self.Q.fill(value*(cte.DX * cte.DX if area else 1.))
 			
 			# Build donor-receiver relationships from receiver array
-			dpr.rcv2donor(self.receivers, self.donors, self.ndonors)
+			dpr.rcv2donor(self.receivers, donors, ndonors)
 
 			# Rake-compress iterations for parallel tree accumulation
 			# Each iteration doubles the effective path length being compressed
 			for i in range(logn+1):
-				dpr.rake_compress_accum(self.donors, self.ndonors, self.Q, self.src,
-				                   self.donors_, self.ndonors_, self.Q_, i)
+				dpr.rake_compress_accum(donors, ndonors, self.Q, src,
+				                   donors_, ndonors_, Q_, i)
 
 			# Final fuse step to consolidate results from ping-pong buffers
 			# Merge accumulated values from working arrays back to primary array
-			gena.fuse(self.Q, self.src, self.Q_, logn)
+			gena.fuse(self.Q, src, Q_, logn)
 
-			ut.add_B_to_weighted_A(self.z_, self.Q, 1./N)
+			ut.add_B_to_weighted_A(fullQ, self.Q, 1./N)
 
-		self.Q.copy_from(self.z_)
+		# Release temporary fields for this iteration
+		ndonors.release()
+		donors.release()
+		src.release()
+		donors_.release()
+		ndonors_.release()
+		Q_.release()
+
+		self.Q.copy_from(fullQ)
+		fullQ.release()
 
 
 
 	def fill_z(self, epsilon=1e-3):
+		"""
+		Fill topographic depressions to ensure proper flow routing.
+		
+		Args:
+			epsilon: Small elevation increment for depression filling
+			
+		Author: B.G.
+		"""
 		fl.topofill(self, epsilon=epsilon, custom_z = None)
-
-	def rec2rec_(self, second = False):
-
-		self.receivers_.copy_from(self.receivers)
-		if second:
-			self.receivers__.copy_from(self.receivers)
 
 	def get_Q(self):
 		"""
@@ -377,11 +350,52 @@ class FlowRouter:
 
 	def get_Z(self):
 		"""
-		Get flow accumulation results as 2D numpy array.
+		Get elevation data as 2D numpy array.
 		
 		Returns:
-			numpy.ndarray: 2D array of flow accumulation values (ny, nx)
+			numpy.ndarray: 2D array of elevation values (ny, nx)
 			
 		Author: B.G.
 		"""
-		return self.z.to_numpy().reshape(self.rshp)
+		return self.grid.z.to_numpy().reshape(self.rshp)
+
+	def get_receivers(self):
+		"""
+		Get receiver data as 2D numpy array.
+		
+		Returns:
+			numpy.ndarray: 2D array of receiver indices (ny, nx)
+			
+		Author: B.G.
+		"""
+		return self.receivers.to_numpy().reshape(self.rshp)
+
+	def destroy(self):
+		"""
+		Release all pooled fields and free GPU memory.
+		
+		Should be called when finished with the FlowRouter to ensure
+		proper cleanup of GPU resources. After calling this method,
+		the FlowRouter should not be used.
+		
+		Author: B.G.
+		"""
+		# Release core fields back to pool
+		if hasattr(self, 'Q') and self.Q is not None:
+			self.Q.release()
+			self.Q = None
+			
+		if hasattr(self, 'receivers') and self.receivers is not None:
+			self.receivers.release() 
+			self.receivers = None
+
+	def __del__(self):
+		"""
+		Destructor - automatically release fields when object is deleted.
+		
+		Author: B.G.
+		"""
+		try:
+			self.destroy()
+		except:
+			pass  # Ignore errors during destruction

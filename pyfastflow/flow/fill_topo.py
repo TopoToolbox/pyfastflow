@@ -11,6 +11,7 @@ import taichi as ti
 import math
 from .. import constants as cte
 import pyfastflow.general_algorithms.util_taichi as ut
+import pyfastflow as pf
 
 
 @ti.kernel
@@ -45,7 +46,7 @@ def _topofill(z:ti.template(), z_:ti.template(), rec_:ti.template(), rec__:ti.te
 		rec_[i] = rec__[i]
 
 
-def topofill(flow_field, epsilon=1e-6, custom_z = None):
+def topofill(flow_field, epsilon=1e-3, custom_z = None):
 	"""
 	Fill depressions using topographic filling algorithm.
 	
@@ -59,22 +60,27 @@ def topofill(flow_field, epsilon=1e-6, custom_z = None):
 		custom_z: Optional custom elevation field for output (default: None)
 	"""
 	# Initialize receiver working arrays
-	flow_field.receivers_.copy_from(flow_field.receivers)
-	flow_field.receivers__.copy_from(flow_field.receivers)
+	receivers_  = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
+	receivers__ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
+	z_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx*self.ny))
+	z__ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx*self.ny))
+	receivers_.copy_from(flow_field.receivers)
+	receivers__.copy_from(flow_field.receivers)
 	
+
 	# Process with internal elevation fields or custom output
 	if(custom_z is None):
 		# Use internal elevation buffers
-		flow_field.z_.copy_from(flow_field.z)
-		flow_field.z__.copy_from(flow_field.z)
+		z_.copy_from(flow_field.grid.z)
+		z__.copy_from(flow_field.grid.z)
 		for it in range(math.ceil(math.log2(cte.NX*cte.NY))):
-			_topofill(flow_field.z, flow_field.z_, flow_field.receivers_, flow_field.receivers__, epsilon, it+1)
-		flow_field.z.copy_from(flow_field.z_)
+			_topofill(flow_field.grid.z, flow_field.grid.z_, flow_field.receivers_, flow_field.receivers__, epsilon, it+1)
+		flow_field.grid.z.copy_from(flow_field.grid.z_)
 	else:
 		# Use custom elevation field for output
-		custom_z.copy_from(flow_field.z)
+		custom_z.copy_from(flow_field.grid.z)
 		for it in range(math.ceil(math.log2(cte.NX*cte.NY))):
-			_topofill(flow_field.z, custom_z, flow_field.receivers_, flow_field.receivers__, epsilon, it+1)
+			_topofill(flow_field.grid.z, custom_z, flow_field.receivers_, flow_field.receivers__, epsilon, it+1)
 
 
 @ti.kernel
@@ -95,7 +101,7 @@ def _apply_fill_z_add_delta(z:ti.template(), h:ti.template(), z_:ti.template()):
 		h[i]+= dh          # Add difference to height field
 		z[i]=z_[i]         # Update elevation with filled value
 
-def fill_z_add_delta(zh,h,z_,receivers,receivers_,receivers__, epsilon=1e-4):
+def fill_z_add_delta(zh,h,z_,receivers,receivers_,receivers__, epsilon=1e-3):
 	"""
 	Fill elevations and adds height adjustments to ext. field.
 
