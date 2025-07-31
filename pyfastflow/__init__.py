@@ -49,6 +49,7 @@ from . import flood
 from . import flow
 from . import general_algorithms
 from . import visu
+from . import pool
 
 # Export all submodules
 __all__ = [
