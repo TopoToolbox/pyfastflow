@@ -17,7 +17,7 @@ from .. import constants as cte
 from .. import general_algorithms as gena
 from . import downstream_propag as dpr
 from . import lakeflow as lf
-from . import util_taichi as ut
+import pyfastflow.general_algorithms.util_taichi as ut
 from . import fill_topo as fl
 from . import receivers as rcv
 
@@ -35,7 +35,7 @@ class FlowRouter:
 	Author: B.G.
 	"""
 
-	def __init__(self, nx, ny, dx, boundary_mode = 'normal', boundaries = None, lakeflow = True, stochastic_receivers = False):
+	def __init__(self, lakeflow = True):
 		"""
 		Initialize FlowRouter with grid parameters and boundary conditions.
 		
@@ -46,22 +46,15 @@ class FlowRouter:
 			boundary_mode: 'normal', 'periodic_EW', 'periodic_NS', or 'custom'
 			boundaries: Custom boundary array (if boundary_mode='custom')
 			lakeflow: Enable lake flow processing for depression handling
-			stochastic_receivers: Enable stochastic receiver selection
 			
 		Author: B.G.
 		"""
 
-		# Store grid parameters
-		self.nx = nx  # Number of columns
-		self.ny = ny  # Number of rows
-		self.dx = dx  # Grid spacing
-		self.rshp = (ny,nx)  # Reshape tuple for converting 1D arrays to 2D
-		
+				
 		# Store configuration parameters
 		self.boundary_mode = boundary_mode  # Boundary condition type
 		self.boundaries = boundaries  # Custom boundary array (if applicable)
 		self.lakeflow = lakeflow  # Enable depression handling
-		self.stochastic_receivers = stochastic_receivers  # Enable random receiver selection
 
 		# Initialize Taichi field builders for memory management
 		self.fb_flow = ti.FieldsBuilder()  # Builder for flow computation fields
@@ -161,28 +154,8 @@ class FlowRouter:
 			# Convergence flag for iterative algorithms (single scalar)
 			self.change = ti.field(ti.u1, shape = ())
 
-		# ====== GLOBAL CONFIGURATION SETUP ======
-		# Set global constants that affect all flow computations
-		cte.NX = nx  # Grid width
-		cte.NY = ny  # Grid height
-		cte.DX = dx  # Grid spacing
-		cte.RAND_RCV = True if self.stochastic_receivers else False
 		
-		# Set boundary mode based on string parameter
-		cte.BOUND_MODE = 0 if self.boundary_mode == 'normal' else (
-			1 if self.boundary_mode == 'periodic_EW' else (
-				2 if self.boundary_mode == 'periodic_NS' else (
-					3 if self.boundary_mode == 'custom' else 0
-				)
-			)
-		)
-		
-		# Initialize custom boundary conditions if specified
-		if(cte.BOUND_MODE == 3):
-			cte.init_custom_boundaries(self.boundaries.ravel())
 
-		# Initialize the FastFlow environment (compiles neighbor functions)
-		env.initialise()
 		
 
 

@@ -1,5 +1,5 @@
 import taichi as ti
-from . import neighbourer_flat as nei
+import pyfastflow.grid.neighbourer_flat as nei
 from .. import general_algorithms as gena
 
 @ti.kernel

@@ -14,8 +14,8 @@ import numpy as np
 import taichi as ti
 import math
 from .. import constants as cte
-from . import neighbourer_flat as nei
-from . import util_taichi as ut
+import pyfastflow.grid.neighbourer_flat as nei
+import pyfastflow.general_algorithms.util_taichi as ut
 from .f32_i32_struct import pack_float_index, unpack_float_index
 from .util_taichi import swap_arrays
 
