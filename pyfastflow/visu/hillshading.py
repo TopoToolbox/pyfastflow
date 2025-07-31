@@ -12,7 +12,7 @@ Hillshading Algorithm:
 
 Key Features:
     - Single direction and multidirectional hillshading
-    - Integration with FlowRouter boundary conditions
+    - Integration with grid boundary conditions
     - Support for external numpy arrays with optional masking
     - GPU-accelerated computation with Taichi
     - Handles no-data values and periodic boundaries
@@ -220,16 +220,16 @@ def hillshade_2d(z: ti.types.ndarray(dtype=ti.f32, ndim=2),
         hillshade[i, j] = ti.math.max(0.0, ti.math.min(1.0, hillshade_value))
 
 
-def hillshade_flowrouter(flowrouter, altitude_deg=45.0, azimuth_deg=315.0, z_factor=1.0):
+def hillshade_grid(grid, altitude_deg=45.0, azimuth_deg=315.0, z_factor=1.0):
     """
-    Compute hillshading for FlowRouter elevation data.
+    Compute hillshading for grid elevation data.
     
-    Uses the FlowRouter's elevation field and boundary conditions to compute
+    Uses the grid's elevation field and boundary conditions to compute
     hillshaded relief. Leverages the neighboring system for proper boundary
     handling including periodic boundaries and no-data regions.
     
     Args:
-        flowrouter: FlowRouter object with elevation data and boundary settings
+        grid: grid object with elevation data and boundary settings
         altitude_deg: Sun altitude angle in degrees (0-90°, default: 45°)
         azimuth_deg: Sun azimuth angle in degrees (0° = North, CW, default: 315°)
         z_factor: Vertical exaggeration factor (default: 1.0)
@@ -238,42 +238,51 @@ def hillshade_flowrouter(flowrouter, altitude_deg=45.0, azimuth_deg=315.0, z_fac
         numpy.ndarray: 2D hillshade array with values in [0, 1] range
         
     Implementation:
-        - Uses flowrouter.z_ as temporary storage (no new fields created)
-        - Respects flowrouter boundary conditions via neighboring system
+        - Uses temporary pool field for hillshade storage
+        - Respects grid boundary conditions via neighboring system
         - Converts between angular units (degrees to radians)
         - Reshapes vectorized output to 2D array
         
     Boundary Conditions:
-        - Inherits from flowrouter.boundary_mode setting
+        - Inherits from grid.boundary_mode setting
         - Supports normal, periodic EW/NS, and custom boundaries
         - Handles no-data values automatically via neighboring system
         
     Author: B. Gailleton
     """
+    # Import pool module
+    from .. import pool as pf
+    
     # Convert angles to radians
     zenith_rad = math.radians(90.0 - altitude_deg)  # Zenith = 90° - altitude
     azimuth_rad = math.radians(azimuth_deg)
     
-    # Use flowrouter.z_ as temporary storage for hillshade results
-    hillshade_vectorized(flowrouter.z, flowrouter.z_, zenith_rad, azimuth_rad, z_factor)
+    # Get temporary field from pool for hillshade results
+    z_temp = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(grid.nx * grid.ny))
+    
+    # Compute hillshade using temporary field
+    hillshade_vectorized(grid.z, z_temp, zenith_rad, azimuth_rad, z_factor)
     
     # Convert vectorized result to 2D numpy array
-    hillshade_np = flowrouter.z_.to_numpy().reshape((cte.NY, cte.NX))
+    hillshade_np = z_temp.to_numpy().reshape((cte.NY, cte.NX))
+    
+    # Release temporary field back to pool
+    z_temp.release()
     
     return hillshade_np
 
 
-def hillshade_multidirectional_flowrouter(flowrouter, altitude_deg=45.0, z_factor=1.0, 
+def hillshade_multidirectional_grid(grid, altitude_deg=45.0, z_factor=1.0, 
                                         azimuths_deg=None):
     """
-    Compute multidirectional hillshading for FlowRouter elevation data.
+    Compute multidirectional hillshading for grid elevation data.
     
     Combines hillshading from multiple light sources to create more balanced
     illumination that reduces shadowing artifacts. Uses multiple azimuth
     angles while maintaining consistent altitude.
     
     Args:
-        flowrouter: FlowRouter object with elevation data and boundary settings
+        grid: grid object with elevation data and boundary settings
         altitude_deg: Sun altitude angle in degrees (0-90°, default: 45°)
         z_factor: Vertical exaggeration factor (default: 1.0)
         azimuths_deg: List of azimuth angles in degrees (default: [315, 45, 135, 225])
@@ -293,12 +302,15 @@ def hillshade_multidirectional_flowrouter(flowrouter, altitude_deg=45.0, z_facto
         - 225° (SW): Complete 90° coverage
         
     Memory Usage:
-        - Uses flowrouter.z_ for each computation
+        - Uses temporary pool field for each computation
         - Stores intermediates in numpy arrays
         - No permanent field allocation
         
     Author: B. Gailleton
     """
+    # Import pool module
+    from .. import pool as pf
+    
     if azimuths_deg is None:
         azimuths_deg = [315.0, 45.0, 135.0, 225.0]  # Four cardinal diagonal directions
     
@@ -309,16 +321,22 @@ def hillshade_multidirectional_flowrouter(flowrouter, altitude_deg=45.0, z_facto
     result_shape = (cte.NY, cte.NX)
     multidirectional_hs = np.zeros(result_shape, dtype=np.float32)
     
+    # Get temporary field from pool for hillshade computations
+    z_temp = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(grid.nx * grid.ny))
+    
     # Compute and accumulate hillshade for each azimuth
     for azimuth_deg in azimuths_deg:
         azimuth_rad = math.radians(azimuth_deg)
         
-        # Compute hillshade for this azimuth using flowrouter.z_ as temp storage
-        hillshade_vectorized(flowrouter.z, flowrouter.z_, zenith_rad, azimuth_rad, z_factor)
+        # Compute hillshade for this azimuth using temporary field
+        hillshade_vectorized(grid.z, z_temp, zenith_rad, azimuth_rad, z_factor)
         
         # Convert to 2D and accumulate
-        single_hs = flowrouter.z_.to_numpy().reshape(result_shape)
+        single_hs = z_temp.to_numpy().reshape(result_shape)
         multidirectional_hs += single_hs
+    
+    # Release temporary field back to pool
+    z_temp.release()
     
     # Average the accumulated hillshades
     multidirectional_hs /= len(azimuths_deg)
@@ -334,7 +352,7 @@ def hillshade_numpy(elevation_array, altitude_deg=45.0, azimuth_deg=315.0,
     """
     Compute hillshading for external 2D numpy elevation arrays.
     
-    Operates on arbitrary 2D elevation data without FlowRouter integration.
+    Operates on arbitrary 2D elevation data without grid integration.
     Uses simple boundary handling with edge clamping. Supports optional
     masking to set specific regions to NaN values.
     

@@ -70,50 +70,27 @@ class Flooder:
 			edge_slope: Boundary slope for edge conditions (default: 1e-2)
 		"""
 
-
-		# Store grid parameters
-		self.nx = router.nx  # Number of columns
-		self.ny = router.ny  # Number of rows
-		self.dx = router.dx  # Grid spacing
-		self.rshp = router.rshp  # Reshape tuple for converting 1D arrays to 2D
-
 		self.router = router
+		self.grid = router.grid
 
 		# Saving the original elevation (to cpu)
-		self.og_z = self.router.z.to_numpy()
-
-
-		# Initialize Taichi field builders for memory management
-		self.fb = ti.FieldsBuilder()  # Builder for flow computation fields
-		self.snodetree = None  # Will hold finalized flow field structure
+		self.og_z = self.grid.z.to_numpy()
 
 		# ====== CORE FLOW COMPUTATION FIELDS ======
 		# These fields are required for all flow routing operations
 		
-		# flow depth
-		self.h = ti.field(ti.f32)
-		self.fb.dense(ti.i,(self.nx*self.ny)).place(self.h)
-		self.dh = ti.field(ti.f32)
-		self.fb.dense(ti.i,(self.nx*self.ny)).place(self.dh)
-
-		self.nQ = ti.field(ti.f32)
-		self.fb.dense(ti.i,(self.nx*self.ny)).place(self.nQ)
-
-		# Finalize the flow field structure (allocates GPU memory)
-		self.snodetree = self.fb.finalize()
+		self.h = pf.pool.taipool.get_tpfield(dtype = ti.f32, shape = (self.nx*self.ny) )
+		self.dh = pf.pool.taipool.get_tpfield(dtype = ti.f32, shape = (self.nx*self.ny) )
+		self.nQ = pf.pool.taipool.get_tpfield(dtype = ti.f32, shape = (self.nx*self.ny) )
+		self.qx = None
+		self.qy = None
 
 		self.h.fill(0.)
 		self.dh.fill(0.)
 		self.nQ.fill(0.)
 		self.nQ_init = False
 
-		self.fb_LS = None
-		self.snodetree_LS = None
-		self.qx = None
-		self.qy = None
-
 		self.verbose = False
-
 
 		cte.PREC = precipitation_rates
 		cte.MANNING = manning
@@ -121,6 +98,24 @@ class Flooder:
 		cte.DT_HYDRO = dt_hydro
 		cte.DT_HYDRO_LS = dt_hydro if dt_hydro_ls is None else dt_hydro_ls
 		# cte.RAND_RCV = True
+
+
+	@property
+	def nx(self):
+		return self.grid.nx
+
+	@property
+	def ny(self):
+		return self.grid.ny
+
+	@property
+	def dx(self):
+		return self.grid.dx
+
+	@property
+	def rshp(self):
+		return self.grid.rshp
+
 
 
 	def run_graphflood(self, N=10, N_stochastic = 4, N_diffuse = 0, temporal_filtering = 0.):
@@ -137,12 +132,17 @@ class Flooder:
 		Args:
 			N (int): Number of iterations (currently not used, defaults to 10)
 		"""
+		z_          = pf.pool.taipool.get_tpfield(dtype = ti.f32, shape = (self.nx*self.ny) )
+		Q_          = pf.pool.taipool.get_tpfield(dtype = ti.f32, shape = (self.nx*self.ny) )
+		receivers_  = pf.pool.taipool.get_tpfield(dtype = ti.i32, shape = (self.nx*self.ny) )
+		receivers__ = pf.pool.taipool.get_tpfield(dtype = ti.i32, shape = (self.nx*self.ny) )
+
 		for _ in range(N):
 
 			if(self.verbose):
 				print('Running iteration', _)
 
-			pf.flow.ut.add_B_to_A(self.router.z, self.h)
+			pf.general_algorithms.util_taichi.add_B_to_A(self.grid.z, self.h)
 
 			# Compute steepest descent receivers for flow routing
 			self.router.compute_receivers()
@@ -151,7 +151,7 @@ class Flooder:
 			self.router.reroute_flow()
 
 			# fills with water
-			pf.flow.fill_z_add_delta(self.router.z,self.h,self.router.z_,self.router.receivers,self.router.receivers_,self.router.receivers__, epsilon=1e-3)
+			pf.flow.fill_z_add_delta(self.grid.z,self.h, z_,self.router.receivers, receivers_, receivers__, epsilon=1e-3)
 			
 			# Accumulate with N stochastic routes if N_stochastic > 0else normal, accumulation
 			if(N_stochastic > 0):
@@ -161,22 +161,27 @@ class Flooder:
 
 			# Diffuse as multiple flow N times
 			for __ in range(N_diffuse):
-				pf.flood.diffuse_Q_constant_prec(self.router.z, self.router.Q, self.router.Q_)
+				pf.flood.diffuse_Q_constant_prec(self.grid.z, self.router.Q, Q_)
 
 			# z is filled with h, I wanna remove the wxtra z
-			pf.flow.ut.add_B_to_weighted_A(self.router.z, self.h,-1.)
+			pf.general_algorithms.util_taichi.add_B_to_weighted_A(self.grid.z, self.h,-1.)
 
 
 			if(temporal_filtering == 0.):
 				# Apply shallow water equations with Manning's friction
-				pf.flood.graphflood_core_cte_mannings(self.h,self.router.z,self.dh, self.router.receivers, self.router.Q)
+				pf.flood.graphflood_core_cte_mannings(self.h, self.grid.z, self.dh, self.router.receivers, self.router.Q)
 			else:
 				if(self.nQ_init == False):
 					self.nQ.copy_from(self.router.Q)
 				else:
-					pf.flow.ut.weighted_mean_B_in_A(self.nQ, self.router.Q, temporal_filtering)
+					pf.general_algorithms.util_taichi.weighted_mean_B_in_A(self.nQ, self.router.Q, temporal_filtering)
 
-				pf.flood.graphflood_core_cte_mannings(self.h,self.router.z,self.dh, self.router.receivers, self.nQ)
+				pf.flood.graphflood_core_cte_mannings(self.h, self.grid.z, self.dh, self.router.receivers, self.nQ)
+
+		z_.release()
+		Q_.release()
+		receivers_.release()
+		receivers__.release()
 
 
 
@@ -202,20 +207,10 @@ class Flooder:
 
 		# Initialize LisFlood-specific discharge fields on first call
 		if self.qx is None :
-			print('INIT')  # Debug output for field initialization
-			self.fb_LS = ti.FieldsBuilder()
-			self.snodetree_LS = None
-			
 			# Create x-direction discharge field
-			self.qx = ti.field(ti.f32)
-			self.fb_LS.dense(ti.i,(self.nx*self.ny)).place(self.qx)
+			self.qx = pf.pool.taipool.get_tpfield(dtype = ti.f32, shape = (self.nx*self.ny) )
+			self.qy = pf.pool.taipool.get_tpfield(dtype = ti.f32, shape = (self.nx*self.ny) )
 			
-			# Create y-direction discharge field  
-			self.qy = ti.field(ti.f32)
-			self.fb_LS.dense(ti.i,(self.nx*self.ny)).place(self.qy)
-			
-			# Finalize field structure and initialize to zero
-			self.snodetree_LS = self.fb_LS.finalize()
 			self.qx.fill(0.)
 			self.qy.fill(0.)
 
@@ -224,15 +219,15 @@ class Flooder:
 			
 			if input_mode == 'constant_prec':
 				# Optional: Add precipitation as water depth increase
-				ls.init_LS_on_hw_from_constant_effective_prec(self.h, self.router.z)
+				ls.init_LS_on_hw_from_constant_effective_prec(self.h, self.grid.z)
 			elif input_mode == 'custom_func':
 				mode()
 
 			# Step 1: Compute discharge based on water surface gradients
-			ls.flow_route(self.h, self.router.z, self.qx, self.qy)
+			ls.flow_route(self.h, self.grid.z, self.qx, self.qy)
 			
 			# Step 2: Update water depths based on discharge divergence
-			ls.depth_update(self.h, self.router.z, self.qx, self.qy)
+			ls.depth_update(self.h, self.grid.z, self.qx, self.qy)
 
 
 	def set_h(self, val):
@@ -243,8 +238,8 @@ class Flooder:
 			val (numpy.ndarray): Flow depth values to set
 		"""
 		self.h.from_numpy(val.ravel())
-		# self.router.z.from_numpy(self.og_z.ravel())
-		# pf.flow.ut.add_B_to_A(self.router.z, self.h)
+		# self.grid.z.from_numpy(self.og_z.ravel())
+		# pf.general_algorithms.util_taichi.add_B_to_A(self.grid.z, self.h)
 
 	def get_h(self):
 		"""
@@ -293,3 +288,46 @@ class Flooder:
 			numpy.ndarray: Discharge values (m³/s) reshaped to 2D grid
 		"""
 		return self.router.Q.to_numpy().reshape(self.rshp)
+
+	def destroy(self):
+		"""
+		Release all pooled fields and free GPU memory.
+		
+		Should be called when finished with the Flooder to ensure
+		proper cleanup of GPU resources. After calling this method,
+		the Flooder should not be used.
+		
+		Author: B.G.
+		"""
+		# Release core flood fields back to pool
+		if hasattr(self, 'h') and self.h is not None:
+			self.h.release()
+			self.h = None
+			
+		if hasattr(self, 'dh') and self.dh is not None:
+			self.dh.release()
+			self.dh = None
+			
+		if hasattr(self, 'nQ') and self.nQ is not None:
+			self.nQ.release()
+			self.nQ = None
+			
+		# Release LisFlood discharge fields if they exist
+		if hasattr(self, 'qx') and self.qx is not None:
+			self.qx.release()
+			self.qx = None
+			
+		if hasattr(self, 'qy') and self.qy is not None:
+			self.qy.release()
+			self.qy = None
+
+	def __del__(self):
+		"""
+		Destructor - automatically release fields when object is deleted.
+		
+		Author: B.G.
+		"""
+		try:
+			self.destroy()
+		except:
+			pass  # Ignore errors during destruction

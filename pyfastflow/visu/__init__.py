@@ -50,7 +50,9 @@ from .hillshading import (
     hillshade_flowrouter,
     hillshade_multidirectional_flowrouter,
     hillshade_numpy,
-    hillshade_multidirectional_numpy
+    hillshade_multidirectional_numpy,
+    hillshade_grid,
+    hillshade_multidirectional_grid
 )
 
 # Export all modules and classes
@@ -66,5 +68,7 @@ __all__ = [
     "hillshade_flowrouter",
     "hillshade_multidirectional_flowrouter", 
     "hillshade_numpy",
-    "hillshade_multidirectional_numpy"
+    "hillshade_multidirectional_numpy",
+    "hillshade_grid",
+    "hillshade_multidirectional_grid"
 ]
