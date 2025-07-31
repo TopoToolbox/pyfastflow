@@ -1,34 +1,77 @@
 """
-Flood algorithms submodule for FastFlow Taichi.
+2D shallow water flow modeling submodule for PyFastFlow.
 
-Contains all shallow water flow algorithms and utilities:
+This submodule implements GPU-accelerated 2D shallow water flow algorithms for flood
+modeling and hydrodynamic simulations. Uses pool-based memory management for efficient
+GPU field allocation and provides both explicit (LisFlood) and implicit (GraphFlood)
+numerical schemes.
 
-- gf_fields: Field management and data structures for flow variables
+Core Modules:
+- gf_fields: Flooder class with pool-based field management for flood variables
 - gf_hydrodynamics: Core hydrodynamic computation kernels with Manning's friction
-- gf_ls: Local-Step method implementation for 2D shallow water flow
-- Flooder: High-level interface for flood modeling workflows
+- gf_ls: LisFlood explicit finite difference implementation (Bates et al. 2010)
 
 Key Features:
-- 2D shallow water equations with Manning's friction
-- GPU-accelerated flood propagation using Taichi
-- Integration with FastFlow routing for initial conditions
-- Precipitation and boundary condition support
-- Configurable hydrodynamic parameters
-- Separate bed elevation and water depth fields for numerical stability
+- LisFlood: Explicit 2D shallow water equations with inertial simplification
+- GraphFlood: Implicit flow routing with diffusion-based shallow water flow
+- Manning's friction: Configurable roughness coefficients for flow resistance
+- Pool-based memory management: Efficient GPU field allocation and reuse
+- Precipitation input: Time-varying rainfall and boundary conditions  
+- Integration with flow routing: Use drainage networks as initial conditions
+- Boundary conditions: Configurable edge slopes and flow outlets
+- Hydrodynamic timestep adaptation: Stable CFL-limited time stepping
+
+Algorithm Implementations:
+- LisFlood: Local inertial approximation following Bates et al. (2010)
+- GraphFlood: Graph-based implicit routing following Gailleton et al. (2024)
+- Manning's equation: Flow resistance based on surface roughness
+- CFL timestep limiting: Automatic timestep adaptation for stability
 
 Usage:
     import pyfastflow as pf
+    import taichi as ti
+    import numpy as np
     
-    # Initialize flow router first
-    router = pf.flow.FlowRouter(nx=100, ny=100, dx=1.0)
+    # Initialize Taichi and create flow routing
+    ti.init(ti.gpu)
+    nx, ny, dx = 256, 256, 30.0
+    elevation = np.random.rand(ny, nx) * 50
     
-    # Create flood model
+    grid = pf.flow.GridField(nx, ny, dx)
+    grid.set_z(elevation)
+    router = pf.flow.FlowRouter(grid)
+    router.compute_receivers()
+    
+    # Create flood model with pool-based field management
     flooder = pf.flood.Flooder(
-        router=router,
-        precipitation_rates=10e-3/3600,  # m/s
-        manning=1e-3,                    # Manning's n
+        router,
+        precipitation_rates=10e-3/3600,  # 10 mm/hr in m/s
+        manning=0.033,                   # Manning's n roughness
+        dt_hydro=1e-3,                   # Hydrodynamic timestep (s)
         edge_slope=1e-2                  # Boundary slope
     )
+    
+    # Run LisFlood simulation (explicit scheme)
+    flooder.run_LS(N=1000)  # 1000 time steps
+    
+    # Run GraphFlood simulation (implicit scheme)
+    flooder.run_graphflood(
+        N=10,              # Major iterations
+        N_stochastic=4,    # Stochastic flow paths
+        N_diffuse=2,       # Diffusion steps
+        temporal_filtering=0.1  # Temporal smoothing
+    )
+    
+    # Get flood simulation results
+    water_depth = flooder.get_h()     # Water depth (m)
+    discharge_x = flooder.get_qx()    # x-direction unit discharge (m²/s)
+    discharge_y = flooder.get_qy()    # y-direction unit discharge (m²/s)
+    velocity_x = discharge_x / (water_depth + 1e-6)  # x-velocity (m/s)
+
+Scientific Background:
+LisFlood follows the local inertial approximation of Bates et al. (2010) for explicit
+2D shallow water flow. GraphFlood implements the implicit flow routing approach of
+Gailleton et al. (2024) ESurf with diffusion-based shallow water dynamics.
 
 Author: B.G.
 """

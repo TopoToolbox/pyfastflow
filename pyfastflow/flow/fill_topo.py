@@ -60,10 +60,10 @@ def topofill(flow_field, epsilon=1e-3, custom_z = None):
 		custom_z: Optional custom elevation field for output (default: None)
 	"""
 	# Initialize receiver working arrays
-	receivers_  = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
-	receivers__ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx*self.ny))
-	z_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx*self.ny))
-	z__ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx*self.ny))
+	receivers_  = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(flow_field.nx*flow_field.ny))
+	receivers__ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(flow_field.nx*flow_field.ny))
+	z_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(flow_field.nx*flow_field.ny))
+	z__ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(flow_field.nx*flow_field.ny))
 	receivers_.copy_from(flow_field.receivers)
 	receivers__.copy_from(flow_field.receivers)
 	
@@ -74,13 +74,19 @@ def topofill(flow_field, epsilon=1e-3, custom_z = None):
 		z_.copy_from(flow_field.grid.z)
 		z__.copy_from(flow_field.grid.z)
 		for it in range(math.ceil(math.log2(cte.NX*cte.NY))):
-			_topofill(flow_field.grid.z, flow_field.grid.z_, flow_field.receivers_, flow_field.receivers__, epsilon, it+1)
-		flow_field.grid.z.copy_from(flow_field.grid.z_)
+			_topofill(flow_field.grid.z, z_, receivers_, receivers__, epsilon, it+1)
+		flow_field.grid.z.copy_from(z_)
 	else:
 		# Use custom elevation field for output
 		custom_z.copy_from(flow_field.grid.z)
 		for it in range(math.ceil(math.log2(cte.NX*cte.NY))):
-			_topofill(flow_field.grid.z, custom_z, flow_field.receivers_, flow_field.receivers__, epsilon, it+1)
+			_topofill(flow_field.grid.z, custom_z, receivers_, receivers__, epsilon, it+1)
+
+	# Release temporary fields back to pool
+	receivers_.release()
+	receivers__.release()
+	z_.release()
+	z__.release()
 
 
 @ti.kernel

@@ -38,11 +38,21 @@ class FlowRouter:
 
 	def __init__(self, grid, lakeflow = True):
 		"""
-		Initialize FlowRouter with grid parameters and boundary conditions.
+		Initialize FlowRouter with grid and configuration parameters using pool-based fields.
+		
+		Creates a FlowRouter instance with automatic GPU field management through the pool
+		system. Allocates essential fields (Q for flow accumulation, receivers for flow
+		routing) from the pool for efficient memory usage.
 		
 		Args:
-			grid: the GridField dobject of the assiciated grid
-			lakeflow: Enable lake flow processing for depression handling
+			grid (GridField): The GridField object containing elevation data and grid parameters
+			lakeflow (bool): Enable lake flow processing for depression handling (default: True)
+				When True, enables reroute_flow() method for handling closed basins
+				When False, reroute_flow() will raise RuntimeError
+			
+		Note:
+			The FlowRouter instance maintains pool-allocated fields that are automatically
+			managed. Fields are released when the FlowRouter is destroyed via __del__().
 			
 		Author: B.G.
 		"""
@@ -81,22 +91,40 @@ class FlowRouter:
 		"""
 		Compute steepest descent receivers for all grid nodes.
 		
-		Determines the downstream flow direction for each node based on
-		steepest descent algorithm. Results are stored in self.receivers
-		and gradients in self.gradient.
+		Determines the downstream flow direction for each node using the steepest
+		descent algorithm. Each node is assigned a receiver (downstream neighbor)
+		based on the steepest downhill gradient. Results are stored in self.receivers.
 		
+		The algorithm considers all valid neighbors (4 or 8-connectivity depending on 
+		configuration) and selects the one with the steepest descent. Boundary 
+		conditions are handled according to the grid's boundary mode.
+		
+		Note:
+			Results are stored in self.receivers field (pool-allocated).
+			No gradient field is computed in current implementation.
+			
 		Author: B.G.
 		"""
 		rcv.compute_receivers(self.grid.z, self.receivers)
 
 	def compute_stochastic_receivers(self):
 		"""
-		Compute steepest descent receivers for all grid nodes.
+		Compute stochastic receivers for all grid nodes using probabilistic flow routing.
 		
-		Determines the downstream flow direction for each node based on
-		steepest descent algorithm. Results are stored in self.receivers
-		and gradients in self.gradient.
+		Determines downstream flow directions using a stochastic approach where multiple
+		downhill neighbors can be selected with probabilities proportional to their
+		gradients. This enables uncertainty quantification in flow routing and creates
+		more realistic flow patterns in flat areas.
 		
+		The algorithm assigns probabilities to all downhill neighbors based on their
+		slope steepness, then randomly selects one receiver per node. Multiple calls
+		will produce different flow networks for the same topography.
+		
+		Note:
+			Results are stored in self.receivers field (pool-allocated).
+			Requires RAND_RCV constant to be enabled for stochastic behavior.
+			Each call produces a different realization of the flow network.
+			
 		Author: B.G.
 		"""
 		rcv.compute_receivers_stochastic(self.grid.z, self.receivers)
@@ -156,18 +184,29 @@ class FlowRouter:
 
 	def accumulate_constant_Q(self, value, area = True):
 		"""
-		Accumulate constant flow values using parallel rake-compress algorithm.
+		Accumulate constant flow values using parallel rake-compress algorithm with pool-based fields.
 		
-		Performs flow accumulation with uniform input values using the
-		rake-and-compress algorithm for efficient parallel computation.
+		Performs flow accumulation where each cell contributes a uniform input value,
+		then accumulates downstream following the receiver network. Uses the efficient
+		rake-and-compress algorithm for O(log N) parallel computation complexity.
 		
 		Args:
-			value: Constant flow value to accumulate at each node
-			area: If True, multiply by grid cell area (dx²) for area-based flow
-			      If False, use raw value for unit-based flow
+			value (float): Constant flow value to accumulate at each node (units depend on area flag)
+			area (bool, optional): If True, multiply value by cell area (dx²) to get volumetric flow.
+				If False, use raw value for unit-based flow. Default: True.
+				
+		Returns:
+			None: Results are stored in self.Q field (pool-allocated)
 			
 		Note:
-			Results are stored in self.Q and can be accessed via get_Q()
+			- Uses temporary pool fields for efficient memory management
+			- All temporary fields are automatically released after computation
+			- Results can be accessed via get_Q() method
+			- Requires valid receivers from compute_receivers() or compute_stochastic_receivers()
+			
+		Example:
+			router.accumulate_constant_Q(1.0, area=True)  # Each cell contributes dx² area
+			drainage_area = router.get_Q()  # Get drainage area in m²
 			
 		Author: B.G.
 		"""
@@ -255,19 +294,34 @@ class FlowRouter:
 
 	def accumulate_constant_Q_stochastic(self, value, area = True, N = 4):
 		"""
-		Accumulate constant flow values using parallel rake-compress algorithm.
+		Accumulate constant flow values using stochastic flow routing with multiple realizations.
 		
-		Performs flow accumulation with uniform input values using the
-		rake-and-compress algorithm for efficient parallel computation.
+		Performs flow accumulation using stochastic receivers with multiple iterations to
+		create ensemble flow patterns. Each iteration uses different stochastic receivers,
+		and results are averaged to provide robust flow accumulation estimates with
+		uncertainty quantification.
 		
 		Args:
-			value: Constant flow value to accumulate at each node
-			area: If True, multiply by grid cell area (dx²) for area-based flow
-			      If False, use raw value for unit-based flow
-			N: Number of stochastic iterations
+			value (float): Constant flow value to accumulate at each node (units depend on area flag)
+			area (bool, optional): If True, multiply value by cell area (dx²) for volumetric flow.
+				If False, use raw value for unit-based flow. Default: True.
+			N (int, optional): Number of stochastic realizations to average. Default: 4.
+				Higher N provides more robust results but increases computation time.
+				
+		Returns:
+			None: Results are stored in self.Q field (pool-allocated)
 			
 		Note:
-			Results are stored in self.Q and can be accessed via get_Q()
+			- Requires stochastic receivers from compute_stochastic_receivers()
+			- Each realization uses different random flow paths
+			- Final result is ensemble average of all realizations
+			- Uses pool-based memory management for temporary fields
+			- More computationally expensive than deterministic accumulation
+			
+		Example:
+			router.compute_stochastic_receivers()  # Generate stochastic flow network
+			router.accumulate_constant_Q_stochastic(1.0, area=True, N=10)
+			ensemble_area = router.get_Q()  # Get ensemble-averaged drainage area
 			
 		Author: B.G.
 		"""
