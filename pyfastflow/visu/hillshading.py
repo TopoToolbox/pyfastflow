@@ -261,10 +261,10 @@ def hillshade_grid(grid, altitude_deg=45.0, azimuth_deg=315.0, z_factor=1.0):
     z_temp = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(grid.nx * grid.ny))
     
     # Compute hillshade using temporary field
-    hillshade_vectorized(grid.z, z_temp, zenith_rad, azimuth_rad, z_factor)
+    hillshade_vectorized(grid.z.field, z_temp.field, zenith_rad, azimuth_rad, z_factor)
     
     # Convert vectorized result to 2D numpy array
-    hillshade_np = z_temp.to_numpy().reshape((cte.NY, cte.NX))
+    hillshade_np = z_temp.field.to_numpy().reshape((cte.NY, cte.NX))
     
     # Release temporary field back to pool
     z_temp.release()
@@ -329,10 +329,10 @@ def hillshade_multidirectional_grid(grid, altitude_deg=45.0, z_factor=1.0,
         azimuth_rad = math.radians(azimuth_deg)
         
         # Compute hillshade for this azimuth using temporary field
-        hillshade_vectorized(grid.z, z_temp, zenith_rad, azimuth_rad, z_factor)
+        hillshade_vectorized(grid.z.field, z_temp.field, zenith_rad, azimuth_rad, z_factor)
         
         # Convert to 2D and accumulate
-        single_hs = z_temp.to_numpy().reshape(result_shape)
+        single_hs = z_temp.field.to_numpy().reshape(result_shape)
         multidirectional_hs += single_hs
     
     # Release temporary field back to pool

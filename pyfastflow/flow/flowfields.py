@@ -105,7 +105,7 @@ class FlowRouter:
             
         Author: B.G.
         """
-        rcv.compute_receivers(self.grid.z, self.receivers)
+        rcv.compute_receivers(self.grid.z.field, self.receivers.field)
 
     def compute_stochastic_receivers(self):
         """
@@ -127,7 +127,7 @@ class FlowRouter:
             
         Author: B.G.
         """
-        rcv.compute_receivers_stochastic(self.grid.z, self.receivers)
+        rcv.compute_receivers_stochastic(self.grid.z.field, self.receivers.field)
 
     def reroute_flow(self, carve = True):
         """
@@ -165,9 +165,9 @@ class FlowRouter:
         rerouted         = pf.pool.taipool.get_tpfield(dtype = ti.u1,  shape = (self.nx*self.ny) )
 
         # Call the main lake flow routing algorithm
-        lf.reroute_flow(bid, self.receivers, receivers_, receivers__,
-        self.grid.z, z_, is_border, outlet, basin_saddle, 
-        basin_saddlenode, tag, tag_, change, rerouted, carve = carve)
+        lf.reroute_flow(bid.field, self.receivers.field, receivers_.field, receivers__.field,
+        self.grid.z.field, z_.field, is_border.field, outlet.field, basin_saddle.field, 
+        basin_saddlenode.field, tag.field, tag_.field, change.field, rerouted.field, carve = carve)
 
         bid.release()
         receivers_.release()
@@ -222,24 +222,24 @@ class FlowRouter:
         Q_       = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx*self.ny))
 
         # Initialize arrays for rake-compress algorithm
-        ndonors.fill(0)  # Reset donor counts
-        src.fill(0)      # Reset ping-pong state
+        ndonors.field.fill(0)  # Reset donor counts
+        src.field.fill(0)      # Reset ping-pong state
         
         # Initialize flow values (multiply by area if requested)
-        self.Q.fill(value*(cte.DX * cte.DX if area else 1.))
+        self.Q.field.fill(value*(cte.DX * cte.DX if area else 1.))
         
         # Build donor-receiver relationships from receiver array
-        dpr.rcv2donor(self.receivers, donors, ndonors)
+        dpr.rcv2donor(self.receivers.field, donors.field, ndonors.field)
 
         # Rake-compress iterations for parallel tree accumulation
         # Each iteration doubles the effective path length being compressed
         for i in range(logn+1):
-            dpr.rake_compress_accum(donors, ndonors, self.Q, src,
-                               donors_, ndonors_, Q_, i)
+            dpr.rake_compress_accum(donors.field, ndonors.field, self.Q.field, src.field,
+                               donors_.field, ndonors_.field, Q_.field, i)
 
         # Final fuse step to consolidate results from ping-pong buffers
         # Merge accumulated values from working arrays back to primary array
-        gena.fuse(self.Q, src, Q_, logn)
+        gena.fuse(self.Q.field, src.field, Q_.field, logn)
 
         # Release all temporary fields back to pool
         ndonors.release()
@@ -267,11 +267,11 @@ class FlowRouter:
         Q_         = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx*self.ny))
 
         # Initialize arrays for rake-compress algorithm
-        ndonors.fill(0)  # Reset donor counts
-        src.fill(0)      # Reset ping-pong state
+        ndonors.field.fill(0)  # Reset donor counts
+        src.field.fill(0)      # Reset ping-pong state
 
         # Build donor-receiver relationships from receiver array
-        dpr.rcv2donor(self.receivers, donors, ndonors)
+        dpr.rcv2donor(self.receivers.field, donors.field, ndonors.field)
 
         # Rake-compress iterations for parallel tree accumulation
         # Each iteration doubles the effective path length being compressed
@@ -327,7 +327,7 @@ class FlowRouter:
         """
         # Get temporary accumulation field
         fullQ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx*self.ny))
-        fullQ.fill(0.)
+        fullQ.field.fill(0.)
 
         # Calculate number of iterations needed (log₂ of grid size)
         logn = math.ceil(math.log2(self.nx*self.ny))+1
@@ -345,26 +345,26 @@ class FlowRouter:
             self.compute_stochastic_receivers()
 
             # Initialize arrays for rake-compress algorithm
-            ndonors.fill(0)  # Reset donor counts
-            src.fill(0)      # Reset ping-pong state
+            ndonors.field.fill(0)  # Reset donor counts
+            src.field.fill(0)      # Reset ping-pong state
             
             # Initialize flow values (multiply by area if requested)
-            self.Q.fill(value*(cte.DX * cte.DX if area else 1.))
+            self.Q.field.fill(value*(cte.DX * cte.DX if area else 1.))
             
             # Build donor-receiver relationships from receiver array
-            dpr.rcv2donor(self.receivers, donors, ndonors)
+            dpr.rcv2donor(self.receivers.field, donors.field, ndonors.field)
 
             # Rake-compress iterations for parallel tree accumulation
             # Each iteration doubles the effective path length being compressed
             for i in range(logn+1):
-                dpr.rake_compress_accum(donors, ndonors, self.Q, src,
-                                   donors_, ndonors_, Q_, i)
+                dpr.rake_compress_accum(donors.field, ndonors.field, self.Q.field, src.field,
+                                   donors_.field, ndonors_.field, Q_.field, i)
 
             # Final fuse step to consolidate results from ping-pong buffers
             # Merge accumulated values from working arrays back to primary array
-            gena.fuse(self.Q, src, Q_, logn)
+            gena.fuse(self.Q.field, src.field, Q_.field, logn)
 
-            ut.add_B_to_weighted_A(fullQ, self.Q, 1./N)
+            ut.add_B_to_weighted_A(fullQ.field, self.Q.field, 1./N)
 
         # Release temporary fields for this iteration
         ndonors.release()
@@ -374,7 +374,7 @@ class FlowRouter:
         ndonors_.release()
         Q_.release()
 
-        self.Q.copy_from(fullQ)
+        self.Q.field.copy_from(fullQ.field)
         fullQ.release()
 
 
@@ -399,7 +399,7 @@ class FlowRouter:
             
         Author: B.G.
         """
-        return self.Q.to_numpy().reshape(self.rshp)
+        return self.Q.field.to_numpy().reshape(self.rshp)
 
 
     def get_Z(self):
@@ -411,7 +411,7 @@ class FlowRouter:
             
         Author: B.G.
         """
-        return self.grid.z.to_numpy().reshape(self.rshp)
+        return self.grid.z.field.to_numpy().reshape(self.rshp)
 
     def get_receivers(self):
         """
@@ -422,7 +422,7 @@ class FlowRouter:
             
         Author: B.G.
         """
-        return self.receivers.to_numpy().reshape(self.rshp)
+        return self.receivers.field.to_numpy().reshape(self.rshp)
 
     def destroy(self):
         """

@@ -113,6 +113,12 @@ class TPField:
             self.snodetree.destroy()
             self.snodetree = None
 
+
+    def to_numpy(self):
+        return self.field.to_numpy()
+    def from_numpy(self, val):
+        return self.field.from_numpy(val)
+
     def __enter__(self):
         """Context manager entry - return the field for use."""
         return self

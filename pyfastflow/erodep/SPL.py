@@ -244,19 +244,19 @@ def SPL(router, alpha_, alpha__):
 	log2 = math.ceil(math.log2(router.nx * router.ny))
 
 	# Initialize erosion coefficients and adjusted elevations
-	init_erode_SPL(router.grid.z, z_, z__, alpha_, alpha__, router.Q)
+	init_erode_SPL(router.grid.z.field, z_.field, z__.field, alpha_, alpha__, router.Q.field)
 	
 	# Setup receiver chains for efficient parallel traversal
-	receivers_.copy_from(router.receivers)
-	receivers__.copy_from(router.receivers)
+	receivers_.field.copy_from(router.receivers.field)
+	receivers__.field.copy_from(router.receivers.field)
 	
 	# Perform iterative erosion computation
 	# Each iteration propagates erosion effects one step further upstream
 	for _ in range(log2):
-		iteration_erode_SPL(z_, z__, receivers_, receivers__, alpha_, alpha__)
+		iteration_erode_SPL(z_.field, z__.field, receivers_.field, receivers__.field, alpha_, alpha__)
 
 	# Copy final eroded topography back to main elevation field
-	router.grid.z.copy_from(z_)
+	router.grid.z.field.copy_from(z_.field)
 	
 	# Release temporary fields back to pool
 	z_.release()
@@ -380,7 +380,7 @@ def SPL_transport_implicit(router, alpha_, alpha__, Qs, Nit = 5):
 	receivers__ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(router.nx*router.ny))
 
 	# Initialize erosion coefficients and adjusted elevations once per time step
-	init_erode_SPL(router.grid.z, z_, z__, alpha_, alpha__, router.Q)
+	init_erode_SPL(router.grid.z.field, z_.field, z__.field, alpha_, alpha__, router.Q.field)
 
 	# Main erosion-transport-deposition iteration loop
 	change_max = 10000
@@ -388,17 +388,17 @@ def SPL_transport_implicit(router, alpha_, alpha__, Qs, Nit = 5):
 	while(change_max > 1e-3 or it<Nit):
 	# for iteration in range(Nit):
 		# Setup receiver chains for efficient parallel traversal
-		cp_Z = z_.to_numpy()
-		receivers_.copy_from(router.receivers)
-		receivers__.copy_from(router.receivers)
+		cp_Z = z_.field.to_numpy()
+		receivers_.field.copy_from(router.receivers.field)
+		receivers__.field.copy_from(router.receivers.field)
 		
 		# Perform iterative erosion computation
 		# Each iteration propagates erosion effects one step further upstream
 		for _ in range(log2):
-			iteration_erode_SPL(z_, z__, receivers_, receivers__, alpha_, alpha__)
+			iteration_erode_SPL(z_.field, z__.field, receivers_.field, receivers__.field, alpha_, alpha__)
 
 		# Convert erosion volumes to sediment sources
-		erosion_to_source(router.grid.z, z_, Qs)
+		erosion_to_source(router.grid.z.field, z_.field, Qs)
 
 		# # Route sediment downstream along flow paths
 		# # This accumulates sediment flux at each node
@@ -407,19 +407,19 @@ def SPL_transport_implicit(router, alpha_, alpha__, Qs, Nit = 5):
 
 		# # Apply deposition based on transport capacity
 		# iterate_deposition(z_, Qs, router.Q)
-		receivers_.copy_from(router.receivers)
-		receivers__.copy_from(router.receivers)
+		receivers_.field.copy_from(router.receivers.field)
+		receivers__.field.copy_from(router.receivers.field)
 		for _ in range(log2):
-			pf.erodep.iterate_deposition_ptr_jmp_cte_kd(z_, Qs, router.Q, receivers_, receivers__)
+			pf.erodep.iterate_deposition_ptr_jmp_cte_kd(z_.field, Qs, router.Q.field, receivers_.field, receivers__.field)
 
 
 
-		change_max = np.mean(np.abs(cp_Z - z_.to_numpy()))
+		change_max = np.mean(np.abs(cp_Z - z_.field.to_numpy()))
 		# print(change_max,end=' | ')
 		it+=1
 	print("Done in", it, 'change_max =', change_max)
 	# Copy final landscape state back to main elevation field
-	router.grid.z.copy_from(z_)
+	router.grid.z.field.copy_from(z_.field)
 	
 	# Release temporary fields back to pool
 	z_.release()
@@ -474,22 +474,22 @@ def SPL_transport(router, alpha_, alpha__, Qs, Nit = 5):
 	receivers__ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(router.nx*router.ny))
 
 	# Initialize erosion coefficients and adjusted elevations once per time step
-	init_erode_SPL(router.grid.z, z_, z__, alpha_, alpha__, router.Q)
+	init_erode_SPL(router.grid.z.field, z_.field, z__.field, alpha_, alpha__, router.Q.field)
 
 	# Main erosion-transport-deposition iteration loop
 
 	# for iteration in range(Nit):
 	# Setup receiver chains for efficient parallel traversal
-	receivers_.copy_from(router.receivers)
-	receivers__.copy_from(router.receivers)
+	receivers_.field.copy_from(router.receivers.field)
+	receivers__.field.copy_from(router.receivers.field)
 	
 	# Perform iterative erosion computation
 	# Each iteration propagates erosion effects one step further upstream
 	for _ in range(log2):
-		iteration_erode_SPL(z_, z__, receivers_, receivers__, alpha_, alpha__)
+		iteration_erode_SPL(z_.field, z__.field, receivers_.field, receivers__.field, alpha_, alpha__)
 
 	# Convert erosion volumes to sediment sources
-	erosion_to_source(router.grid.z, z_, Qs)
+	erosion_to_source(router.grid.z.field, z_.field, Qs)
 
 	# # Route sediment downstream along flow paths
 	# # This accumulates sediment flux at each node
@@ -498,13 +498,13 @@ def SPL_transport(router, alpha_, alpha__, Qs, Nit = 5):
 
 	# # Apply deposition based on transport capacity
 	# iterate_deposition(z_, Qs, router.Q)
-	receivers_.copy_from(router.receivers)
-	receivers__.copy_from(router.receivers)
+	receivers_.field.copy_from(router.receivers.field)
+	receivers__.field.copy_from(router.receivers.field)
 	for _ in range(log2):
-		pf.erodep.iterate_deposition_ptr_jmp_cte_kd(z_, Qs, router.Q, receivers_, receivers__)
+		pf.erodep.iterate_deposition_ptr_jmp_cte_kd(z_.field, Qs, router.Q.field, receivers_.field, receivers__.field)
 
 	# Copy final landscape state back to main elevation field
-	router.grid.z.copy_from(z_)
+	router.grid.z.field.copy_from(z_.field)
 	
 	# Release temporary fields back to pool
 	z_.release()
