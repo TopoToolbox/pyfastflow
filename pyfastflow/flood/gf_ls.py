@@ -120,8 +120,8 @@ def flow_route(
 	# Process each grid cell for flow routing
 	for i in z:
 		# Get neighboring cell indices
-		top = flow.neighbourer_flat.neighbour(i,0)    # North neighbor
-		left = flow.neighbourer_flat.neighbour(i,1)   # West neighbor
+		top = pf.grid.neighbourer_flat.neighbour(i,0)    # North neighbor
+		left = pf.grid.neighbourer_flat.neighbour(i,1)   # West neighbor
 
 		# Get row and column indices for boundary condition checks
 		row, col = flow.neighbourer_flat.rc_from_i(i)
@@ -269,8 +269,8 @@ def depth_update(
 		row, col = flow.neighbourer_flat.rc_from_i(i)
 
 		# Get neighboring cell indices for discharge divergence calculation
-		right = flow.neighbourer_flat.neighbour(i,2)   # East neighbor
-		bottom = flow.neighbourer_flat.neighbour(i,3)  # South neighbor
+		right = pf.grid.neighbourer_flat.neighbour(i,2)   # East neighbor
+		bottom = pf.grid.neighbourer_flat.neighbour(i,3)  # South neighbor
 
 		# Calculate discharge divergence in y-direction
 		# Net inflow = (inflow from south) - (outflow to north)
