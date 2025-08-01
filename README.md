@@ -8,9 +8,11 @@
 
 ## Overview
 
-PyFastFlow is a high-performance Python package for geomorphological and hydraulic flow routing computations on GPU. Built on the Taichi programming language, it provides efficient parallel algorithms for flow accumulation, depression filling, shallow water flow modeling, and landscape evolution simulations.
+PyFastFlow is a high-performance Python package for geomorphological and hydraulic flow routing computations on GPU. Built on the Taichi programming language, it provides efficient, portable parallel algorithms for flow accumulation, depression filling, shallow water flow modeling, and landscape evolution simulations.
 
-The fast flow routines are implemented following **Jain et al., 2024** [📝](https://www-sop.inria.fr/reves/Basilic/2024/JKGFC24/FastFlowPG2024_Author_Version.pdf), delivering state-of-the-art performance for large-scale geomorphological modeling.
+The fast flow routines are implemented following **Jain et al., 2024** [📝](https://www-sop.inria.fr/reves/Basilic/2024/JKGFC24/FastFlowPG2024_Author_Version.pdf), delivering state-of-the-art performance for GPU-oriented flow computation (flow accumulation and local minima handling).
+
+The flooding/hydraulic modelling implements a GPU version of GraphFlood (Gailleton et al., 2024) for stationary solutions and a simplified implementation of Bates et al., 2010 and inertial flow.
 
 ## 🚀 Key Features
 
@@ -27,19 +29,20 @@ The fast flow routines are implemented following **Jain et al., 2024** [📝](ht
 - **Precipitation input**: Rainfall and boundary conditions
 
 ### **Landscape Evolution**
+- **Refactor in progress, not usable right now**
 - **Stream Power Law (SPL)**: Bedrock erosion with detachment and transport-limited models
 - **Sediment transport**: Erosion-deposition coupling with transport capacity
 - **Tectonic uplift**: Block and spatially-varying uplift patterns
-- **Implicit solvers**: Stable numerical schemes for large time steps
+- **Non linear hillslope**: Based on Carretier et al. 2016
 
 ### **Visualization & Analysis**
 - **Hillshading**: GPU-accelerated terrain shading with multiple illumination models
-- **Real-time 3D visualization**: Interactive terrain rendering with Taichi GGUI (WiP)
+- **Real-time 3D visualization**: Interactive terrain rendering with Taichi GGUI (WiP - currently broken)
 
 ### **Performance & Memory**
 - **Field pooling system**: Efficient GPU memory management with automatic field reuse
-- **Parallel algorithms**: Optimized for modern GPU architectures
-- **Scalable**: Handles large grids (millions of nodes) efficiently
+- **General Parallel algorithms**: Utilities written in taichi (e.g. Blelloch parallel scan, ping-pong, swap, ...)
+- **Scalable**: Handles large grids (up to hundreds of millions of nodes) efficiently
 
 ## 📦 Installation
 
@@ -124,36 +127,12 @@ discharge_y = flooder.get_qy()       # y-direction discharge
 ```
 
 ### Landscape Evolution
-```python
-# Setup SPL erosion model
-alpha = ti.field(ti.f32, shape=(nx*ny,))
-alpha_ = ti.field(ti.f32, shape=(nx*ny,))
-alpha.fill(1e-5)   # Erosion coefficient
-alpha_.fill(1e-5)
 
-# Run erosion time step
-pf.erodep.SPL(router, alpha, alpha_)
-
-# Get eroded topography
-new_elevation = router.get_Z()
-```
+WIP
 
 ### Real-time Visualization
-```python
-# 3D terrain visualization
-viewer = pf.visu.SurfaceViewer(elevation)
-viewer.run()
 
-# Hillshading
-hillshade = pf.visu.hillshade_numpy(
-    elevation, 
-    altitude_deg=45, 
-    azimuth_deg=315
-)
-
-# Multidirectional hillshading
-multi_hs = pf.visu.hillshade_multidirectional_numpy(elevation)
-```
+WIP
 
 ### Memory Management
 ```python
@@ -229,8 +208,8 @@ pyfastflow/
 ## 🔬 Scientific Background
 
 ### Flow Routing Algorithms
-- **Steepest Descent**: O'Callaghan & Mark (1984) with GPU optimization
-- **Lake Flow**: Improved depression handling with priority flood algorithms
+
+- **Flow routing through local minimas**: Improved depression handling with Cordonnier et al. (2019) adapted to GPU by Jain et al. (2024)
 - **Rake-and-Compress**: Parallel flow accumulation following Jain et al. (2024)
 
 ### Shallow Water Flow
@@ -238,9 +217,9 @@ pyfastflow/
 - **GraphFlood**: Graph-based implicit flow routing (Gaileton et al., 2024)
 
 ### Landscape Evolution
-- **Stream Power Law**: E = K × A^m × S^n erosion model
-- **Transport-Limited**: Erosion-transport-deposition coupling
-- **Implicit Schemes**: Stable numerical methods for large time steps
+- **Stream Power Law**: E = K × A^m × S^n erosion model (Howard and Kerby 1983)
+- **Transport-Limited**: Erosion-transport-deposition coupling (Davy and Lague, 2009 style)
+- **Non linear hillslope**: implemented from CIDRE (Carretier et al., 2016)
 
 ## 🎯 Performance
 
@@ -253,7 +232,7 @@ PyFastFlow achieves significant speedups over traditional CPU implementations:
 
 ## 🤝 Contributing
 
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
+We will welcome contributions once the first version is stable.
 
 ### Development Setup
 ```bash
@@ -265,7 +244,7 @@ pre-commit install
 
 ## 📄 License
 
-This project uses a **restrictive license** for commercial applications. See [LICENSE](LICENSE) for details.
+This project uses a **restrictive license for commercial applications**, free to use for research/personal use. See [LICENSE](LICENSE) for details.
 
 ## 📖 Citation
 
