@@ -214,7 +214,7 @@ class Flooder:
 				# Apply shallow water equations with Manning's friction
 				pf.flood.graphflood_core_cte_mannings(self.h.field, self.grid.z.field, self.dh.field, self.router.receivers.field, self.router.Q.field)
 			else:
-					if(self.nQ_init == False):
+				if(self.nQ_init == False):
 					self.nQ.field.copy_from(self.router.Q.field)
 				else:
 					pf.general_algorithms.util_taichi.weighted_mean_B_in_A(self.nQ.field, self.router.Q.field, temporal_filtering)

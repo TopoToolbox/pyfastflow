@@ -32,7 +32,8 @@ import taichi as ti
 import numpy as np
 import math
 from .. import constants as cte
-from ..flow import neighbourer_flat as nei
+from ..grid import neighbourer_flat as nei
+from ..general_algorithms.math_utils import atan
 
 
 @ti.kernel
@@ -104,7 +105,7 @@ def hillshade_vectorized(z: ti.template(), hillshade: ti.template(),
         dz_dy *= z_factor
         
         # Calculate slope and aspect
-        slope_rad = ti.math.atan(ti.math.sqrt(dz_dx * dz_dx + dz_dy * dz_dy))
+        slope_rad = atan(ti.math.sqrt(dz_dx * dz_dx + dz_dy * dz_dy))
         
         # Aspect calculation (direction of steepest descent)
         aspect_rad = 0.0
@@ -196,7 +197,7 @@ def hillshade_2d(z: ti.types.ndarray(dtype=ti.f32, ndim=2),
         dz_dy *= z_factor
         
         # Calculate slope and aspect
-        slope_rad = ti.math.atan(ti.math.sqrt(dz_dx * dz_dx + dz_dy * dz_dy))
+        slope_rad = atan(ti.math.sqrt(dz_dx * dz_dx + dz_dy * dz_dy))
         
         # Aspect calculation (direction of steepest descent)
         aspect_rad = 0.0

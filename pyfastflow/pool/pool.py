@@ -8,6 +8,11 @@ memory management using the FieldsBuilder pattern.
 The pool organizes fields by data type and shape, enabling O(1) lookup
 performance and efficient field reuse across computations.
 
+Supports 0D (scalar), 1D, and 2D fields with appropriate Taichi indexing:
+- 0D fields: Single scalar values, no indexing required
+- 1D fields: Linear arrays with ti.i indexing  
+- 2D fields: Matrices with ti.ij indexing
+
 Author: B. Gailleton
 """
 
@@ -24,12 +29,14 @@ class TPField:
     FieldsBuilder pattern. Tracks usage state and enables field reuse through
     pooling to minimize allocation overhead.
     
+    Supports 0D (scalar), 1D, and 2D fields with appropriate indexing patterns.
+    
     Attributes:
         id: Unique field identifier
         field: Underlying Taichi field
         in_use: Current usage status
         dtype: Field data type
-        shape: Field dimensions
+        shape: Field dimensions (empty tuple () for 0D scalars)
         snodetree: Finalized field structure for memory management
         
     Author: B. Gailleton
@@ -46,13 +53,23 @@ class TPField:
         
         Args:
             dtype: Taichi data type (ti.f32, ti.i32, etc.)
-            shape: Field dimensions as tuple
+            shape: Field dimensions as tuple, int, or empty tuple/0 for scalar fields
+                   - () or 0: 0D scalar field
+                   - (n,): 1D field with n elements
+                   - (n, m): 2D field with n×m elements
             
         Author: B. Gailleton
         """
 
-        if(isinstance(shape,Tuple) == False):
-            shape = tuple([shape])
+        # Handle different shape input types and normalize to tuple
+        if isinstance(shape, int):
+            shape = (shape,) if shape > 0 else ()
+        elif not isinstance(shape, tuple):
+            shape = tuple(shape) if hasattr(shape, '__iter__') else (shape,)
+        
+        # Handle empty tuple or zero values for 0-dimensional fields
+        if not shape or (len(shape) == 1 and shape[0] == 0):
+            shape = ()
 
         TPField._next_id += 1
         self.id = TPField._next_id
@@ -65,12 +82,17 @@ class TPField:
         self.field = ti.field(dtype)
         
         # Use appropriate indexing based on dimensionality
-        if len(shape) == 1:
+        if len(shape) == 0:
+            # 0-dimensional field (scalar) - no indexing needed
+            self.fb.place(self.field)
+        elif len(shape) == 1:
+            # 1-dimensional field
             self.fb.dense(ti.i, shape).place(self.field)
         elif len(shape) == 2:
+            # 2-dimensional field
             self.fb.dense(ti.ij, shape).place(self.field)
         else:
-            raise ValueError(f"Unsupported field dimensionality: {len(shape)}D. Only 1D and 2D fields supported.")
+            raise ValueError(f"Unsupported field dimensionality: {len(shape)}D. Only 0D, 1D and 2D fields supported.")
             
         self.snodetree = self.fb.finalize()
         
@@ -159,9 +181,14 @@ class TaiPool:
         
     Usage:
         pool = TaiPool()
-        temp_field = pool.get_tpfield(ti.f32, (100, 100))
+        # 2D field
+        temp_field_2d = pool.get_tpfield(ti.f32, (100, 100))
+        # 1D field
+        temp_field_1d = pool.get_tpfield(ti.i32, (1000,))
+        # 0D scalar field
+        temp_scalar = pool.get_tpfield(ti.f32, ())
         # Use temp_field...
-        pool.release_field(temp_field)
+        pool.release_field(temp_field_2d)
         
     Author: B. Gailleton
     """
@@ -187,13 +214,26 @@ class TaiPool:
         
         Args:
             dtype: Taichi data type (ti.f32, ti.i32, etc.)
-            shape: Field dimensions as tuple
+            shape: Field dimensions as tuple, int, or empty tuple for scalar
+                   - (): 0D scalar field
+                   - (n,): 1D field with n elements  
+                   - (n, m): 2D field with n×m elements
             
         Returns:
             TPField: Ready-to-use field marked as in use
             
         Author: B. Gailleton
         """
+        # Normalize shape to match TPField's shape handling
+        if isinstance(shape, int):
+            shape = (shape,) if shape > 0 else ()
+        elif not isinstance(shape, tuple):
+            shape = tuple(shape) if hasattr(shape, '__iter__') else (shape,)
+        
+        # Handle empty tuple or zero values for 0-dimensional fields
+        if not shape or (len(shape) == 1 and shape[0] == 0):
+            shape = ()
+            
         key = (dtype, shape)
         
         # Get or create pool for this type/shape
@@ -315,7 +355,10 @@ def get_temp_field(dtype: Any, shape: Tuple[int, ...]) -> TPField:
     
     Args:
         dtype: Taichi data type (ti.f32, ti.i32, etc.)
-        shape: Field dimensions as tuple
+        shape: Field dimensions as tuple, int, or empty tuple for scalar
+               - (): 0D scalar field
+               - (n,): 1D field with n elements
+               - (n, m): 2D field with n×m elements
         
     Returns:
         TPField: Ready-to-use temporary field
@@ -367,14 +410,21 @@ def temp_field(dtype: Any, shape: Tuple[int, ...]) -> TPField:
     
     Recommended usage pattern that ensures proper cleanup:
     
-    with temp_field(ti.f32, (100, 100)) as field:
+    with temp_field(ti.f32, (100, 100)) as field:  # 2D field
         # Use field...
         some_kernel(field)
     # Field automatically released here
     
+    with temp_field(ti.i32, ()) as scalar:  # 0D scalar field
+        # Use scalar...
+        scalar[None] = 42  # Access scalar with [None]
+    
     Args:
         dtype: Taichi data type (ti.f32, ti.i32, etc.)
-        shape: Field dimensions as tuple
+        shape: Field dimensions as tuple, int, or empty tuple for scalar
+               - (): 0D scalar field
+               - (n,): 1D field with n elements
+               - (n, m): 2D field with n×m elements
         
     Returns:
         TPField: Ready-to-use temporary field (context manager)
