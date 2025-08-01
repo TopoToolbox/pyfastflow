@@ -38,6 +38,9 @@ setup(
             "black",
             "flake8",
         ],
+        "topotoolbox": [
+            "topotoolbox",
+        ],
     },
     keywords="geomorphology hydraulics flow routing GPU taichi",
     project_urls={

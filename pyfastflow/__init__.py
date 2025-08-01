@@ -65,6 +65,13 @@ Basic Usage:
         # Use temporary field efficiently
         temp.fill(0.0)
 
+Optional Dependencies:
+PyFastFlow supports optional integration with additional packages for enhanced functionality:
+
+- TopoToolbox: For advanced DEM processing and terrain analysis
+  Install with: pip install pyfastflow[topotoolbox]
+  Or separately: pip install topotoolbox
+
 Scientific Background:
 The algorithms follow recent advances in GPU geomorphological modeling,
 particularly Jain et al. (2024) for fast flow routines, Bates et al. (2010)
@@ -84,6 +91,7 @@ from . import flood
 from . import flow
 from . import general_algorithms
 from . import grid
+from . import io
 from . import pool
 from . import visu
 
@@ -95,6 +103,7 @@ __all__ = [
     "flow",
     "general_algorithms",
     "grid",
+    "io",
     "pool",
     "visu"
 ]

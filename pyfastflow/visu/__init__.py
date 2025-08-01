@@ -5,6 +5,10 @@ This submodule provides GPU-accelerated visualization tools and terrain analysis
 algorithms for flow routing, flood modeling, and landscape evolution simulations.
 Integrates with pool-based memory management for efficient GPU field operations.
 
+**Recommended Usage**: For most hillshading needs, use the built-in `grid.hillshade()` 
+method which provides a clean interface with automatic memory management. The functions
+in this module are for advanced use cases or when working directly with NumPy arrays.
+
 Core Modules:
 - live: Real-time 3D visualization and animation utilities using Taichi GUI
 - hillshading: GPU-accelerated terrain hillshading and shaded relief algorithms
@@ -27,12 +31,12 @@ Hillshading Algorithms:
 - Pool-based computation: Efficient GPU memory management for temporary fields
 
 Available Functions:
-- hillshade_flowrouter: Generate hillshade directly from FlowRouter elevation
-- hillshade_multidirectional_flowrouter: Multi-azimuth hillshading for FlowRouter
 - hillshade_numpy: Standard hillshading for NumPy elevation arrays
 - hillshade_multidirectional_numpy: Multi-azimuth hillshading for NumPy arrays
-- hillshade_grid: GPU hillshading using GridField elevation data
-- hillshade_multidirectional_grid: Multi-azimuth hillshading for GridField
+- hillshade_grid: GPU hillshading using Grid elevation data
+- hillshade_multidirectional_grid: Multi-azimuth hillshading for Grid
+- hillshade_vectorized: Low-level GPU kernel for vectorized hillshading (advanced use)
+- hillshade_2d: 2D array hillshading kernel (advanced use)
 - SurfaceViewer: Interactive 3D terrain visualization class
 
 Usage:
@@ -63,13 +67,16 @@ Usage:
         azimuths_deg=[315, 45, 135, 225]  # Four cardinal directions
     )
     
-    # Integration with FlowRouter (uses pool-based GPU fields)
-    grid = pf.flow.GridField(nx, ny, dx)
-    grid.set_z(elevation)
+    # Integration with Grid (uses pool-based GPU fields)
+    grid = pf.grid.Grid(nx, ny, dx, elevation)
     router = pf.flow.FlowRouter(grid)
     
-    hillshade_gpu = pf.visu.hillshade_flowrouter(
-        router, 
+    # Built-in Grid hillshading (recommended)
+    hillshade_builtin = grid.hillshade(altitude_deg=30, azimuth_deg=270)
+    
+    # Or use visu functions directly
+    hillshade_gpu = pf.visu.hillshade_grid(
+        grid, 
         altitude_deg=30,
         azimuth_deg=270    # West illumination
     )
@@ -103,8 +110,8 @@ Author: B.G.
 
 from .live import *
 from .hillshading import (
-    hillshade_flowrouter,
-    hillshade_multidirectional_flowrouter,
+    hillshade_vectorized,
+    hillshade_2d,
     hillshade_numpy,
     hillshade_multidirectional_numpy,
     hillshade_grid,
@@ -121,8 +128,8 @@ __all__ = [
     "SurfaceViewer",
     
     # Hillshading Functions
-    "hillshade_flowrouter",
-    "hillshade_multidirectional_flowrouter", 
+    "hillshade_vectorized",
+    "hillshade_2d",
     "hillshade_numpy",
     "hillshade_multidirectional_numpy",
     "hillshade_grid",
