@@ -8,6 +8,9 @@
 
 ## Overview
 
+**A lot of work will be put into finalising v1.0 in September/October 2025 + paper**
+
+
 PyFastFlow is a high-performance Python package for geomorphological and hydraulic flow routing computations on GPU. Built on the Taichi programming language, it provides efficient, portable parallel algorithms for flow accumulation, depression filling, shallow water flow modeling, and landscape evolution simulations.
 
 The fast flow routines are implemented following **Jain et al., 2024** [📝](https://www-sop.inria.fr/reves/Basilic/2024/JKGFC24/FastFlowPG2024_Author_Version.pdf), delivering state-of-the-art performance for GPU-oriented flow computation (flow accumulation and local minima handling).
