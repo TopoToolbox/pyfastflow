@@ -125,4 +125,3 @@ def graphflood_core_cte_mannings(h:ti.template(), z:ti.template(), dh:ti.templat
 	# Apply final water depth changes
 	for i in h:
 		h[i] += dh[i]  # Apply final depth change
-		# Note: z field should be updated externally to maintain z = bed + h relationship

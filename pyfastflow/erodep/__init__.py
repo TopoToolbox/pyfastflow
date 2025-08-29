@@ -84,8 +84,9 @@ nonlinear erosion equation iteratively along receiver chains.
 Author: B.G.
 """
 
-from .SPL import *
-from .deposition import *
+from .archive.SPL import *
+from .uplift import *
+from .fluvial_deposition import *
 
 # Export all functions and classes
 __all__ = [

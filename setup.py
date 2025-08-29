@@ -30,6 +30,7 @@ setup(
         "taichi>=1.4.0",
         "numpy>=1.20.0",
         "matplotlib>=3.3.0",
+        "click>=7.0",
     ],
     extras_require={
         "dev": [
@@ -46,5 +47,10 @@ setup(
     project_urls={
         "Bug Reports": "https://github.com/bgailleton/fastflow_taichi/issues",
         "Source": "https://github.com/bgailleton/fastflow_taichi",
+    },
+    entry_points={
+        'console_scripts': [
+            'pff-raster2npy=pyfastflow.cli.raster_commands:raster2npy',
+        ],
     },
 )
