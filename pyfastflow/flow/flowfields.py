@@ -12,7 +12,7 @@ Author: B.G.
 import taichi as ti
 import numpy as np
 import math
-from . import environment as env
+# from . import environment as env  # Module not found
 from .. import constants as cte
 from .. import general_algorithms as gena
 from . import downstream_propag as dpr

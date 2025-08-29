@@ -183,3 +183,47 @@ def raster_to_gridfield(fname):
         stacklevel=2
     )
     return raster_to_grid(fname)
+
+
+def raster_to_numpy(fname):
+    """
+    Load a raster file and return its values as a numpy 2D array.
+    
+    Simple utility function that loads a raster file using TopoToolbox
+    and returns only the elevation values as a 2D numpy array, without
+    the additional metadata and Grid wrapper.
+    
+    Args:
+        fname (str): Path to raster file (GeoTIFF, ASCII grid, etc.)
+            Must be a format supported by TopoToolbox
+            
+    Returns:
+        numpy.ndarray: 2D array containing raster values
+        
+    Raises:
+        FileNotFoundError: If the specified file doesn't exist
+        ValueError: If the raster file cannot be read or has invalid data
+        ImportError: If topotoolbox is not installed
+        
+    Example:
+        import pyfastflow as pf
+        import numpy as np
+        
+        # Load elevation values as numpy array
+        elevation = pf.io.raster_to_numpy('path/to/elevation.tif')
+        
+        # Save as .npy file
+        np.save('elevation.npy', elevation)
+        
+    Author: B.G.
+    """
+    _check_topotoolbox()
+    
+    # Load raster using TopoToolbox
+    try:
+        go = ttb.read_tif(fname)
+    except Exception as e:
+        raise ValueError(f"Failed to read raster file '{fname}': {e}")
+    
+    # Return numpy array of values
+    return go.z

@@ -112,6 +112,7 @@ Author: B.G.
 from .ttbwrp import (
     gridobj_to_grid,
     raster_to_grid,
+    raster_to_numpy,
     gridobj_to_gridfield,  # Deprecated alias
     raster_to_gridfield,   # Deprecated alias
     TOPOTOOLBOX_AVAILABLE
@@ -122,6 +123,7 @@ __all__ = [
     # Primary functions
     "gridobj_to_grid",
     "raster_to_grid",
+    "raster_to_numpy",
     
     # Legacy aliases (deprecated)
     "gridobj_to_gridfield", 

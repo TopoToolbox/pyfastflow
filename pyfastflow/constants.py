@@ -182,6 +182,7 @@ KD = 1e-2
 # Units depend on drainage area exponent m: [L^(1-2m)/T]
 # Default value suitable for moderate bedrock strength
 KR = 2e-5
+KS = 3e-5
 
 # Time step for landscape evolution models (years)
 # Large time steps possible due to implicit numerical schemes

@@ -65,15 +65,14 @@ Author: B.G.
 
 # Import all flow modules - accessible as ff.flow.module_name
 from ..constants import *
-from .neighbourer_flat import *
+from ..grid.neighbourer_flat import *
 from .receivers import *
 from .downstream_propag import *
 from .lakeflow import *
 from .f32_i32_struct import *
-from .util_taichi import *
+from ..general_algorithms.util_taichi import *
 from .flowfields import *
 from .fill_topo import *
-from .environment import *
 from .level_acc import *
 
 # Export all modules

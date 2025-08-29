@@ -85,6 +85,7 @@ __version__ = "0.1.0"
 __author__ = "B.G."
 
 # Import all submodules in alphabetical order
+from . import cli
 from . import constants
 from . import erodep
 from . import flood
@@ -92,11 +93,13 @@ from . import flow
 from . import general_algorithms
 from . import grid
 from . import io
+from . import misc
 from . import pool
 from . import visu
 
 # Export all submodules
 __all__ = [
+    "cli",
     "constants",
     "erodep", 
     "flood",
@@ -104,6 +107,7 @@ __all__ = [
     "general_algorithms",
     "grid",
     "io",
+    "misc",
     "pool",
     "visu"
 ]
