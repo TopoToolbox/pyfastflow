@@ -14,6 +14,4 @@ Author: B.G.
 from .raster_utils import load_raster_save_numpy
 
 # Export public API
-__all__ = [
-    "load_raster_save_numpy"
-]
+__all__ = ["load_raster_save_numpy"]

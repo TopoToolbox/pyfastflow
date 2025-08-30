@@ -1,7 +1,7 @@
 """
 PyFastFlow - GPU-accelerated geomorphological and hydraulic flow modeling.
 
-A high-performance Python package for geomorphological and hydraulic flow routing on digital 
+A high-performance Python package for geomorphological and hydraulic flow routing on digital
 elevation models using Taichi for GPU acceleration. Built for large-scale simulations with
 efficient memory management through field pooling.
 
@@ -29,37 +29,37 @@ Basic Usage:
     import pyfastflow as pf
     import taichi as ti
     import numpy as np
-    
+
     # Initialize Taichi GPU backend
     ti.init(ti.gpu)
-    
+
     # Create grid and flow router
     nx, ny, dx = 512, 512, 10.0
     elevation = np.random.rand(ny, nx) * 100
-    
+
     grid = pf.grid.Grid(nx, ny, dx, elevation)
     router = pf.flow.FlowRouter(grid)
-    
+
     # Flow routing and accumulation
     router.compute_receivers()
     router.reroute_flow()
     router.accumulate_constant_Q(1.0)
-    
+
     # 2D flood modeling
     flooder = pf.flood.Flooder(router, precipitation_rates=10e-3/3600)
     flooder.run_LS(N=1000)
-    
+
     # Landscape evolution
     alpha_ = ti.field(ti.f32, shape=(nx*ny,))
     alpha__ = ti.field(ti.f32, shape=(nx*ny,))
     alpha_.fill(1e-5)
     alpha__.fill(1e-5)
     pf.erodep.SPL(router, alpha_, alpha__)
-    
+
     # Visualization
     hillshade = pf.visu.hillshade_numpy(elevation)
     viewer = pf.visu.SurfaceViewer(elevation)
-    
+
     # Memory management with field pooling
     with pf.pool.temp_field(ti.f32, (nx*ny,)) as temp:
         # Use temporary field efficiently
@@ -75,7 +75,7 @@ PyFastFlow supports optional integration with additional packages for enhanced f
 Scientific Background:
 The algorithms follow recent advances in GPU geomorphological modeling,
 particularly Jain et al. (2024) for fast flow routines, Bates et al. (2010)
-for shallow water flow, Gailleton et al. (2024) for GraphFlood, and standard 
+for shallow water flow, Gailleton et al. (2024) for GraphFlood, and standard
 Stream Power Law formulations for landscape evolution.
 
 Author: B.G.
@@ -85,23 +85,25 @@ __version__ = "0.1.0"
 __author__ = "B.G."
 
 # Import all submodules in alphabetical order
-from . import cli
-from . import constants
-from . import erodep
-from . import flood
-from . import flow
-from . import general_algorithms
-from . import grid
-from . import io
-from . import misc
-from . import pool
-from . import visu
+from . import (
+    cli,
+    constants,
+    erodep,
+    flood,
+    flow,
+    general_algorithms,
+    grid,
+    io,
+    misc,
+    pool,
+    visu,
+)
 
 # Export all submodules
 __all__ = [
     "cli",
     "constants",
-    "erodep", 
+    "erodep",
     "flood",
     "flow",
     "general_algorithms",
@@ -109,5 +111,5 @@ __all__ = [
     "io",
     "misc",
     "pool",
-    "visu"
+    "visu",
 ]

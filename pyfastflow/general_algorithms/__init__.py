@@ -22,20 +22,20 @@ Example Usage:
     ```python
     from pyfastflow.general_algorithms import inclusive_scan, getSrc, updateSrc, atan
     import taichi as ti
-    
+
     # Parallel prefix sum
     input_data = ti.field(ti.f32, shape=1024)
     output_data = ti.field(ti.f32, shape=1024)
     work_buffer = ti.field(ti.f32, shape=2048)
     inclusive_scan(input_data, output_data, work_buffer, 1024)
-    
+
     # Ping-pong buffer management
     state_buffer = ti.field(ti.i32, shape=100)
     for iteration in range(10):
         flip = getSrc(state_buffer, thread_id, iteration)
         # Process data...
         updateSrc(state_buffer, thread_id, iteration, flip)
-    
+
     # Mathematical utilities in Taichi kernels
     @ti.kernel
     def compute_slope():
@@ -46,15 +46,8 @@ Example Usage:
 Author: B. Gailleton
 """
 
-from .parallel_scan import inclusive_scan
-from .pingpong import getSrc, updateSrc, fuse
-from .slope_tools import *
 from .math_utils import atan
+from .parallel_scan import inclusive_scan
+from .pingpong import fuse, getSrc, updateSrc
 
-__all__ = [
-    'inclusive_scan',
-    'getSrc', 
-    'updateSrc',
-    'fuse',
-    'atan'
-]
+__all__ = ["inclusive_scan", "getSrc", "updateSrc", "fuse", "atan"]
