@@ -13,6 +13,4 @@ Author: B.G.
 from .raster_commands import raster2npy
 
 # Export public API
-__all__ = [
-    "raster2npy"
-]
+__all__ = ["raster2npy"]

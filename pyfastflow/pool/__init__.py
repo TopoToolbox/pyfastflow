@@ -35,10 +35,10 @@ Performance Benefits:
 Usage Patterns:
     import pyfastflow as pf
     import taichi as ti
-    
+
     # Initialize Taichi for GPU
     ti.init(ti.gpu)
-    
+
     # Recommended: Context manager for automatic cleanup
     with pf.pool.temp_field(ti.f32, (512*512,)) as temp:
         # Use field in computations
@@ -46,7 +46,7 @@ Usage Patterns:
         some_kernel(temp)
         result = temp.to_numpy()
     # Field automatically returned to pool
-    
+
     # Manual management (advanced usage)
     temp = pf.pool.get_temp_field(ti.f32, (100, 100))
     try:
@@ -54,12 +54,12 @@ Usage Patterns:
         computation_kernel(temp)
     finally:
         pf.pool.release_temp_field(temp)  # Always release
-    
+
     # Pool monitoring and statistics
     stats = pf.pool.pool_stats()
     print(f"Pool efficiency: {stats['reuse_rate']:.1%}")
     print(f"Fields in use: {stats['in_use']}/{stats['total']}")
-    
+
     # Integration with PyFastFlow algorithms
     # All PyFastFlow algorithms automatically use the pool system
     router = pf.flow.FlowRouter(grid)
@@ -75,23 +75,23 @@ Author: B. Gailleton
 """
 
 from .pool import (
+    TaiPool,
     TPField,
-    TaiPool, 
-    get_temp_field,
-    release_temp_field,
-    pool_stats,
     clear_pool,
+    get_temp_field,
+    pool_stats,
+    release_temp_field,
+    taipool,
     temp_field,
-    taipool
 )
 
 __all__ = [
     "TPField",
     "TaiPool",
-    "get_temp_field", 
+    "get_temp_field",
     "release_temp_field",
     "pool_stats",
     "clear_pool",
     "temp_field",
-    "taipool"
+    "taipool",
 ]

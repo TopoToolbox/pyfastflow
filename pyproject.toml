@@ -36,8 +36,7 @@ dependencies = [
 dev = [
     "pytest>=6.0",
     "pytest-cov",
-    "black",
-    "flake8",
+    "ruff>=0.1.0",
 ]
 topotoolbox = [
     "topotoolbox",
@@ -54,3 +53,30 @@ pff-raster2npy = "pyfastflow.cli.raster_commands:raster2npy"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["pyfastflow*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+# Enable PEP8 style checks and more fixable rules
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade (modernize Python syntax)
+    "COM", # flake8-commas
+    "Q",   # flake8-quotes
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "COM812", # trailing comma missing (conflicts with formatter)
+    "COM819", # trailing comma prohibited (conflicts with formatter)
+]
+
+[tool.ruff.format]
+# Black-compatible formatter settings
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

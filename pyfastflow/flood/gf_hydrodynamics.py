@@ -17,111 +17,121 @@ Author: B.G.
 """
 
 import taichi as ti
+
+import pyfastflow.flow as flow
+
 from .. import constants as cte
-import pyfastflow.flow as flow 
+
 
 @ti.kernel
-def diffuse_Q_constant_prec(z:ti.template(), Q:ti.template(), temp:ti.template()):
-	"""
-	Diffuse discharge field to simulate multiple flow paths.
-	
-	Redistributes discharge from each cell to its neighbors based on slope
-	gradients, creating a more realistic multiple flow direction pattern
-	from the original single flow direction (SFD) routing.
-	
-	The method:
-	1. Initializes precipitation input for each cell
-	2. Computes slope-weighted diffusion to neighbors
-	3. Redistributes discharge proportionally to slope gradients
-	
-	Args:
-		z (ti.template): Combined surface elevation field (topography + water depth)
-		Q (ti.template): Discharge field to diffuse
-		temp (ti.template): Temporary field for intermediate calculations
-	
-	Author: B.G.
-	"""
+def diffuse_Q_constant_prec(z: ti.template(), Q: ti.template(), temp: ti.template()):
+    """
+    Diffuse discharge field to simulate multiple flow paths.
 
-	# Initialize precipitation input and handle boundary conditions
-	for i in Q:
-		temp[i] = cte.PREC * cte.DX * cte.DX  # Add precipitation as volume input
+    Redistributes discharge from each cell to its neighbors based on slope
+    gradients, creating a more realistic multiple flow direction pattern
+    from the original single flow direction (SFD) routing.
 
-	
-	# Diffuse discharge based on slope gradients
-	for i in z:
-		# Skip boundary cells
-		if flow.neighbourer_flat.can_leave_domain(i):
-			continue
+    The method:
+    1. Initializes precipitation input for each cell
+    2. Computes slope-weighted diffusion to neighbors
+    3. Redistributes discharge proportionally to slope gradients
 
-		# Calculate total slope gradient sum for normalization
-		sums = 0.
-		for k in range(4):  # Check all 4 neighbors
-			j = flow.neighbourer_flat.neighbour(i,k)
-			sums += ti.max(0., (((z[i])-(z[j]))/cte.DX) if j!=-1 else 0.)
-		
-		# Skip cells with no downslope neighbors
-		if(sums == 0.):
-			continue
+    Args:
+            z (ti.template): Combined surface elevation field (topography + water depth)
+            Q (ti.template): Discharge field to diffuse
+            temp (ti.template): Temporary field for intermediate calculations
 
-		# Distribute discharge proportionally to slope gradients
-		for k in range(4):
-			j = flow.neighbourer_flat.neighbour(i,k)
-			tS = ti.max(0., (((z[i])-(z[j]))/cte.DX) if j!=-1 else 0.)
-			ti.atomic_add(temp[j], tS/sums * Q[i])  # Add proportional discharge
+    Author: B.G.
+    """
 
-	# Update discharge field with diffused values
-	for i in Q:
-		Q[i] = temp[i]
-		
+    # Initialize precipitation input and handle boundary conditions
+    for i in Q:
+        temp[i] = cte.PREC * cte.DX * cte.DX  # Add precipitation as volume input
+
+    # Diffuse discharge based on slope gradients
+    for i in z:
+        # Skip boundary cells
+        if flow.neighbourer_flat.can_leave_domain(i):
+            continue
+
+        # Calculate total slope gradient sum for normalization
+        sums = 0.0
+        for k in range(4):  # Check all 4 neighbors
+            j = flow.neighbourer_flat.neighbour(i, k)
+            sums += ti.max(0.0, (((z[i]) - (z[j])) / cte.DX) if j != -1 else 0.0)
+
+        # Skip cells with no downslope neighbors
+        if sums == 0.0:
+            continue
+
+        # Distribute discharge proportionally to slope gradients
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            tS = ti.max(0.0, (((z[i]) - (z[j])) / cte.DX) if j != -1 else 0.0)
+            ti.atomic_add(temp[j], tS / sums * Q[i])  # Add proportional discharge
+
+    # Update discharge field with diffused values
+    for i in Q:
+        Q[i] = temp[i]
+
 
 @ti.kernel
-def graphflood_core_cte_mannings(h:ti.template(), z:ti.template(), dh:ti.template(), rec:ti.template(), Q:ti.template()):
-	"""
-	Core shallow water flow computation using Manning's equation.
-	
-	Implements the main hydrodynamic computation for 2D shallow water flow
-	using Manning's equation for flow resistance. Updates water depth based
-	on discharge input and outflow capacity.
-	
-	The method:
-	1. Computes local slope from flow receivers
-	2. Calculates outflow capacity using Manning's equation
-	3. Updates water depth based on discharge balance
-	4. Ensures non-negative depth values
-	5. Maintains separate water depth field (bed elevation unchanged)
-	
-	Based on core methods from Gailleton et al. 2024.
-	
-	Args:
-		h (ti.template): Flow depth field
-		z (ti.template): Combined surface elevation field (topography + water depth)
-		dh (ti.template): Depth change field for intermediate calculations
-		rec (ti.template): Flow receiver field from flow routing
-		Q (ti.template): Discharge field
-	
-	Author: B.G.
-	"""
+def graphflood_core_cte_mannings(
+    h: ti.template(),
+    z: ti.template(),
+    dh: ti.template(),
+    rec: ti.template(),
+    Q: ti.template(),
+):
+    """
+    Core shallow water flow computation using Manning's equation.
 
-	# Compute depth changes using Manning's equation
-	for i in h:
-		# Determine local slope
-		tS = cte.EDGESW  # Use edge slope for boundary/sink cells
-		if(rec[i] != i):  # Interior cells with valid receivers
-			tS = ti.max(((z[i]+h[i])-(z[rec[i]]+h[rec[i]]))/cte.DX, 1e-4)  # Slope to receiver (minimum 1e-4)
+    Implements the main hydrodynamic computation for 2D shallow water flow
+    using Manning's equation for flow resistance. Updates water depth based
+    on discharge input and outflow capacity.
 
-		# Calculate outflow capacity using Manning's equation
-		# Q = (1/n) * A * R^(2/3) * S^(1/2), where R ≈ h for wide channels
-		Qo = cte.DX*h[i]**(5./3.)/cte.MANNING * ti.math.sqrt(tS)
+    The method:
+    1. Computes local slope from flow receivers
+    2. Calculates outflow capacity using Manning's equation
+    3. Updates water depth based on discharge balance
+    4. Ensures non-negative depth values
+    5. Maintains separate water depth field (bed elevation unchanged)
 
-		# Update depth based on discharge balance (inflow - outflow)
-		tdh = (Q[i] - Qo)/(cte.DX**2) * cte.DT_HYDRO  # Volume change per unit area
+    Based on core methods from Gailleton et al. 2024.
 
-		# Apply depth change and ensure non-negative depths
-		# h[i] += tdh
-		if(h[i] + tdh < 0):  # Prevent negative depths
-			tdh = -h[i]  # Adjust change to reach zero depth
-		dh[i] = tdh
+    Args:
+            h (ti.template): Flow depth field
+            z (ti.template): Combined surface elevation field (topography + water depth)
+            dh (ti.template): Depth change field for intermediate calculations
+            rec (ti.template): Flow receiver field from flow routing
+            Q (ti.template): Discharge field
 
-	# Apply final water depth changes
-	for i in h:
-		h[i] += dh[i]  # Apply final depth change
+    Author: B.G.
+    """
+
+    # Compute depth changes using Manning's equation
+    for i in h:
+        # Determine local slope
+        tS = cte.EDGESW  # Use edge slope for boundary/sink cells
+        if rec[i] != i:  # Interior cells with valid receivers
+            tS = ti.max(
+                ((z[i] + h[i]) - (z[rec[i]] + h[rec[i]])) / cte.DX, 1e-4
+            )  # Slope to receiver (minimum 1e-4)
+
+        # Calculate outflow capacity using Manning's equation
+        # Q = (1/n) * A * R^(2/3) * S^(1/2), where R ≈ h for wide channels
+        Qo = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(tS)
+
+        # Update depth based on discharge balance (inflow - outflow)
+        tdh = (Q[i] - Qo) / (cte.DX**2) * cte.DT_HYDRO  # Volume change per unit area
+
+        # Apply depth change and ensure non-negative depths
+        # h[i] += tdh
+        if h[i] + tdh < 0:  # Prevent negative depths
+            tdh = -h[i]  # Adjust change to reach zero depth
+        dh[i] = tdh
+
+    # Apply final water depth changes
+    for i in h:
+        h[i] += dh[i]  # Apply final depth change

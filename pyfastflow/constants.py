@@ -20,7 +20,7 @@ Constant Categories:
 Boundary Condition Modes:
 - BOUND_MODE = 0: Open boundaries (flow can exit at all edges)
 - BOUND_MODE = 1: Periodic East-West (wraps left-right borders)
-- BOUND_MODE = 2: Periodic North-South (wraps top-bottom borders) 
+- BOUND_MODE = 2: Periodic North-South (wraps top-bottom borders)
 - BOUND_MODE = 3: Custom per-node boundaries (requires boundary array)
 
 Custom Boundary Codes (when BOUND_MODE = 3):
@@ -32,18 +32,18 @@ Custom Boundary Codes (when BOUND_MODE = 3):
 
 Usage:
     import pyfastflow.constants as cte
-    
+
     # Access constants in Python code
     grid_size = cte.NX * cte.NY
     cell_area = cte.DX * cte.DX
-    
+
     # Constants are automatically available in Taichi kernels
     @ti.kernel
     def my_kernel():
         for i in range(cte.NX * cte.NY):
             # Use constants directly
             cell_area = cte.DX ** 2
-    
+
     # Custom boundary setup
     import numpy as np
     boundaries = np.ones((cte.NY, cte.NX), dtype=np.uint8)
@@ -54,8 +54,8 @@ Usage:
 Author: B.G.
 """
 
-import taichi as ti
 import numpy as np
+import taichi as ti
 
 #########################################
 ###### UTILS CONSTANTS ##################
@@ -70,13 +70,13 @@ INITIALISED = False
 
 # Grid spacing (uniform cell size in meters)
 # Compile-time constant: embedded in GPU kernels for performance
-DX = 1.
+DX = 1.0
 
 # Number of columns in the grid (x-direction)
 # Compile-time constant: affects kernel compilation and memory layout
 NX = 512
 
-# Number of rows in the grid (y-direction)  
+# Number of rows in the grid (y-direction)
 # Compile-time constant: affects kernel compilation and memory layout
 NY = 512
 
@@ -101,36 +101,35 @@ BOUND_MODE = 0
 boundaries = None
 _snodetree_boundaries = None
 
+
 def init_custom_boundaries(tboundaries: np.ndarray):
-	"""
-	Initialize custom boundary conditions from numpy array.
-	
-	Args:
-		tboundaries: Boundary code array (uint8) with shape (NX*NY,)
-		
-	Note:
-		Sets BOUND_MODE to 3 and creates Taichi field for boundary codes
-		
-	Author: B.G.
-	"""
-	global boundaries,_snodetree_boundaries, BOUND_MODE
-	# Clean up existing boundary field if it exists
-	if _snodetree_boundaries is not None:
-		try:
-			_snodetree_boundaries.destroy()
-		except:
-			pass
-		_snodetree_boundaries = None
-	
-	# Create new boundary field
-	fb1 = ti.FieldsBuilder()
-	boundaries = ti.field(dtype=ti.u8)
-	fb1.dense(ti.i, NX*NY).place(boundaries)
-	_snodetree_boundaries = fb1.finalize()  # Finalize field structure
-	boundaries.from_numpy(tboundaries)  # Copy boundary data
-	BOUND_MODE = 3  # Switch to custom boundary mode
+    """
+    Initialize custom boundary conditions from numpy array.
 
+    Args:
+            tboundaries: Boundary code array (uint8) with shape (NX*NY,)
 
+    Note:
+            Sets BOUND_MODE to 3 and creates Taichi field for boundary codes
+
+    Author: B.G.
+    """
+    global boundaries, _snodetree_boundaries, BOUND_MODE
+    # Clean up existing boundary field if it exists
+    if _snodetree_boundaries is not None:
+        try:
+            _snodetree_boundaries.destroy()
+        except (AttributeError, RuntimeError):
+            pass
+        _snodetree_boundaries = None
+
+    # Create new boundary field
+    fb1 = ti.FieldsBuilder()
+    boundaries = ti.field(dtype=ti.u8)
+    fb1.dense(ti.i, NX * NY).place(boundaries)
+    _snodetree_boundaries = fb1.finalize()  # Finalize field structure
+    boundaries.from_numpy(tboundaries)  # Copy boundary data
+    BOUND_MODE = 3  # Switch to custom boundary mode
 
 
 #########################################
@@ -139,7 +138,7 @@ def init_custom_boundaries(tboundaries: np.ndarray):
 
 # Default precipitation rate for constant rainfall scenarios (m/s)
 # Converts 10 mm/hr to m/s: effective precipitation rate
-PREC = 10*1e-3/3600  # 10 mm/hr = 2.78e-6 m/s
+PREC = 10 * 1e-3 / 3600  # 10 mm/hr = 2.78e-6 m/s
 
 # Manning's roughness coefficient for flow resistance (dimensionless)
 # Default value suitable for natural channels and overland flow
@@ -178,7 +177,7 @@ FROUDE_LIMIT = 1.0  # Subcritical flow limit
 # Controls the rate of sediment deposition when transport capacity is exceeded
 KD = 1e-2
 
-# Bedrock erodibility coefficient for Stream Power Law (m^(1-2m)/s)  
+# Bedrock erodibility coefficient for Stream Power Law (m^(1-2m)/s)
 # Units depend on drainage area exponent m: [L^(1-2m)/T]
 # Default value suitable for moderate bedrock strength
 KR = 2e-5
@@ -192,7 +191,7 @@ DT_SPL = 1e3  # 1000 years per time step
 # Controls sensitivity of erosion to drainage area (discharge proxy)
 MEXP = 0.45  # Typical values range from 0.3 to 0.7
 
-# Slope exponent in Stream Power Law: E = K * A^m * S^n  
+# Slope exponent in Stream Power Law: E = K * A^m * S^n
 # Controls sensitivity of erosion to local slope
 # Currently unused in implementation (implicit in receiver selection)
 NEXP = 1.0  # Theoretical value, not used in current algorithms

@@ -2,7 +2,7 @@
 Input/Output and Data Integration Module for PyFastFlow
 
 This submodule provides seamless integration between PyFastFlow and external
-geospatial data sources and analysis packages. Enables easy data exchange, 
+geospatial data sources and analysis packages. Enables easy data exchange,
 file I/O operations, and workflow integration with the broader geospatial
 Python ecosystem.
 
@@ -36,14 +36,14 @@ Usage Examples:
 Basic TopoToolbox Integration:
     import pyfastflow as pf
     import topotoolbox as ttb
-    
+
     # Load DEM with TopoToolbox
     dem_ttb = ttb.load_dem('elevation.tif')
-    
+
     # Convert to PyFastFlow for high-performance simulation
     grid = pf.io.gridobj_to_grid(dem_ttb)
     router = pf.flow.FlowRouter(grid)
-    
+
     # Run PyFastFlow simulation
     router.compute_receivers()
     router.accumulate_constant_Q(1.0)
@@ -51,10 +51,10 @@ Basic TopoToolbox Integration:
 
 Direct Raster Loading:
     import pyfastflow as pf
-    
+
     # Load DEM directly from file
     grid = pf.io.raster_to_grid('path/to/elevation.tif')
-    
+
     # Immediate PyFastFlow usage
     router = pf.flow.FlowRouter(grid)
     flooder = pf.flood.Flooder(router)
@@ -63,24 +63,24 @@ Direct Raster Loading:
 Combined Workflow Example:
     import pyfastflow as pf
     import topotoolbox as ttb
-    
+
     # TopoToolbox preprocessing
     dem = ttb.load_dem('raw_elevation.tif')
     dem_filled = ttb.fillsinks(dem)
     streams_ttb = ttb.streamnet(dem_filled, threshold=1000)
-    
+
     # Convert to PyFastFlow for simulation
     grid = pf.io.gridobj_to_grid(dem_filled)
     router = pf.flow.FlowRouter(grid)
-    
+
     # High-performance landscape evolution
     alpha_ = ti.field(ti.f32, shape=(grid.nx*grid.ny,))
     alpha_.fill(1e-5)
-    
+
     for timestep in range(1000):
         router.compute_receivers()
         pf.erodep.SPL(router, alpha_, alpha_)
-    
+
     # Back to TopoToolbox for analysis
     evolved_dem = ttb.GridObj(router.get_Z().reshape(grid.rshp))
 
@@ -101,7 +101,7 @@ This integration enables powerful workflows combining TopoToolbox's mature
 DEM analysis capabilities with PyFastFlow's high-performance simulation:
 
 - Preprocessing: Use TopoToolbox for data cleaning, coordinate transformations
-- Simulation: Use PyFastFlow for large-scale, GPU-accelerated modeling  
+- Simulation: Use PyFastFlow for large-scale, GPU-accelerated modeling
 - Analysis: Return to TopoToolbox for specialized geomorphometric analysis
 - Validation: Compare results between different algorithmic implementations
 
@@ -110,12 +110,12 @@ Author: B.G.
 
 # Import functions with proper error handling
 from .ttbwrp import (
+    TOPOTOOLBOX_AVAILABLE,
     gridobj_to_grid,
-    raster_to_grid,
-    raster_to_numpy,
     gridobj_to_gridfield,  # Deprecated alias
-    raster_to_gridfield,   # Deprecated alias
-    TOPOTOOLBOX_AVAILABLE
+    raster_to_grid,
+    raster_to_gridfield,  # Deprecated alias
+    raster_to_numpy,
 )
 
 # Export public API
@@ -124,11 +124,9 @@ __all__ = [
     "gridobj_to_grid",
     "raster_to_grid",
     "raster_to_numpy",
-    
     # Legacy aliases (deprecated)
-    "gridobj_to_gridfield", 
+    "gridobj_to_gridfield",
     "raster_to_gridfield",
-    
     # Utility
-    "TOPOTOOLBOX_AVAILABLE"
+    "TOPOTOOLBOX_AVAILABLE",
 ]
