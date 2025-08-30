@@ -3,7 +3,7 @@
 **GPU-accelerated geomorphological and hydraulic flow modeling powered by Taichi**
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![Taichi](https://img.shields.io/badge/taichi-≥1.4.0-orange.svg)](https://github.com/taichi-dev/taichi)
+[![Taichi](https://img.shields.io/badge/taichi-≥1.6.0-orange.svg)](https://github.com/taichi-dev/taichi)
 [![License](https://img.shields.io/badge/license-Custom-red.svg)](./LICENSE)
 
 ## Overview
