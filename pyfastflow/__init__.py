@@ -23,6 +23,7 @@ Core Components:
 - visu: Real-time 3D visualization, hillshading, terrain analysis
 - pool: GPU memory management and field pooling for performance
 - general_algorithms: Fundamental parallel algorithms (scan, ping-pong)
+- noise: GPU-accelerated noise generation (white, red, Perlin noise)
 - constants: Global simulation parameters and configuration
 
 Basic Usage:
@@ -95,6 +96,7 @@ from . import (
     grid,
     io,
     misc,
+    noise,
     pool,
     visu,
 )
@@ -110,6 +112,7 @@ __all__ = [
     "grid",
     "io",
     "misc",
+    "noise",
     "pool",
     "visu",
 ]
