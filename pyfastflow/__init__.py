@@ -25,6 +25,8 @@ Core Components:
 - general_algorithms: Fundamental parallel algorithms (scan, ping-pong)
 - noise: GPU-accelerated noise generation (white, red, Perlin noise)
 - constants: Global simulation parameters and configuration
+- noise: GPU-accelerated noise generation (white, red, Perlin noise)
+- rastermanip: Raster upscaling/downscaling with multiple aggregation methods
 
 Basic Usage:
     import pyfastflow as pf
@@ -60,6 +62,10 @@ Basic Usage:
     # Visualization
     hillshade = pf.visu.hillshade_numpy(elevation)
     viewer = pf.visu.SurfaceViewer(elevation)
+
+    # Raster manipulation
+    upscaled_elevation = pf.rastermanip.double_resolution(elevation, noise_amplitude=0.1)
+    downscaled_elevation = pf.rastermanip.halve_resolution(elevation, method='mean')
 
     # Memory management with field pooling
     with pf.pool.temp_field(ti.f32, (nx*ny,)) as temp:
@@ -98,6 +104,7 @@ from . import (
     misc,
     noise,
     pool,
+    rastermanip,
     visu,
 )
 
@@ -114,5 +121,6 @@ __all__ = [
     "misc",
     "noise",
     "pool",
+    "rastermanip",
     "visu",
 ]

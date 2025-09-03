@@ -135,3 +135,58 @@ def graphflood_core_cte_mannings(
     # Apply final water depth changes
     for i in h:
         h[i] += dh[i]  # Apply final depth change
+
+
+@ti.kernel
+def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), temporal_filtering:ti.f32):
+    """
+    NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
+
+    Author: B.G.
+    """
+
+    # Initialize precipitation input and handle boundary conditions
+    for i in Q:
+        temp[i] = cte.PREC * cte.DX * cte.DX  # Add precipitation as volume input
+        dh[i] = 0.
+
+    # Diffuse discharge based on slope gradients
+    for i in z:
+        # Skip boundary cells
+        if flow.neighbourer_flat.can_leave_domain(i):
+            continue
+
+        # Calculate total slope gradient sum for normalization
+        sums = 0.0
+        msx  = 0.0
+        msy  = 0.0
+        mz   = (z[i] + h[i])
+        for k in ti.static(range(4)):  # Check all 4 neighbors
+            j = flow.neighbourer_flat.neighbour(i, k)
+            ts = ti.max(0.0, (((z[i]+h[i]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
+            sums += ts
+            msx = ti.max(ts, msx) if k == 1 or k == 2 else msx
+            msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
+            mz = ti.max(mz, z[j]+h[j])
+
+
+        # Skip cells with no downslope neighbors
+        if sums == 0.0:
+            # h[i] = mz - z[i] + 2e-3
+            continue
+
+        # Distribute discharge proportionally to slope gradients
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            tS = ti.max(0.0, (((z[i]+h[i]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
+            ti.atomic_add(temp[j], tS / sums * Q[i])  # Add proportional discharge
+
+        norms = ti.math.sqrt(msx**2 + msy**2)
+        Qo = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(norms)
+        dh[i] -= cte.DT_HYDRO * Qo/cte.DX**2
+
+    # Update discharge field with diffused values
+    for i in Q:
+        Q[i] = temp[i] * (1 - temporal_filtering ) + Q[i] * temporal_filtering
+        dh[i] += cte.DT_HYDRO * Q[i]/cte.DX**2
+        h[i] += dh[i]

@@ -144,7 +144,7 @@ class Flooder:
     def rshp(self):
         return self.grid.rshp
 
-    def run_graphflood(self, N=10, N_stochastic=4, N_diffuse=0, temporal_filtering=0.0):
+    def run_graphflood(self, N=10, N_stochastic=4, N_diffuse=0, temporal_filtering=0.0, lake = True):
         """
         Execute GraphFlood implicit shallow water flow simulation with pool-based memory management.
 
@@ -182,6 +182,12 @@ class Flooder:
 
         Author: B.G.
         """
+        import time
+
+        mainst = time.time()
+
+        st = time.time()
+
         z_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
         Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
         receivers_ = pf.pool.taipool.get_tpfield(
@@ -191,30 +197,64 @@ class Flooder:
             dtype=ti.i32, shape=(self.nx * self.ny)
         )
 
+        if self.verbose:
+            print("Init phase took", time.time() - st)
+
+            timer = {
+                'init':0.,
+                "rec" : 0.,
+                "reroute" : 0.,
+                'fill': 0.,
+                'accumulate': 0.,
+                'diffuse':0.,
+                'core':0.,
+            }
+
         for _ in range(N):
+
+
+
             if self.verbose:
                 print("Running iteration", _)
 
+            st = time.time()
             pf.general_algorithms.util_taichi.add_B_to_A(
                 self.grid.z.field, self.h.field
             )
 
+            if(self.verbose):
+                timer['init'] += time.time() - st
+                st = time.time()
+
             # Compute steepest descent receivers for flow routing
             self.router.compute_receivers()
 
-            # Handle flow routing through lakes and depressions
-            self.router.reroute_flow()
+            if(self.verbose):
+                timer['rec'] += time.time() - st
+                st = time.time()
 
-            # fills with water
-            pf.flow.fill_z_add_delta(
-                self.grid.z.field,
-                self.h.field,
-                z_.field,
-                self.router.receivers.field,
-                receivers_.field,
-                receivers__.field,
-                epsilon=1e-3,
-            )
+            if(lake):
+                # Handle flow routing through lakes and depressions
+                self.router.reroute_flow()
+                
+                if(self.verbose):
+                    timer['reroute'] += time.time() - st
+                    st = time.time()
+
+                # fills with water
+                pf.flow.fill_z_add_delta(
+                    self.grid.z.field,
+                    self.h.field,
+                    z_.field,
+                    self.router.receivers.field,
+                    receivers_.field,
+                    receivers__.field,
+                    epsilon=1e-3,
+                )
+
+            if(self.verbose):
+                timer['fill'] += time.time() - st
+                st = time.time()
 
             # Accumulate with N stochastic routes if N_stochastic > 0else normal, accumulation
             if N_stochastic > 0:
@@ -224,11 +264,19 @@ class Flooder:
             else:
                 self.router.accumulate_constant_Q(cte.PREC, area=True)
 
+            if(self.verbose):
+                timer['accumulate'] += time.time() - st
+                st = time.time()
+
             # Diffuse as multiple flow N times
             for __ in range(N_diffuse):
                 pf.flood.diffuse_Q_constant_prec(
                     self.grid.z.field, self.router.Q.field, Q_.field
                 )
+
+            if(self.verbose):
+                timer['diffuse'] += time.time() - st
+                st = time.time()
 
             # z is filled with h, I wanna remove the wxtra z
             pf.general_algorithms.util_taichi.add_B_to_weighted_A(
@@ -260,10 +308,31 @@ class Flooder:
                     self.nQ.field,
                 )
 
+            if(self.verbose):
+                timer['core'] += time.time() - st
+                st = time.time()
+
         z_.release()
         Q_.release()
         receivers_.release()
         receivers__.release()
+
+        if(self.verbose):
+            print(f'===== Finished {N} iterations in {time.time() - mainst} =====')
+            for key,val in timer.items():
+                print(f'= Step {key} took {val} s in total ({val/N} per it)')
+            print('======================================')
+
+    def run_graphflood_diffuse(self, N=100, temporal_filtering = 0.5):
+
+        Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        dh = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+
+        for _ in range(N):
+            pf.flood.gf_hydrodynamics.graphflood_diffuse_cte_P_cte_man(self.grid.z.field, self.h.field, self.router.Q.field, Q_.field, dh.field, temporal_filtering)
+
+        Q_.release()
+        dh.release()
 
     def run_LS(self, N=1000, input_mode="constant_prec", mode=None):
         """

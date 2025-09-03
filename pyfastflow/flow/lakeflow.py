@@ -21,6 +21,9 @@ from ..general_algorithms.util_taichi import swap_arrays
 from .f32_i32_struct import pack_float_index, unpack_float_index
 
 
+TIME_REROUTE = True
+
+
 @ti.kernel
 def depression_counter(rec: ti.template()) -> int:
     """
@@ -80,6 +83,68 @@ def propagate_basin(bid: ti.template(), rec_: ti.template()):
         # Pointer jumping: compress receiver chains and propagate basin IDs
         bid[i] = bid[rec_[i]]  # Propagate basin ID from receiver
         rec_[i] = rec_[rec_[i]]  # Pointer jumping: skip intermediate receivers
+
+@ti.kernel
+def propagate_basin_v2(bid: ti.template(), rec_: ti.template()):
+    """
+    Propagate basin IDs upstream using pointer jumping technique.
+
+    Args:
+            bid: Basin ID array to propagate
+            rec_: Receiver array for pointer jumping
+
+    Note:
+            Uses pointer jumping to accelerate basin ID propagation
+
+    Author: B.G.
+    """
+    for i in rec_:
+        # Pointer jumping: compress receiver chains and propagate basin IDs
+        # bid[i] = bid[rec_[i]]  # Propagate basin ID from receiver
+        rec_[i] = rec_[rec_[i]]  # Pointer jumping: skip intermediate receivers
+        if(rec_[i] == rec_[rec_[i]]):
+            bid[i] = bid[rec_[i]]
+
+
+@ti.kernel
+def propagate_basin_iter(rec_: ti.template()):
+    """
+    Propagate basin IDs upstream using pointer jumping technique.
+
+    Args:
+            bid: Basin ID array to propagate
+            rec_: Receiver array for pointer jumping
+
+    Note:
+            Uses pointer jumping to accelerate basin ID propagation
+
+    Author: B.G.
+    """
+    # ti.loop_config(block_dim=64) # not much diff lol
+    for i in rec_:
+        if(rec_[i] == rec_[rec_[i]]):
+            continue
+        # Pointer jumping: compress receiver chains and propagate basin IDs
+        rec_[i] = rec_[rec_[i]]  # Pointer jumping: skip intermediate receivers
+
+@ti.kernel
+def propagate_basin_final(bid: ti.template(), rec_: ti.template()):
+    """
+    Propagate basin IDs upstream using pointer jumping technique.
+
+    Args:
+            bid: Basin ID array to propagate
+            rec_: Receiver array for pointer jumping
+
+    Note:
+            Uses pointer jumping to accelerate basin ID propagation
+
+    Author: B.G.
+    """
+    for i in bid:
+        # Pointer jumping: compress receiver chains and propagate basin IDs
+        bid[i] = bid[rec_[i]]  # Propagate basin ID from receiver
+
 
 
 def basin_identification(
@@ -356,6 +421,52 @@ def iteration_reroute_carve(
     tag_: ti.template(),
     rec: ti.template(),
     rec_: ti.template(),
+):
+    """
+    Single iteration of carving algorithm with pointer jumping.
+
+    Args:
+            tag: Primary tagging array
+            tag_: Secondary tagging array
+            rec: Primary receiver array
+            rec_: Secondary receiver array
+
+    Note:
+            Uses pointer jumping to accelerate carving propagation
+            Implements corrected Algorithm 4 from paper
+
+    Author: B.G.
+    """
+    # First pass: propagate tags and copy receivers
+    for i in tag:
+        
+        if(rec[i] == rec[rec[i]]):
+            continue
+
+        if tag[i]:
+            tag_[rec[i]] = True  # Propagate tag to receiver
+
+        # rec_[i] = rec[i]  # Copy receiver array
+
+    # Second pass: pointer jumping and convergence check
+    for i in tag:
+        
+        if(rec[i] == rec[rec[i]]):
+            continue
+
+        if(tag[i] != tag_[i]):
+            rec[i] = rec_[rec_[i]]  # Pointer jumping: skip intermediate receivers
+            rec_[i] = rec[i]
+
+            tag[i] = tag_[i]  # Update tag array
+
+
+@ti.kernel
+def iteration_reroute_carve_ncheck(
+    tag: ti.template(),
+    tag_: ti.template(),
+    rec: ti.template(),
+    rec_: ti.template(),
     change: ti.template(),
 ):
     """
@@ -376,6 +487,10 @@ def iteration_reroute_carve(
     """
     # First pass: propagate tags and copy receivers
     for i in tag:
+        
+        if(rec[i] == rec[rec[i]]):
+            continue
+
         if tag[i]:
             tag_[rec[i]] = True  # Propagate tag to receiver
 
@@ -383,11 +498,16 @@ def iteration_reroute_carve(
 
     # Second pass: pointer jumping and convergence check
     for i in tag:
+        
+        if(rec[i] == rec[rec[i]]):
+            continue
+
         rec[i] = rec_[rec_[i]]  # Pointer jumping: skip intermediate receivers
 
         # Check for convergence
         if tag[i] != tag_[i]:
             change[None] = True
+
         tag[i] = tag_[i]  # Update tag array
 
 
@@ -465,7 +585,7 @@ def reroute_carve(
     Author: B.G.
     """
     init_reroute_carve(tag, tag_, saddlenode)  # Initialize tagging
-    change[None] = True
+    # change[None] = True
     it = 0
     rec.copy_from(rec_)  # Initialize working copies
     rec__.copy_from(rec_)
@@ -475,7 +595,8 @@ def reroute_carve(
     for i in range(math.ceil(math.log2(cte.NX * cte.NY)) + 1):
         it += 1
         # change[None] = False
-        iteration_reroute_carve(tag, tag_, rec, rec_, change)
+        # iteration_reroute_carve_ncheck(tag, tag_, rec, rec_, change)
+        iteration_reroute_carve(tag, tag_, rec, rec_)
 
     # Finalize the carving process
     finalise_reroute_carve(rec, rec__, tag, saddlenode, outlet, rerouted)
@@ -541,6 +662,8 @@ def reroute_flow(
     Author: B.G.
     """
 
+    import time
+
     rec_.copy_from(rec)  # Initialize working copy
     N = cte.NX * cte.NY  # Total number of nodes
     Ndep = depression_counter(rec)  # Count initial depressions
@@ -562,7 +685,9 @@ def reroute_flow(
         rec__.copy_from(rec_)
         # Propagate basin IDs upstream using pointer jumping
         for _ in range(math.ceil(math.log2(N)) + 1):
-            propagate_basin(bid, rec__)
+            propagate_basin_iter(rec__)
+        propagate_basin_final(bid, rec__)
+
         if Ndep_bis == 0:
             # print(f'HERE::{Ndep_bis}')
             break  # All depressions resolved
@@ -588,12 +713,13 @@ def reroute_flow(
     # Final basin identification and cleanup
     basin_id_init(bid)
     return
-    rec__.copy_from(rec_)
-    for _ in range(math.ceil(math.log2(N))):
-        propagate_basin(bid, rec__)
+    # Not needeed?
+    # rec__.copy_from(rec_)
+    # for _ in range(math.ceil(math.log2(N))):
+    #     propagate_basin_v2(bid, rec__)
 
-    # Swap arrays to return result in rec
-    swap_arrays(rec, rec_)
+    # # Swap arrays to return result in rec
+    # swap_arrays(rec, rec_)
 
 
 # End of file
