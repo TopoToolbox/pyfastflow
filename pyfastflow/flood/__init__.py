@@ -79,6 +79,7 @@ Author: B.G.
 # Import specific classes and functions from each module
 # Import modules themselves for module-level access
 from . import gf_fields, gf_hydrodynamics, gf_ls
+from .precipitation_gui import precipitation_gui
 from .gf_fields import Flooder
 from .gf_hydrodynamics import diffuse_Q_constant_prec, graphflood_core_cte_mannings
 from .gf_ls import (
@@ -104,4 +105,5 @@ __all__ = [
     "gf_fields",
     "gf_hydrodynamics",
     "gf_ls",
+    "precipitation_gui",
 ]

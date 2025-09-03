@@ -170,6 +170,15 @@ grid = pf.flow.GridField(nx, ny, dx, boundary_mode='custom')
 grid.set_boundaries(boundaries)
 ```
 
+### Precipitation Map Editor
+Create spatially variable precipitation or discharge inputs interactively:
+
+```bash
+pff-precip-gui dem.npy precip.npy --boundary boundaries.npy
+```
+
+Use the **Discharge input** checkbox to enter values in m³/s; they are internally converted to precipitation rates using the cell area. Switch between **Additive** painting (each cell receives the given value scaled by the brush) and **Distributed** painting where the total added over the selection equals the provided value. The resulting precipitation map is saved as a NumPy array.
+
 ### Stochastic Flow Routing
 ```python
 # Enable stochastic receivers
