@@ -10,7 +10,11 @@ import numpy as np
 import pytest
 import taichi as ti
 
-from pyfastflow.rastermanip import double_resolution, halve_resolution
+from pyfastflow.rastermanip import (
+    double_resolution,
+    halve_resolution,
+    resize_raster,
+)
 
 # Initialize Taichi once for the entire test module
 ti.init(arch=ti.cpu)
@@ -147,4 +151,44 @@ def test_halve_cubic_linear_plane():
                 row_vals.append(cubic_interp(*samples, frac_i))
             expected[tj, ti_out] = cubic_interp(*row_vals, frac_j)
 
+    assert np.allclose(result, expected)
+
+
+def test_double_resolution_seed_reproducible():
+    original = np.arange(16, dtype=np.float32).reshape(4, 4)
+    r1 = double_resolution(original, noise_amplitude=0.5, seed=42)
+    r2 = double_resolution(original, noise_amplitude=0.5, seed=42)
+    r3 = double_resolution(original, noise_amplitude=0.5, seed=43)
+    assert np.allclose(r1, r2)
+    assert not np.allclose(r1, r3)
+
+
+def test_halve_custom_kernel():
+    original = np.zeros((4, 4), dtype=np.float32)
+
+    @ti.kernel
+    def fill_one(src: ti.template(), tgt: ti.template(), nx: ti.i32, ny: ti.i32):
+        for i in tgt:
+            tgt[i] = 1.0
+
+    result = halve_resolution(original, kernel=fill_one)
+    assert np.all(result == 1.0)
+
+
+def test_boundary_option_wrap_changes_result():
+    grid = np.array([[1, 2], [3, 4]], dtype=np.float32)
+    clamp_res = double_resolution(grid, noise_amplitude=0.0, boundary="clamp")
+    wrap_res = double_resolution(grid, noise_amplitude=0.0, boundary="wrap")
+    assert not np.allclose(clamp_res, wrap_res)
+
+
+def test_resize_raster_downscale_linear_plane():
+    nx, ny = 4, 4
+    grid = np.zeros((ny, nx), dtype=np.float32)
+    for j in range(ny):
+        for i in range(nx):
+            grid[j, i] = i + j
+
+    result = resize_raster(grid, 0.5)
+    expected = np.array([[1, 3], [3, 5]], dtype=np.float32)
     assert np.allclose(result, expected)

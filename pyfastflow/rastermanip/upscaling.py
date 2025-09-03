@@ -16,12 +16,61 @@ import numpy as np
 import taichi as ti
 
 from .. import pool
-from ..grid import neighbourer_flat_param as nei
+
+
+# Boundary handling modes
+_BOUNDARY_CLAMP = 0
+_BOUNDARY_WRAP = 1
+_BOUNDARY_REFLECT = 2
+
+
+@ti.func
+def _wrap_index(i: ti.i32, n: ti.i32) -> ti.i32:
+    return ti.math.mod(i, n)
+
+
+@ti.func
+def _reflect_index(i: ti.i32, n: ti.i32) -> ti.i32:
+    period = 2 * (n - 1)
+    x = ti.math.mod(i, period)
+    if x < 0:
+        x += period
+    if x >= n:
+        x = period - x
+    return x
+
+
+@ti.func
+def _resolve_index(i: ti.i32, n: ti.i32, mode: ti.i32) -> ti.i32:
+    res = i
+    if not (0 <= i < n):
+        if mode == _BOUNDARY_CLAMP:
+            res = ti.min(ti.max(i, 0), n - 1)
+        elif mode == _BOUNDARY_WRAP:
+            res = _wrap_index(i, n)
+        else:
+            res = _reflect_index(i, n)
+    return res
+
+
+@ti.func
+def _rand01(seed: ti.i32, idx: ti.i32) -> ti.f32:
+    x = ti.u32(idx) + ti.u32(seed)
+    x = (x ^ 61) ^ (x >> 16)
+    x = x + (x << 3)
+    x = x ^ (x >> 4)
+    x = x * 0x27D4EB2D
+    x = x ^ (x >> 15)
+    return ti.cast(x, ti.f32) / 4294967295.0
 
 
 @ti.func
 def get_slope_direction(
-    source_field: ti.template(), idx: ti.i32, nx: ti.i32, ny: ti.i32
+    source_field: ti.template(),
+    idx: ti.i32,
+    nx: ti.i32,
+    ny: ti.i32,
+    boundary_mode: ti.i32,
 ) -> ti.Vector:
     """
     Compute slope direction vector for a given cell.
@@ -37,36 +86,46 @@ def get_slope_direction(
     """
     center_val = source_field[idx]
 
-    # Initialize gradient components
+    i = idx % nx
+    j = idx // nx
+
     grad_x = 0.0
     grad_y = 0.0
     valid_neighbors = 0
 
-    # Check all 4 cardinal neighbors for gradient computation
     for k in ti.static(range(4)):
-        neighbor_idx = nei.neighbour_n_param(idx, k, nx, ny)
-        if neighbor_idx != -1:
+        di = 0
+        dj = 0
+        if k == 0:
+            dj = -1
+        elif k == 1:
+            di = -1
+        elif k == 2:
+            di = 1
+        else:
+            dj = 1
+
+        ni = _resolve_index(i + di, nx, boundary_mode)
+        nj = _resolve_index(j + dj, ny, boundary_mode)
+
+        if 0 <= i + di < nx and 0 <= j + dj < ny or boundary_mode != _BOUNDARY_CLAMP:
+            neighbor_idx = nj * nx + ni
             neighbor_val = source_field[neighbor_idx]
             diff = center_val - neighbor_val
-
-            # Convert direction to gradient components
-            if k == 0:  # top
+            if k == 0:
                 grad_y += diff
-            elif k == 1:  # left
+            elif k == 1:
                 grad_x += diff
-            elif k == 2:  # right
+            elif k == 2:
                 grad_x -= diff
-            elif k == 3:  # bottom
+            else:
                 grad_y -= diff
-
             valid_neighbors += 1
 
-    # Normalize gradient
     if valid_neighbors > 0:
         grad_x /= valid_neighbors
         grad_y /= valid_neighbors
 
-    # Return normalized direction vector
     magnitude = ti.sqrt(grad_x * grad_x + grad_y * grad_y)
     result = ti.Vector([0.0, 0.0])
     if magnitude > 1e-8:
@@ -81,6 +140,8 @@ def double_resolution_kernel(
     nx: ti.i32,
     ny: ti.i32,
     noise_amplitude: ti.f32,
+    boundary_mode: ti.i32,
+    seed: ti.i32,
 ):
     """
     Double the resolution of a 2D field with slope-preserving interpolation.
@@ -106,7 +167,7 @@ def double_resolution_kernel(
             continue
 
         # Get slope direction for this cell
-        slope_dir = get_slope_direction(source_field, idx, nx, ny)
+        slope_dir = get_slope_direction(source_field, idx, nx, ny, boundary_mode)
         center_val = source_field[idx]
 
         # Calculate base interpolation strength (quarter of the slope magnitude)
@@ -133,7 +194,8 @@ def double_resolution_kernel(
 
                 # Add controlled noise (order of magnitude lower)
                 noise_factor = noise_amplitude * 0.1 * interp_strength
-                noise_val = (ti.random(ti.f32) - 0.5) * 2.0 * noise_factor
+                rand = _rand01(seed, target_idx)
+                noise_val = (rand - 0.5) * 2.0 * noise_factor
 
                 # Final value
                 final_val = interpolated_val + noise_val
@@ -146,6 +208,8 @@ def double_resolution(
     return_field: bool = False,
     nx: int | None = None,
     ny: int | None = None,
+    seed: int | None = None,
+    boundary: str = "clamp",
 ):
     """
     Double the resolution of a 2D grid with slope-preserving interpolation.
@@ -162,6 +226,8 @@ def double_resolution(
         return_field: If True, return Taichi field; if False, return numpy array (default: False)
         nx: Number of columns when providing a 1D Taichi field
         ny: Number of rows when providing a 1D Taichi field
+        seed: Optional random seed for reproducible noise
+        boundary: Boundary handling ('clamp', 'wrap', 'reflect')
 
     Returns:
         numpy.ndarray or taichi.Field: Upscaled grid with shape (2*ny, 2*nx)
@@ -195,6 +261,15 @@ def double_resolution(
     else:
         raise TypeError("grid_data must be a numpy array or Taichi field")
 
+    boundary_map = {
+        "clamp": _BOUNDARY_CLAMP,
+        "wrap": _BOUNDARY_WRAP,
+        "reflect": _BOUNDARY_REFLECT,
+    }
+    if boundary not in boundary_map:
+        raise ValueError("boundary must be 'clamp', 'wrap', or 'reflect'")
+    boundary_mode = boundary_map[boundary]
+
     # Create source field and copy data
     source_field = pool.get_temp_field(ti.f32, (ny * nx,))
     source_field.field.from_numpy(data_np)
@@ -204,12 +279,16 @@ def double_resolution(
     target_field = pool.get_temp_field(ti.f32, (target_size,))
 
     # Execute upscaling kernel
+    seed_val = 0 if seed is None else seed
+
     double_resolution_kernel(
         source_field.field,
         target_field.field,
         nx,
         ny,
         noise_amplitude,
+        boundary_mode,
+        seed_val,
     )
 
     if return_field:

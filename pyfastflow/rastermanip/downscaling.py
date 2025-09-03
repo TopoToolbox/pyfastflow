@@ -15,10 +15,48 @@ import taichi as ti
 
 from .. import pool
 
+# Boundary handling modes
+_BOUNDARY_CLAMP = 0
+_BOUNDARY_WRAP = 1
+_BOUNDARY_REFLECT = 2
+
+
+@ti.func
+def _wrap_index(i: ti.i32, n: ti.i32) -> ti.i32:
+    return ti.math.mod(i, n)
+
+
+@ti.func
+def _reflect_index(i: ti.i32, n: ti.i32) -> ti.i32:
+    period = 2 * (n - 1)
+    x = ti.math.mod(i, period)
+    if x < 0:
+        x += period
+    if x >= n:
+        x = period - x
+    return x
+
+
+@ti.func
+def _resolve_index(i: ti.i32, n: ti.i32, mode: ti.i32) -> ti.i32:
+    res = i
+    if not (0 <= i < n):
+        if mode == _BOUNDARY_CLAMP:
+            res = ti.min(ti.max(i, 0), n - 1)
+        elif mode == _BOUNDARY_WRAP:
+            res = _wrap_index(i, n)
+        else:
+            res = _reflect_index(i, n)
+    return res
+
 
 @ti.kernel
 def halve_resolution_kernel_max(
-    source_field: ti.template(), target_field: ti.template(), nx: ti.i32, ny: ti.i32
+    source_field: ti.template(),
+    target_field: ti.template(),
+    nx: ti.i32,
+    ny: ti.i32,
+    boundary_mode: ti.i32,
 ):
     """
     Halve resolution using maximum value aggregation.
@@ -52,21 +90,22 @@ def halve_resolution_kernel_max(
         max_val = -1e30
         for sub_j in ti.static(range(2)):
             for sub_i in ti.static(range(2)):
-                source_j = source_base_j + sub_j
-                source_i = source_base_i + sub_i
-
-                # Check bounds
-                if source_j < ny and source_i < nx:
-                    source_idx = source_j * nx + source_i
-                    val = source_field[source_idx]
-                    max_val = ti.max(max_val, val)
+                source_j = _resolve_index(source_base_j + sub_j, ny, boundary_mode)
+                source_i = _resolve_index(source_base_i + sub_i, nx, boundary_mode)
+                source_idx = source_j * nx + source_i
+                val = source_field[source_idx]
+                max_val = ti.max(max_val, val)
 
         target_field[target_idx] = max_val
 
 
 @ti.kernel
 def halve_resolution_kernel_min(
-    source_field: ti.template(), target_field: ti.template(), nx: ti.i32, ny: ti.i32
+    source_field: ti.template(),
+    target_field: ti.template(),
+    nx: ti.i32,
+    ny: ti.i32,
+    boundary_mode: ti.i32,
 ):
     """
     Halve resolution using minimum value aggregation.
@@ -96,20 +135,22 @@ def halve_resolution_kernel_min(
         min_val = 1e30
         for sub_j in ti.static(range(2)):
             for sub_i in ti.static(range(2)):
-                source_j = source_base_j + sub_j
-                source_i = source_base_i + sub_i
-
-                if source_j < ny and source_i < nx:
-                    source_idx = source_j * nx + source_i
-                    val = source_field[source_idx]
-                    min_val = ti.min(min_val, val)
+                source_j = _resolve_index(source_base_j + sub_j, ny, boundary_mode)
+                source_i = _resolve_index(source_base_i + sub_i, nx, boundary_mode)
+                source_idx = source_j * nx + source_i
+                val = source_field[source_idx]
+                min_val = ti.min(min_val, val)
 
         target_field[target_idx] = min_val
 
 
 @ti.kernel
 def halve_resolution_kernel_mean(
-    source_field: ti.template(), target_field: ti.template(), nx: ti.i32, ny: ti.i32
+    source_field: ti.template(),
+    target_field: ti.template(),
+    nx: ti.i32,
+    ny: ti.i32,
+    boundary_mode: ti.i32,
 ):
     """
     Halve resolution using mean value aggregation.
@@ -137,22 +178,15 @@ def halve_resolution_kernel_mean(
 
         # Calculate mean of 2x2 block
         sum_val = 0.0
-        count = 0
         for sub_j in ti.static(range(2)):
             for sub_i in ti.static(range(2)):
-                source_j = source_base_j + sub_j
-                source_i = source_base_i + sub_i
+                source_j = _resolve_index(source_base_j + sub_j, ny, boundary_mode)
+                source_i = _resolve_index(source_base_i + sub_i, nx, boundary_mode)
+                source_idx = source_j * nx + source_i
+                val = source_field[source_idx]
+                sum_val += val
 
-                if source_j < ny and source_i < nx:
-                    source_idx = source_j * nx + source_i
-                    val = source_field[source_idx]
-                    sum_val += val
-                    count += 1
-
-        if count > 0:
-            target_field[target_idx] = sum_val / count
-        else:
-            target_field[target_idx] = 0.0
+        target_field[target_idx] = sum_val * 0.25
 
 
 @ti.func
@@ -183,6 +217,7 @@ def halve_resolution_kernel_cubic(
     target_field: ti.template(),
     nx: ti.i32,
     ny: ti.i32,
+    boundary_mode: ti.i32,
 ):
     """
     Halve resolution using true bicubic interpolation.
@@ -218,9 +253,9 @@ def halve_resolution_kernel_cubic(
         row_vals = ti.Vector([0.0, 0.0, 0.0, 0.0])
         for dj in ti.static(range(4)):
             samples = ti.Vector([0.0, 0.0, 0.0, 0.0])
-            jj = ti.min(ti.max(base_j + dj - 1, 0), ny - 1)
+            jj = _resolve_index(base_j + dj - 1, ny, boundary_mode)
             for di in ti.static(range(4)):
-                ii = ti.min(ti.max(base_i + di - 1, 0), nx - 1)
+                ii = _resolve_index(base_i + di - 1, nx, boundary_mode)
                 source_idx = jj * nx + ii
                 samples[di] = source_field[source_idx]
             row_vals[dj] = cubic_interpolate(
@@ -238,6 +273,8 @@ def halve_resolution(
     return_field: bool = False,
     nx: int | None = None,
     ny: int | None = None,
+    kernel=None,
+    boundary: str = "clamp",
 ):
     """
     Halve the resolution of a 2D grid using specified aggregation method.
@@ -248,10 +285,14 @@ def halve_resolution(
     Args:
         grid_data: Input grid data (numpy array or Taichi field)
                   Expected shape: (ny, nx) for numpy arrays or Taichi fields
-        method: Aggregation method ('max', 'min', 'mean', 'cubic') (default: 'mean')
+        method: Aggregation method ('max', 'min', 'mean', 'cubic') (default: 'mean').
+                Ignored if a custom kernel is provided.
         return_field: If True, return Taichi field; if False, return numpy array (default: False)
         nx: Number of columns when providing a 1D Taichi field
         ny: Number of rows when providing a 1D Taichi field
+        kernel: Optional custom Taichi kernel with signature
+                (source_field, target_field, nx, ny)
+        boundary: Boundary handling ('clamp', 'wrap', 'reflect')
 
     Returns:
         numpy.ndarray or taichi.Field: Downscaled grid with shape (ny//2, nx//2)
@@ -266,10 +307,10 @@ def halve_resolution(
         # Smooth downsampling with cubic interpolation
         smooth_downscaled = halve_resolution(terrain_data, method='cubic')
     """
-    # Validate method
-    valid_methods = ["max", "min", "mean", "cubic"]
-    if method not in valid_methods:
-        raise ValueError(f"Method must be one of {valid_methods}, got '{method}'")
+    if kernel is None:
+        valid_methods = ["max", "min", "mean", "cubic"]
+        if method not in valid_methods:
+            raise ValueError(f"Method must be one of {valid_methods}, got '{method}'")
 
     # Handle input conversion
     if isinstance(grid_data, np.ndarray):
@@ -296,6 +337,15 @@ def halve_resolution(
     if nx % 2 != 0 or ny % 2 != 0:
         raise ValueError(f"Grid dimensions must be even for halving. Got ({ny}, {nx})")
 
+    boundary_map = {
+        "clamp": _BOUNDARY_CLAMP,
+        "wrap": _BOUNDARY_WRAP,
+        "reflect": _BOUNDARY_REFLECT,
+    }
+    if boundary not in boundary_map:
+        raise ValueError("boundary must be 'clamp', 'wrap', or 'reflect'")
+    boundary_mode = boundary_map[boundary]
+
     # Create source field and copy data
     source_field = pool.get_temp_field(ti.f32, (ny * nx,))
     source_field.field.from_numpy(data_np)
@@ -306,15 +356,25 @@ def halve_resolution(
     target_size = target_ny * target_nx
     target_field = pool.get_temp_field(ti.f32, (target_size,))
 
-    # Select and execute appropriate kernel
-    if method == "max":
-        halve_resolution_kernel_max(source_field.field, target_field.field, nx, ny)
-    elif method == "min":
-        halve_resolution_kernel_min(source_field.field, target_field.field, nx, ny)
-    elif method == "mean":
-        halve_resolution_kernel_mean(source_field.field, target_field.field, nx, ny)
-    elif method == "cubic":
-        halve_resolution_kernel_cubic(source_field.field, target_field.field, nx, ny)
+    if kernel is not None:
+        kernel(source_field.field, target_field.field, nx, ny)
+    else:
+        if method == "max":
+            halve_resolution_kernel_max(
+                source_field.field, target_field.field, nx, ny, boundary_mode
+            )
+        elif method == "min":
+            halve_resolution_kernel_min(
+                source_field.field, target_field.field, nx, ny, boundary_mode
+            )
+        elif method == "mean":
+            halve_resolution_kernel_mean(
+                source_field.field, target_field.field, nx, ny, boundary_mode
+            )
+        elif method == "cubic":
+            halve_resolution_kernel_cubic(
+                source_field.field, target_field.field, nx, ny, boundary_mode
+            )
 
     if return_field:
         # Release source field and return target field
