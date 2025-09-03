@@ -145,7 +145,9 @@ class FlowRouter:
             RuntimeError: If lakeflow was not enabled during initialization
 
         Author: B.G.
+        
         """
+        
         if not self.lakeflow:
             raise RuntimeError("Flow field not compiled for lakeflow")
 

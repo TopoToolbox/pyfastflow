@@ -10,7 +10,7 @@ Author: B.G.
 
 import taichi as ti
 
-import pyfastflow.grid.neighbourer_flat as nei
+from . import neighbourer_flat as nei
 
 from .. import constants as cte
 
