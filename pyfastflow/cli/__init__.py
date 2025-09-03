@@ -8,6 +8,7 @@ Available Commands:
 - raster2npy: Convert raster files to numpy arrays
 - raster-upscale: Double raster resolution using rastermanip utilities
 - raster-downscale: Halve raster resolution using rastermanip utilities
+- precip-gui: Interactive precipitation map editor
 
 Author: B.G.
 """
@@ -15,6 +16,13 @@ Author: B.G.
 from .raster_commands import raster2npy
 from .rastermanip_commands import raster_downscale, raster_upscale
 from .grid_commands import boundary_gui
+from .precip_commands import precipitation_gui
 
 # Export public API
-__all__ = ["raster2npy", "raster_upscale", "raster_downscale", "boundary_gui"]
+__all__ = [
+    "raster2npy",
+    "raster_upscale",
+    "raster_downscale",
+    "boundary_gui",
+    "precipitation_gui",
+]
