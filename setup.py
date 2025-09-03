@@ -51,6 +51,9 @@ setup(
     entry_points={
         "console_scripts": [
             "pff-raster2npy=pyfastflow.cli.raster_commands:raster2npy",
+            "pff-upscale=pyfastflow.cli.rastermanip_commands:raster_upscale",
+            "pff-downscale=pyfastflow.cli.rastermanip_commands:raster_downscale",
+            "pff-boundary-gui=pyfastflow.cli.grid_commands:boundary_gui",
         ],
     },
 )
