@@ -49,6 +49,8 @@ Issues = "https://github.com/bgailleton/fastflow_taichi/issues"
 
 [project.scripts]
 pff-raster2npy = "pyfastflow.cli.raster_commands:raster2npy"
+pff-upscale = "pyfastflow.cli.rastermanip_commands:raster_upscale"
+pff-downscale = "pyfastflow.cli.rastermanip_commands:raster_downscale"
 
 [tool.setuptools.packages.find]
 where = ["."]

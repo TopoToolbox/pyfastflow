@@ -6,11 +6,14 @@ easy access to common operations from the terminal without writing Python script
 
 Available Commands:
 - raster2npy: Convert raster files to numpy arrays
+- raster-upscale: Double raster resolution using rastermanip utilities
+- raster-downscale: Halve raster resolution using rastermanip utilities
 
 Author: B.G.
 """
 
 from .raster_commands import raster2npy
+from .rastermanip_commands import raster_downscale, raster_upscale
 
 # Export public API
-__all__ = ["raster2npy"]
+__all__ = ["raster2npy", "raster_upscale", "raster_downscale"]
