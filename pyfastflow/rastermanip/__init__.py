@@ -17,7 +17,7 @@ from .downscaling import (
     halve_resolution_kernel_cubic,
 )
 from .resizing import resize_raster, resize_kernel
-from .resizing import resize_to_max_dim
+from .resizing import resize_to_max_dim, resize_to_dims
 
 __all__ = [
     "double_resolution",
@@ -30,4 +30,5 @@ __all__ = [
     "resize_raster",
     "resize_kernel",
     "resize_to_max_dim",
+    "resize_to_dims",
 ]

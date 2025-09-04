@@ -328,11 +328,11 @@ class Flooder:
         Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
         dh = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
         LM = pf.pool.taipool.get_tpfield(dtype=ti.u1, shape=(self.nx * self.ny))
-        LM.fill(False)
+        LM.field.fill(False)
 
         for _ in range(N):
             pf.flood.gf_hydrodynamics.graphflood_diffuse_cte_P_cte_man(self.grid.z.field, self.h.field, self.router.Q.field, Q_.field, dh.field, 
-                self.flow.receivers.field, LM.field, temporal_filtering)
+                self.router.receivers.field, LM.field, temporal_filtering)
 
         Q_.release()
         dh.release()
