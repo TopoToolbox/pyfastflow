@@ -18,11 +18,12 @@ import click
 from .guihelper import (
     compute_visual_layers,
     array_to_canvas,
-    place_on_padded,
-    draw_lasso_points,
-    draw_lasso_polygon,
-    apply_lasso_to_boundaries,
     sample_view_raw,
+    sample_view_mask,
+    sample_view_uint8,
+    draw_polyline,
+    draw_points_px,
+    nodata_neighbor_mask,
 )
 from ..io import raster_to_numpy, TOPOTOOLBOX_AVAILABLE
 
@@ -67,24 +68,31 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
     terrain_rgb, hill_rgb = compute_visual_layers(dem, sea_min, sea_max)
     hs_alpha = 0.5
 
-    # Window and GUI
+    # Window and GUI (fixed size for performance)
     headless = not bool(os.environ.get("DISPLAY", ""))
-    base_pad = max(20, int(0.06 * min(nx, ny)))
-    panel_px = max(base_pad, int(0.22 * nx))
-    pad_left, pad_right, pad_top, pad_bottom = panel_px, base_pad, base_pad, base_pad
-    disp_w = nx + pad_left + pad_right
-    disp_h = ny + pad_top + pad_bottom
+    WIN_W, WIN_H = 1280, 840
+    PANEL_W, MARGIN = 280, 16
 
-    window = ti.ui.Window("Boundary Editor", (disp_w, disp_h), show_window=not headless)
+    window = ti.ui.Window("Boundary Editor", (WIN_W, WIN_H), show_window=not headless)
     canvas = window.get_canvas()
     gui = window.get_gui()
-    img_field = ti.Vector.field(3, dtype=ti.f32, shape=(disp_w, disp_h))
+    img_field = ti.Vector.field(3, dtype=ti.f32, shape=(WIN_W, WIN_H))
 
-    # Viewport bounds in normalized window coords
-    vx0 = pad_left / disp_w
-    vx1 = (pad_left + nx) / disp_w
-    vy0 = pad_bottom / disp_h
-    vy1 = (pad_bottom + ny) / disp_h
+    # Viewport rect that preserves DEM aspect ratio inside available area
+    avail_x0 = PANEL_W + MARGIN
+    avail_y0 = MARGIN
+    avail_w = WIN_W - PANEL_W - 2 * MARGIN
+    avail_h = WIN_H - 2 * MARGIN
+    dem_aspect = nx / ny
+    vp_w = min(avail_w, int(avail_h * dem_aspect))
+    vp_h = min(avail_h, int(avail_w / dem_aspect))
+    vp_x0 = avail_x0 + (avail_w - vp_w) // 2
+    vp_y0 = avail_y0 + (avail_h - vp_h) // 2
+    # Normalized bounds for quick tests (cursor coords)
+    vx0 = vp_x0 / WIN_W
+    vx1 = (vp_x0 + vp_w) / WIN_W
+    vy0 = vp_y0 / WIN_H
+    vy1 = (vp_y0 + vp_h) / WIN_H
 
     lasso_mode = False
     lasso_wait_release = False
@@ -100,44 +108,61 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
     disp_off_y_px = 0.0
 
     def update_display() -> None:
-        # Compose terrain + hillshade once per frame (full res, array space)
-        rgb_raw = (1.0 - hs_alpha) * terrain_rgb + hs_alpha * hill_rgb
-        rgb_raw[np.isnan(dem) | (dem < sea_level)] = 0.0
-        rgb_raw[boundaries == 3] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-        # Lasso overlay drawn in array space (full image)
-        if lasso_mode and lasso_path:
-            draw_lasso_points(rgb_raw, lasso_path, nx, ny)
-            if len(lasso_path) >= 2:
-                draw_lasso_polygon(rgb_raw, lasso_path, nx, ny)
+        buffer = np.zeros((WIN_W, WIN_H, 3), dtype=np.float32)
         if zoom >= 1.0:
-            # Sample current view window to viewport size (ny,nx)
+            # Sample current view window to viewport size
             view_w = nx / max(zoom, 1e-6)
             view_h = ny / max(zoom, 1e-6)
-            view_rgb_raw = sample_view_raw(rgb_raw, view_x_min, view_y_min, view_w, view_h, nx, ny)
-            rgb_disp = array_to_canvas(view_rgb_raw)
-            padded, _ = place_on_padded(rgb_disp, nx, ny, pad_left, pad_right, pad_top, pad_bottom)
+            t_small = sample_view_raw(terrain_rgb, view_x_min, view_y_min, view_w, view_h, vp_w, vp_h)
+            h_small = sample_view_raw(hill_rgb, view_x_min, view_y_min, view_w, view_h, vp_w, vp_h)
+            nod_small = sample_view_mask(np.isnan(dem) | (dem < sea_level), view_x_min, view_y_min, view_w, view_h, vp_w, vp_h)
+            b_small = sample_view_uint8(boundaries, view_x_min, view_y_min, view_w, view_h, vp_w, vp_h)
+            view_rgb = (1.0 - hs_alpha) * t_small + hs_alpha * h_small
+            view_rgb[nod_small] = 0.0
+            view_rgb[b_small == 3] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+            # Lasso overlay: map full DEM normalized coords to viewport pixels
+            if lasso_mode and lasso_path:
+                pts = []
+                for u, v in lasso_path:
+                    x = u * nx
+                    y = v * ny
+                    px = int((x - view_x_min) / view_w * vp_w)
+                    py = int((y - view_y_min) / view_h * vp_h)
+                    pts.append((px, py))
+                draw_points_px(view_rgb, pts)
+                draw_polyline(view_rgb, pts, close=len(pts) >= 3)
+            rgb_disp = array_to_canvas(view_rgb)
+            buffer[vp_x0:vp_x0 + vp_w, vp_y0:vp_y0 + vp_h, :] = rgb_disp
         else:
-            # Render smaller image inside the viewport and allow shifting with offsets
-            out_w = max(1, int(nx * zoom))
-            out_h = max(1, int(ny * zoom))
-            view_rgb_raw = sample_view_raw(rgb_raw, 0.0, 0.0, nx, ny, out_w, out_h)
-            rgb_disp_small = array_to_canvas(view_rgb_raw)  # (out_w, out_h, 3)
-            # Compose padded buffer and place the small image with offsets inside viewport
-            disp_w = nx + pad_left + pad_right
-            disp_h = ny + pad_top + pad_bottom
-            padded = np.zeros((disp_w, disp_h, 3), dtype=np.float32)
-            # Base placement centered in viewport
-            base_x = pad_left + (nx - out_w) // 2
-            base_y = pad_bottom + (ny - out_h) // 2
-            # Allowed offset range keeps image within viewport bounds
-            max_off_x = (nx - out_w) // 2
-            max_off_y = (ny - out_h) // 2
+            # Render full DEM scaled down within viewport
+            out_w = max(1, int(vp_w * zoom))
+            out_h = max(1, int(vp_h * zoom))
+            t_small = sample_view_raw(terrain_rgb, 0.0, 0.0, nx, ny, out_w, out_h)
+            h_small = sample_view_raw(hill_rgb, 0.0, 0.0, nx, ny, out_w, out_h)
+            nod_small = sample_view_mask(np.isnan(dem) | (dem < sea_level), 0.0, 0.0, nx, ny, out_w, out_h)
+            b_small = sample_view_uint8(boundaries, 0.0, 0.0, nx, ny, out_w, out_h)
+            view_rgb = (1.0 - hs_alpha) * t_small + hs_alpha * h_small
+            view_rgb[nod_small] = 0.0
+            view_rgb[b_small == 3] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+            # Lasso overlay: small image covers full DEM
+            if lasso_mode and lasso_path:
+                pts = [(int(u * out_w), int(v * out_h)) for (u, v) in lasso_path]
+                draw_points_px(view_rgb, pts)
+                draw_polyline(view_rgb, pts, close=len(pts) >= 3)
+            rgb_disp = array_to_canvas(view_rgb)  # (out_w, out_h, 3)
+            # Place centered within viewport with offsets
+            base_x = vp_x0 + (vp_w - out_w) // 2
+            base_y = vp_y0 + (vp_h - out_h) // 2
+            max_off_x = (vp_w - out_w) // 2
+            max_off_y = (vp_h - out_h) // 2
+            nonlocal disp_off_x_px, disp_off_y_px
             ox = int(np.clip(disp_off_x_px, -max_off_x, max_off_x))
             oy = int(np.clip(disp_off_y_px, -max_off_y, max_off_y))
             x0 = base_x + ox
             y0 = base_y + oy
-            padded[x0:x0 + out_w, y0:y0 + out_h, :] = rgb_disp_small
-        img_field.from_numpy(padded)
+            buffer[x0:x0 + out_w, y0:y0 + out_h, :] = rgb_disp
+
+        img_field.from_numpy(buffer)
 
     update_display()
 
@@ -254,12 +279,12 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
                 view_y_min = float(np.clip(view_y_min + pan_frac * vh, 0.0, max(0.0, ny - vh)))
         else:
             # Adjust display offsets in pixels within viewport
-            step_x = max(1, int(pan_frac * nx))
-            step_y = max(1, int(pan_frac * ny))
-            out_w = max(1, int(nx * zoom))
-            out_h = max(1, int(ny * zoom))
-            max_off_x = (nx - out_w) // 2
-            max_off_y = (ny - out_h) // 2
+            step_x = max(1, int(pan_frac * vp_w))
+            step_y = max(1, int(pan_frac * vp_h))
+            out_w = max(1, int(vp_w * zoom))
+            out_h = max(1, int(vp_h * zoom))
+            max_off_x = (vp_w - out_w) // 2
+            max_off_y = (vp_h - out_h) // 2
             if (left_key and window.is_pressed(left_key)) or (A and window.is_pressed(A)):
                 disp_off_x_px = float(np.clip(disp_off_x_px - step_x, -max_off_x, max_off_x))
             if (right_key and window.is_pressed(right_key)) or (D and window.is_pressed(D)):
@@ -284,16 +309,31 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
                     if pos[0] <= vx0:
                         pass  # ignore panel clicks
                     else:
-                        # Allow clicks outside viewport; clamp to edges
-                        u_img = (pos[0] - vx0) / (vx1 - vx0)
-                        v_img_top = 1.0 - (pos[1] - vy0) / (vy1 - vy0 + 1e-12)
-                        # Map to array coordinates through current view
-                        vw = nx / max(zoom, 1e-6)
-                        vh = ny / max(zoom, 1e-6)
-                        x = view_x_min + u_img * vw
-                        y = view_y_min + v_img_top * vh
-                        u_full = float(np.clip(x / nx, 0.0, 1.0))
-                        v_full = float(np.clip(y / ny, 0.0, 1.0))
+                        # Map click to full DEM normalized coords; accept outside viewport
+                        px = pos[0] * WIN_W
+                        py_top = (1.0 - pos[1]) * WIN_H
+                        if zoom >= 1.0:
+                            u_rel = (px - vp_x0) / max(vp_w, 1)
+                            v_rel = (py_top - vp_y0) / max(vp_h, 1)
+                            x = view_x_min + u_rel * (nx / max(zoom, 1e-6))
+                            y = view_y_min + v_rel * (ny / max(zoom, 1e-6))
+                            u_full = float(np.clip(x / nx, 0.0, 1.0))
+                            v_full = float(np.clip(y / ny, 0.0, 1.0))
+                        else:
+                            out_w = max(1, int(vp_w * zoom))
+                            out_h = max(1, int(vp_h * zoom))
+                            base_x = vp_x0 + (vp_w - out_w) // 2
+                            base_y = vp_y0 + (vp_h - out_h) // 2
+                            max_off_x = (vp_w - out_w) // 2
+                            max_off_y = (vp_h - out_h) // 2
+                            ox = int(np.clip(disp_off_x_px, -max_off_x, max_off_x))
+                            oy = int(np.clip(disp_off_y_px, -max_off_y, max_off_y))
+                            img_x0 = base_x + ox
+                            img_y0 = base_y + oy
+                            u_rel = (px - img_x0) / max(out_w, 1)
+                            v_rel = (py_top - img_y0) / max(out_h, 1)
+                            u_full = float(np.clip(u_rel, 0.0, 1.0))
+                            v_full = float(np.clip(v_rel, 0.0, 1.0))
                         lasso_path.append((u_full, v_full))
                 elif ev.key == ti.ui.RMB:
                     if len(lasso_path) > 2:
