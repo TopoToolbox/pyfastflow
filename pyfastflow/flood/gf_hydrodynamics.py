@@ -138,7 +138,7 @@ def graphflood_core_cte_mannings(
 
 
 @ti.kernel
-def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), temporal_filtering:ti.f32):
+def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:ti.f32):
     """
     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
 
