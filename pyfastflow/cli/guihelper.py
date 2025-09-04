@@ -87,6 +87,32 @@ def place_on_padded(rgb_disp: np.ndarray, nx: int, ny: int, pad_left: int, pad_r
     return padded, (vx0, vx1, vy0, vy1)
 
 
+def sample_view_raw(
+    rgb_raw: np.ndarray,
+    view_x_min: float,
+    view_y_min: float,
+    view_w: float,
+    view_h: float,
+    out_w: int,
+    out_h: int,
+) -> np.ndarray:
+    """Nearest-neighbor sample a view from full-resolution rgb_raw (ny,nx,3).
+
+    View parameters are in array coordinates (cols, rows from top). Returns an
+    (out_h, out_w, 3) float32 array suitable for array_to_canvas transform.
+    """
+    ny, nx, _ = rgb_raw.shape
+    # Build sampling indices along X and Y
+    x_lin = (np.arange(out_w) + 0.5) / max(out_w, 1)
+    y_lin = (np.arange(out_h) + 0.5) / max(out_h, 1)
+    src_x = view_x_min + x_lin * view_w
+    src_y = view_y_min + y_lin * view_h
+    xi = np.clip(src_x.astype(np.int32), 0, nx - 1)
+    yi = np.clip(src_y.astype(np.int32), 0, ny - 1)
+    # Advanced indexing gather: rows then columns
+    return rgb_raw[yi[:, None], xi[None, :], :].astype(np.float32)
+
+
 def draw_lasso_points(rgb: np.ndarray, lasso_path: list[tuple[float, float]], nx: int, ny: int, color=(1.0, 0.0, 1.0)) -> None:
     for p in lasso_path:
         x = int(p[0] * nx)
@@ -159,4 +185,3 @@ def apply_lasso_to_boundaries(boundaries: np.ndarray, nodata: np.ndarray, lasso_
     edges[:, 0] = True
     edges[:, -1] = True
     boundaries[valid & (edges | nb)] = 3
-
