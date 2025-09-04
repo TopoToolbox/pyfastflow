@@ -1,7 +1,7 @@
 """Interactive GUI to paint precipitation or discharge values on a DEM.
 
 This module offers a Taichi ``ggui`` based application similar to
-:mod:`pyfastflow.grid.boundary_gui`.  It loads a DEM stored as ``.npy`` file
+:mod:`pyfastflow.cli.boundary_gui`.  It loads a DEM stored as ``.npy`` file
 and lets the user interactively paint precipitation rates on top of it.  The
 value provided by the user can be interpreted either as precipitation rate
 (``m/s``) or discharge (``m^3/s``).  Internally the resulting array always
