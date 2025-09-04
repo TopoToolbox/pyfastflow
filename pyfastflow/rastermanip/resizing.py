@@ -166,3 +166,30 @@ def resize_raster(
 
 __all__ = ["resize_raster", "resize_kernel"]
 
+
+def resize_to_max_dim(raster: np.ndarray, max_dim: int) -> np.ndarray:
+    """Resize a 2D raster so that max(height, width) == max_dim (or smaller).
+
+    Preserves aspect ratio. If the raster is already smaller than ``max_dim``,
+    returns the original array.
+
+    Parameters
+    ----------
+    raster : np.ndarray
+        Input 2D array (ny, nx).
+    max_dim : int
+        Target maximum dimension.
+
+    Returns
+    -------
+    np.ndarray
+        Resized raster with preserved aspect ratio.
+    """
+    if not isinstance(raster, np.ndarray) or raster.ndim != 2:
+        raise ValueError("raster must be a 2D numpy array")
+    ny, nx = raster.shape
+    cur_max = max(nx, ny)
+    if cur_max <= max_dim:
+        return raster
+    scale = max_dim / float(cur_max)
+    return resize_raster(raster, scale)

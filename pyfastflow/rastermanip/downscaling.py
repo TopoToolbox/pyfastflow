@@ -334,8 +334,23 @@ def halve_resolution(
     else:
         raise TypeError("grid_data must be a numpy array or Taichi field")
 
-    if nx % 2 != 0 or ny % 2 != 0:
-        raise ValueError(f"Grid dimensions must be even for halving. Got ({ny}, {nx})")
+    # Pad to even dimensions by duplicating last row/column if needed
+    nx_p, ny_p = nx, ny
+    if nx % 2 != 0:
+        nx_p = nx + 1
+    if ny % 2 != 0:
+        ny_p = ny + 1
+    if nx_p != nx or ny_p != ny:
+        # Rebuild data_np with simple edge padding
+        arr2d = data_np.reshape(ny, nx)
+        if nx_p != nx:
+            last_col = arr2d[:, -1:]
+            arr2d = np.concatenate([arr2d, last_col], axis=1)
+        if ny_p != ny:
+            last_row = arr2d[-1:, :]
+            arr2d = np.concatenate([arr2d, last_row], axis=0)
+        ny, nx = ny_p, nx_p
+        data_np = arr2d.reshape(-1)
 
     boundary_map = {
         "clamp": _BOUNDARY_CLAMP,

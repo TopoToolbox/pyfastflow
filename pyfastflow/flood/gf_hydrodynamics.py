@@ -156,32 +156,37 @@ def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.te
         if flow.neighbourer_flat.can_leave_domain(i):
             continue
 
-        # Calculate total slope gradient sum for normalization
+            # Calculate total slope gradient sum for normalization
         sums = 0.0
         msx  = 0.0
         msy  = 0.0
-        mz   = (z[i] + h[i])
-        for k in ti.static(range(4)):  # Check all 4 neighbors
-            j = flow.neighbourer_flat.neighbour(i, k)
-            ts = ti.max(0.0, (((z[i]+h[i]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
-            sums += ts
-            msx = ti.max(ts, msx) if k == 1 or k == 2 else msx
-            msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
-            mz = ti.max(mz, z[j]+h[j])
+        if(LM[i] == False):
+            
+            for k in ti.static(range(4)):  # Check all 4 neighbors
+                j = flow.neighbourer_flat.neighbour(i, k)
+                ts = ti.max(0.0, (((z[i]+h[i]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
+                sums += ts
+                msx = ti.max(ts, msx) if k == 1 or k == 2 else msx
+                msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
 
 
-        # Skip cells with no downslope neighbors
-        if sums == 0.0:
-            # h[i] = mz - z[i] + 2e-3
-            continue
+            # Skip cells with no downslope neighbors
+            if sums == 0.0:
+                LM[i] = True
+                # h[i] = mz - z[i] + 2e-3
+                continue
 
-        # Distribute discharge proportionally to slope gradients
-        for k in range(4):
-            j = flow.neighbourer_flat.neighbour(i, k)
-            tS = ti.max(0.0, (((z[i]+h[i]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
-            ti.atomic_add(temp[j], tS / sums * Q[i])  # Add proportional discharge
 
-        norms = ti.math.sqrt(msx**2 + msy**2)
+            # Distribute discharge proportionally to slope gradients
+            for k in range(4):
+                j = flow.neighbourer_flat.neighbour(i, k)
+                tS = ti.max(0.0, (((z[i]+h[i]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
+                ti.atomic_add(temp[j], tS / sums * Q[i])  # Add proportional discharge
+        else:
+            ti.atomic_add(temp[srecs[i]], Q[i])
+            LM[srecs[i]] = True
+
+        norms = ti.math.sqrt(msx**2 + msy**2) if LM[i] == False else (z[i]+h[i] - z[srecs[i]] - h[srecs[i]])/cte.DX
         Qo = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(norms)
         dh[i] -= cte.DT_HYDRO * Qo/cte.DX**2
 

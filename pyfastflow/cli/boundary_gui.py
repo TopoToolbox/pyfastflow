@@ -17,21 +17,17 @@ import click
 
 from .guihelper import (
     compute_visual_layers,
-    array_to_canvas,
-    sample_view_raw,
-    sample_view_mask,
-    sample_view_uint8,
-    draw_polyline,
-    draw_points_px,
     nodata_neighbor_mask,
+    apply_lasso_to_boundaries,
 )
 from ..io import raster_to_numpy, TOPOTOOLBOX_AVAILABLE
-
 
 @click.command()
 @click.argument("dem_file", type=click.Path(exists=True))
 @click.argument("output_npy", type=click.Path(), required=False)
-def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
+@click.option("--disp-max", type=int, default=2048, show_default=True,
+              help="Max display texture dimension (downscales visuals only).")
+def boundary_gui(dem_file: str, output_npy: str | None = None, disp_max: int = 2048) -> None:
     if output_npy is None:
         base, _ = os.path.splitext(dem_file)
         output_npy = f"{base}_bc.npy"
@@ -64,8 +60,12 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
     except Exception:
         ti.init(arch=ti.cpu)
 
-    # Precompute visuals
-    terrain_rgb, hill_rgb = compute_visual_layers(dem, sea_min, sea_max)
+    # Optional display downscale to cap texture size for performance
+    MAX_TEX = max(256, int(disp_max))
+    from ..rastermanip import resize_to_max_dim
+    dem_disp = resize_to_max_dim(dem, MAX_TEX)
+    ny_disp, nx_disp = dem_disp.shape
+    terrain_rgb, hill_rgb = compute_visual_layers(dem_disp, sea_min, sea_max)
     hs_alpha = 0.5
 
     # Window and GUI (fixed size for performance)
@@ -76,7 +76,108 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
     window = ti.ui.Window("Boundary Editor", (WIN_W, WIN_H), show_window=not headless)
     canvas = window.get_canvas()
     gui = window.get_gui()
-    img_field = ti.Vector.field(3, dtype=ti.f32, shape=(WIN_W, WIN_H))
+    # GPU fields (declared after ti.init)
+    frame = ti.Vector.field(3, dtype=ti.f32, shape=(WIN_W, WIN_H))
+    # Use 8-bit display textures to cut bandwidth (4x smaller)
+    terrain_tex = ti.Vector.field(3, dtype=ti.u8, shape=(ny_disp, nx_disp))
+    hill_tex = ti.field(dtype=ti.u8, shape=(ny_disp, nx_disp))  # single-channel hillshade
+    dem_field = ti.field(dtype=ti.f32, shape=(ny, nx))
+    boundaries_field = ti.field(dtype=ti.u8, shape=(ny, nx))
+    # Uniforms as 0D fields
+    sea_level_k = ti.field(dtype=ti.f32, shape=())
+    vp_x0_k = ti.field(dtype=ti.i32, shape=())
+    vp_y0_k = ti.field(dtype=ti.i32, shape=())
+    vp_w_k = ti.field(dtype=ti.i32, shape=())
+    vp_h_k = ti.field(dtype=ti.i32, shape=())
+    nx_k = ti.field(dtype=ti.i32, shape=())
+    ny_k = ti.field(dtype=ti.i32, shape=())
+    nx_disp_k = ti.field(dtype=ti.i32, shape=())
+    ny_disp_k = ti.field(dtype=ti.i32, shape=())
+    sx_k = ti.field(dtype=ti.f32, shape=())  # display texture x scale = nx_disp/nx
+    sy_k = ti.field(dtype=ti.f32, shape=())  # display texture y scale = ny_disp/ny
+    view_x_min_k = ti.field(dtype=ti.f32, shape=())
+    view_y_min_top_k = ti.field(dtype=ti.f32, shape=())
+    view_w_k = ti.field(dtype=ti.f32, shape=())
+    view_h_k = ti.field(dtype=ti.f32, shape=())
+    hs_alpha_k = ti.field(dtype=ti.f32, shape=())
+    win_w_k = ti.field(dtype=ti.i32, shape=())
+    win_h_k = ti.field(dtype=ti.i32, shape=())
+    # Upload static textures and data
+    terrain_tex.from_numpy((terrain_rgb * 255.0).clip(0, 255).astype(np.uint8))
+    # hill_rgb is grayscale replicated; take channel 0
+    hill_tex.from_numpy((hill_rgb[..., 0] * 255.0).clip(0, 255).astype(np.uint8))
+    dem_field.from_numpy(dem)
+    boundaries_field.from_numpy(boundaries)
+
+    # Define Taichi kernels after fields exist so they can close over them
+    @ti.kernel
+    def render_kernel():
+        for x, y in ti.ndrange(win_w_k[None], win_h_k[None]):
+            c = ti.Vector([0.0, 0.0, 0.0])
+            if x >= vp_x0_k[None] and x < vp_x0_k[None] + vp_w_k[None] and y >= vp_y0_k[None] and y < vp_y0_k[None] + vp_h_k[None]:
+                u = (ti.cast(x - vp_x0_k[None], ti.f32) + 0.5) / ti.max(1, vp_w_k[None])
+                v_bottom = (ti.cast(y - vp_y0_k[None], ti.f32) + 0.5) / ti.max(1, vp_h_k[None])
+                v_top = 1.0 - v_bottom
+                ax = view_x_min_k[None] + u * view_w_k[None]
+                ay = view_y_min_top_k[None] + v_top * view_h_k[None]
+                ix = ti.max(0, ti.min(nx_k[None] - 1, ti.i32(ax)))
+                iy = ti.max(0, ti.min(ny_k[None] - 1, ti.i32(ay)))
+                # Map to display textures (downsampled) using scale factors
+                ix_ds = ti.max(0, ti.min(nx_disp_k[None] - 1, ti.i32(ti.cast(ix, ti.f32) * sx_k[None])))
+                iy_ds = ti.max(0, ti.min(ny_disp_k[None] - 1, ti.i32(ti.cast(iy, ti.f32) * sy_k[None])))
+                t_u8 = terrain_tex[iy_ds, ix_ds]
+                tcol = ti.Vector([ti.cast(t_u8[0], ti.f32), ti.cast(t_u8[1], ti.f32), ti.cast(t_u8[2], ti.f32)]) / 255.0
+                h_u8 = hill_tex[iy_ds, ix_ds]
+                hval = ti.cast(h_u8, ti.f32) / 255.0
+                hcol = ti.Vector([hval, hval, hval])
+                base_col = (1.0 - hs_alpha_k[None]) * tcol + hs_alpha_k[None] * hcol
+                val = dem_field[iy, ix]
+                is_outlet = ti.u8(boundaries_field[iy, ix]) == ti.u8(3)
+                is_burned = ti.u8(boundaries_field[iy, ix]) == ti.u8(0)
+                is_nan = (val != val)
+                is_sea = (val < sea_level_k[None])
+                col = base_col
+                if is_outlet:
+                    col = ti.Vector([1.0, 0.0, 0.0])
+                elif is_burned or is_nan:
+                    col = ti.Vector([0.0, 0.0, 0.0])
+                elif is_sea:
+                    col = ti.Vector([0.5, 0.5, 0.5])
+                c = col
+            frame[x, y] = c
+
+    # Lasso GPU buffers (fixed max points)
+    NMAX_LASSO = 4096
+    lasso_px = ti.field(dtype=ti.i32, shape=NMAX_LASSO)
+    lasso_py = ti.field(dtype=ti.i32, shape=NMAX_LASSO)
+    lasso_n = ti.field(dtype=ti.i32, shape=())
+
+    @ti.kernel
+    def draw_segments_kernel():
+        n = lasso_n[None]
+        for i in range(n - 1):
+            x0 = lasso_px[i]
+            y0 = lasso_py[i]
+            x1 = lasso_px[i + 1]
+            y1 = lasso_py[i + 1]
+            dx = x1 - x0
+            dy = y1 - y0
+            steps = ti.max(ti.abs(dx), ti.abs(dy))
+            if steps <= 0:
+                if 0 <= x0 and x0 < win_w_k[None] and 0 <= y0 and y0 < win_h_k[None]:
+                    frame[x0, y0] = ti.Vector([0.0, 1.0, 0.0])
+            else:
+                sx = ti.cast(dx, ti.f32) / ti.cast(steps, ti.f32)
+                sy = ti.cast(dy, ti.f32) / ti.cast(steps, ti.f32)
+                fx = ti.cast(x0, ti.f32)
+                fy = ti.cast(y0, ti.f32)
+                for s in range(steps + 1):
+                    xi = ti.i32(fx + 0.5)
+                    yi = ti.i32(fy + 0.5)
+                    if 0 <= xi and xi < win_w_k[None] and 0 <= yi and yi < win_h_k[None]:
+                        frame[xi, yi] = ti.Vector([0.0, 1.0, 0.0])
+                    fx += sx
+                    fy += sy
 
     # Viewport rect that preserves DEM aspect ratio inside available area
     avail_x0 = PANEL_W + MARGIN
@@ -108,61 +209,89 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
     disp_off_y_px = 0.0
 
     def update_display() -> None:
-        buffer = np.zeros((WIN_W, WIN_H, 3), dtype=np.float32)
+        # Determine view window and effective viewport rect
         if zoom >= 1.0:
-            # Sample current view window to viewport size
             view_w = nx / max(zoom, 1e-6)
             view_h = ny / max(zoom, 1e-6)
-            t_small = sample_view_raw(terrain_rgb, view_x_min, view_y_min, view_w, view_h, vp_w, vp_h)
-            h_small = sample_view_raw(hill_rgb, view_x_min, view_y_min, view_w, view_h, vp_w, vp_h)
-            nod_small = sample_view_mask(np.isnan(dem) | (dem < sea_level), view_x_min, view_y_min, view_w, view_h, vp_w, vp_h)
-            b_small = sample_view_uint8(boundaries, view_x_min, view_y_min, view_w, view_h, vp_w, vp_h)
-            view_rgb = (1.0 - hs_alpha) * t_small + hs_alpha * h_small
-            view_rgb[nod_small] = 0.0
-            view_rgb[b_small == 3] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-            # Lasso overlay: map full DEM normalized coords to viewport pixels
-            if lasso_mode and lasso_path:
-                pts = []
-                for u, v in lasso_path:
-                    x = u * nx
-                    y = v * ny
-                    px = int((x - view_x_min) / view_w * vp_w)
-                    py = int((y - view_y_min) / view_h * vp_h)
-                    pts.append((px, py))
-                draw_points_px(view_rgb, pts)
-                draw_polyline(view_rgb, pts, close=len(pts) >= 3)
-            rgb_disp = array_to_canvas(view_rgb)
-            buffer[vp_x0:vp_x0 + vp_w, vp_y0:vp_y0 + vp_h, :] = rgb_disp
+            vx0_i = vp_x0
+            vy0_i = vp_y0
+            vw_i = vp_w
+            vh_i = vp_h
+            vxmin = view_x_min
+            vymin_top = view_y_min
         else:
-            # Render full DEM scaled down within viewport
+            view_w = float(nx)
+            view_h = float(ny)
+            vxmin = 0.0
+            vymin_top = 0.0
             out_w = max(1, int(vp_w * zoom))
             out_h = max(1, int(vp_h * zoom))
-            t_small = sample_view_raw(terrain_rgb, 0.0, 0.0, nx, ny, out_w, out_h)
-            h_small = sample_view_raw(hill_rgb, 0.0, 0.0, nx, ny, out_w, out_h)
-            nod_small = sample_view_mask(np.isnan(dem) | (dem < sea_level), 0.0, 0.0, nx, ny, out_w, out_h)
-            b_small = sample_view_uint8(boundaries, 0.0, 0.0, nx, ny, out_w, out_h)
-            view_rgb = (1.0 - hs_alpha) * t_small + hs_alpha * h_small
-            view_rgb[nod_small] = 0.0
-            view_rgb[b_small == 3] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-            # Lasso overlay: small image covers full DEM
-            if lasso_mode and lasso_path:
-                pts = [(int(u * out_w), int(v * out_h)) for (u, v) in lasso_path]
-                draw_points_px(view_rgb, pts)
-                draw_polyline(view_rgb, pts, close=len(pts) >= 3)
-            rgb_disp = array_to_canvas(view_rgb)  # (out_w, out_h, 3)
-            # Place centered within viewport with offsets
             base_x = vp_x0 + (vp_w - out_w) // 2
             base_y = vp_y0 + (vp_h - out_h) // 2
             max_off_x = (vp_w - out_w) // 2
             max_off_y = (vp_h - out_h) // 2
-            nonlocal disp_off_x_px, disp_off_y_px
             ox = int(np.clip(disp_off_x_px, -max_off_x, max_off_x))
             oy = int(np.clip(disp_off_y_px, -max_off_y, max_off_y))
-            x0 = base_x + ox
-            y0 = base_y + oy
-            buffer[x0:x0 + out_w, y0:y0 + out_h, :] = rgb_disp
+            vx0_i = base_x + ox
+            vy0_i = base_y + oy
+            vw_i = out_w
+            vh_i = out_h
 
-        img_field.from_numpy(buffer)
+        # Render full frame on GPU
+        # Update uniforms
+        sea_level_k[None] = float(sea_level)
+        vp_x0_k[None] = int(vx0_i)
+        vp_y0_k[None] = int(vy0_i)
+        vp_w_k[None] = int(vw_i)
+        vp_h_k[None] = int(vh_i)
+        nx_k[None] = int(nx)
+        ny_k[None] = int(ny)
+        nx_disp_k[None] = int(nx_disp)
+        ny_disp_k[None] = int(ny_disp)
+        sx_k[None] = float(nx_disp) / float(nx)
+        sy_k[None] = float(ny_disp) / float(ny)
+        view_x_min_k[None] = float(vxmin)
+        view_y_min_top_k[None] = float(vymin_top)
+        view_w_k[None] = float(view_w)
+        view_h_k[None] = float(view_h)
+        hs_alpha_k[None] = float(hs_alpha)
+        win_w_k[None] = int(WIN_W)
+        win_h_k[None] = int(WIN_H)
+        render_kernel()
+        # Draw lasso overlay as polyline
+        if lasso_mode and lasso_path:
+            import numpy as _np
+            pts = []
+            if zoom >= 1.0:
+                for u, v in lasso_path:
+                    x = u * nx
+                    y = v * ny
+                    px = int((x - vxmin) / max(view_w, 1e-6) * vw_i) + vx0_i
+                    py = int((1.0 - (y - vymin_top) / max(view_h, 1e-6)) * vh_i) + vy0_i
+                    pts.append((px, py))
+            else:
+                for u, v in lasso_path:
+                    px = int(u * vw_i) + vx0_i
+                    py = int((1.0 - v) * vh_i) + vy0_i
+                    pts.append((px, py))
+            if pts:
+                if len(pts) >= 3:
+                    pts = pts + [pts[0]]
+                px_np = _np.array([p[0] for p in pts], dtype=_np.int32)
+                py_np = _np.array([p[1] for p in pts], dtype=_np.int32)
+                npts = min(px_np.shape[0], NMAX_LASSO)
+                # Upload padded arrays to match Taichi field shape
+                buf_px = _np.empty((NMAX_LASSO,), dtype=_np.int32)
+                buf_py = _np.empty((NMAX_LASSO,), dtype=_np.int32)
+                buf_px[:npts] = px_np[:npts]
+                buf_py[:npts] = py_np[:npts]
+                if npts < NMAX_LASSO:
+                    buf_px[npts:] = buf_px[npts - 1] if npts > 0 else 0
+                    buf_py[npts:] = buf_py[npts - 1] if npts > 0 else 0
+                lasso_n[None] = int(npts)
+                lasso_px.from_numpy(buf_px)
+                lasso_py.from_numpy(buf_py)
+                draw_segments_kernel()
 
     update_display()
 
@@ -173,13 +302,28 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
         return
 
     while window.running:
+        gui.text("Control")
+        gui.text("Sea Level (grey overlay until burned)")
         sea_level = gui.slider_float("Sea level", sea_level, sea_min, sea_max)
-        nodata[:, :] = np.isnan(dem) | (dem < sea_level)
-        boundaries[nodata] = 0
-        boundaries[(~nodata) & (boundaries == 0)] = 1
+        # Fine controls for sea level: --, -, +, ++ (10x and 1x steps)
+        if gui.button("--"):
+            sea_level = max(sea_min, sea_level - 10.0)
+        if gui.button("-"):
+            sea_level = max(sea_min, sea_level - 1.0)
+        if gui.button("+"):
+            sea_level = min(sea_max, sea_level + 1.0)
+        if gui.button("++"):
+            sea_level = min(sea_max, sea_level + 10.0)
 
+        if gui.button("Burn sea level to BC (0)"):
+            sea_mask = dem < sea_level
+            boundaries[sea_mask] = 0
+            boundaries_field.from_numpy(boundaries)
+
+        gui.text("Boundary Tools")
         if gui.button("Auto boundary"):
             # Reset then mark edges and NoData neighbors as outlets
+            nodata = np.isnan(dem) | (dem < sea_level)
             boundaries[:, :] = np.where(nodata, 0, 1)
             from .guihelper import nodata_neighbor_mask
             valid = ~nodata
@@ -190,16 +334,16 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
             edges[:, -1] = valid[:, -1]
             nb = nodata_neighbor_mask(nodata)
             boundaries[valid & (edges | nb)] = 3
+            boundaries_field.from_numpy(boundaries)
 
         if gui.button("Reset all"):
+            nodata = np.isnan(dem) | (dem < sea_level)
             boundaries[:, :] = np.where(nodata, 0, 1)
             lasso_path.clear()
             lasso_mode = False
+            boundaries_field.from_numpy(boundaries)
 
-        gui.text("Boundary GUI")
-        gui.text("- Auto: edges & NoData neighbors -> outlets (3)")
-        gui.text("- Lasso: left-click add, right-click apply")
-        gui.text("- Save: write boundary array and exit")
+        gui.text("Lasso Selection (left-click add, right-click apply)")
 
         if not lasso_mode:
             if gui.button("Lasso (OFF)"):
@@ -214,7 +358,11 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
                 lasso_path.clear()
                 lasso_mode = False
 
-        # Zoom buttons
+        # Save/Zoom controls
+        gui.text("Session")
+        if gui.button("Save and Quit"):
+            np.save(output_npy, boundaries)
+            break
         if gui.button("Zoom +"):
             # Keep center fixed
             if zoom >= 1.0:
@@ -252,9 +400,7 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
             else:
                 zoom = max(zoom_min, zoom / 1.25)
 
-        if gui.button("Save and Quit"):
-            np.save(output_npy, boundaries)
-            break
+        # end Session group
 
         # Keyboard panning: Arrow keys (preferred) with WASD fallback
         pan_frac = 0.05
@@ -299,7 +445,7 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
                 if not (window.is_pressed(ti.ui.LMB) or window.is_pressed(ti.ui.RMB)):
                     lasso_wait_release = False
                 update_display()
-                canvas.set_image(img_field)
+                canvas.set_image(frame)
                 window.show()
                 continue
             if window.get_event(ti.ui.PRESS):
@@ -337,13 +483,16 @@ def boundary_gui(dem_file: str, output_npy: str | None = None) -> None:
                         lasso_path.append((u_full, v_full))
                 elif ev.key == ti.ui.RMB:
                     if len(lasso_path) > 2:
+                        # Build live nodata mask from burned or current sea level
+                        nodata = (boundaries == 0) | np.isnan(dem) | (dem < sea_level)
                         boundaries[:, :] = np.where(nodata, 0, 1)
                         apply_lasso_to_boundaries(boundaries, nodata, lasso_path)
+                        boundaries_field.from_numpy(boundaries)
                     lasso_path.clear()
                     lasso_mode = False
 
         update_display()
-        canvas.set_image(img_field)
+        canvas.set_image(frame)
         window.show()
 
     window.destroy()
