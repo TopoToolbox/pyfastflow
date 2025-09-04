@@ -113,6 +113,50 @@ def sample_view_raw(
     return rgb_raw[yi[:, None], xi[None, :], :].astype(np.float32)
 
 
+def sample_view_mask(mask: np.ndarray, view_x_min: float, view_y_min: float, view_w: float, view_h: float, out_w: int, out_h: int) -> np.ndarray:
+    """Nearest-neighbor sample a boolean mask view into (out_h, out_w)."""
+    ny, nx = mask.shape
+    x_lin = (np.arange(out_w) + 0.5) / max(out_w, 1)
+    y_lin = (np.arange(out_h) + 0.5) / max(out_h, 1)
+    src_x = view_x_min + x_lin * view_w
+    src_y = view_y_min + y_lin * view_h
+    xi = np.clip(src_x.astype(np.int32), 0, nx - 1)
+    yi = np.clip(src_y.astype(np.int32), 0, ny - 1)
+    return mask[yi[:, None], xi[None, :]]
+
+
+def sample_view_uint8(arr: np.ndarray, view_x_min: float, view_y_min: float, view_w: float, view_h: float, out_w: int, out_h: int) -> np.ndarray:
+    """Nearest-neighbor sample a uint8 array view into (out_h, out_w)."""
+    ny, nx = arr.shape
+    x_lin = (np.arange(out_w) + 0.5) / max(out_w, 1)
+    y_lin = (np.arange(out_h) + 0.5) / max(out_h, 1)
+    src_x = view_x_min + x_lin * view_w
+    src_y = view_y_min + y_lin * view_h
+    xi = np.clip(src_x.astype(np.int32), 0, nx - 1)
+    yi = np.clip(src_y.astype(np.int32), 0, ny - 1)
+    return arr[yi[:, None], xi[None, :]]
+
+
+def draw_polyline(rgb: np.ndarray, pts: list[tuple[int, int]], color=(0.0, 1.0, 0.0), close=False) -> None:
+    """Draw polyline on rgb (array order, y,x). pts are (x,y) integer pixels."""
+    if len(pts) < 2:
+        return
+    for i in range(len(pts) - 1):
+        _draw_line(rgb, pts[i], pts[i + 1], color=color)
+    if close and len(pts) >= 3:
+        _draw_line(rgb, pts[-1], pts[0], color=color)
+
+
+def draw_points_px(rgb: np.ndarray, pts: list[tuple[int, int]], color=(1.0, 0.0, 1.0)) -> None:
+    ny, nx, _ = rgb.shape
+    for x, y in pts:
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                px, py = x + dx, y + dy
+                if 0 <= px < nx and 0 <= py < ny:
+                    rgb[py, px] = color
+
+
 def draw_lasso_points(rgb: np.ndarray, lasso_path: list[tuple[float, float]], nx: int, ny: int, color=(1.0, 0.0, 1.0)) -> None:
     for p in lasso_path:
         x = int(p[0] * nx)
