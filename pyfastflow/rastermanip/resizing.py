@@ -161,8 +161,96 @@ def resize_raster(
         result = target_field.field.to_numpy().reshape(ny_t, nx_t)
         source_field.release()
         target_field.release()
-        return result
+    return result
 
 
-__all__ = ["resize_raster", "resize_kernel"]
+def resize_to_dims(
+    grid_data,
+    target_nx: int,
+    target_ny: int,
+    boundary: str = "clamp",
+):
+    """Resize a 2D raster to exact target dimensions using bilinear interpolation.
 
+    Args:
+        grid_data: Input 2D numpy array or Taichi field
+        target_nx: Target number of columns (width)
+        target_ny: Target number of rows (height)
+        boundary: Boundary handling ('clamp', 'wrap', 'reflect').
+
+    Returns:
+        numpy.ndarray with shape (target_ny, target_nx)
+    """
+    if isinstance(grid_data, np.ndarray):
+        if grid_data.ndim != 2:
+            raise ValueError("Input numpy array must be 2D")
+        ny, nx = grid_data.shape
+        data_np = grid_data.flatten()
+    elif hasattr(grid_data, "to_numpy"):
+        if len(grid_data.shape) == 2:
+            ny, nx = grid_data.shape
+            data_np = grid_data.to_numpy().reshape(-1)
+        else:
+            raise ValueError("Input Taichi field must be 2D for resize_to_dims")
+    else:
+        raise TypeError("grid_data must be a numpy array or Taichi field")
+
+    boundary_map = {
+        "clamp": _BOUNDARY_CLAMP,
+        "wrap": _BOUNDARY_WRAP,
+        "reflect": _BOUNDARY_REFLECT,
+    }
+    if boundary not in boundary_map:
+        raise ValueError("boundary must be 'clamp', 'wrap', or 'reflect'")
+    boundary_mode = boundary_map[boundary]
+
+    source_field = pool.get_temp_field(ti.f32, (ny * nx,))
+    source_field.field.from_numpy(data_np)
+
+    target_field = pool.get_temp_field(ti.f32, (target_ny * target_nx,))
+
+    resize_kernel(
+        source_field.field,
+        target_field.field,
+        nx,
+        ny,
+        target_nx,
+        target_ny,
+        boundary_mode,
+    )
+
+    result = target_field.field.to_numpy().reshape(target_ny, target_nx)
+    source_field.release()
+    target_field.release()
+    return result
+
+
+__all__ = ["resize_raster", "resize_kernel", "resize_to_dims"]
+
+
+def resize_to_max_dim(raster: np.ndarray, max_dim: int) -> np.ndarray:
+    """Resize a 2D raster so that max(height, width) == max_dim (or smaller).
+
+    Preserves aspect ratio. If the raster is already smaller than ``max_dim``,
+    returns the original array.
+
+    Parameters
+    ----------
+    raster : np.ndarray
+        Input 2D array (ny, nx).
+    max_dim : int
+        Target maximum dimension.
+
+    Returns
+    -------
+    np.ndarray
+        Resized raster with preserved aspect ratio.
+    """
+    if not isinstance(raster, np.ndarray) or raster.ndim != 2:
+        raise ValueError("raster must be a 2D numpy array")
+    ny, nx = raster.shape
+    cur_max = max(nx, ny)
+    if cur_max <= max_dim:
+        return raster
+    scale = max_dim / float(cur_max)
+    return resize_raster(raster, scale)

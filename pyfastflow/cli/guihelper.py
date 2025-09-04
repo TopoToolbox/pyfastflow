@@ -1,0 +1,308 @@
+"""Reusable GUI helpers for Taichi ggui image-based tools.
+
+This module centralizes common functionality used by CLI visualization tools:
+- Terrain colormap + hillshade compositing
+- Padded canvas preparation and viewport math
+- Simple lasso drawing and application on raster grids
+
+Author: B.G. + refactor
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import matplotlib.cm as cm
+import taichi as ti
+from matplotlib.path import Path
+
+# Optional imports from package
+try:
+    from .. import constants as cte
+    from ..visu.hillshading import hillshade_numpy
+except Exception:  # pragma: no cover - during minimal loads
+    cte = None
+    hillshade_numpy = None
+
+
+def nodata_neighbor_mask(nodata: np.ndarray) -> np.ndarray:
+    """Return mask of cells that have at least one NoData neighbor.
+
+    Works on 2D boolean array where True marks NoData cells.
+    """
+    nb = np.zeros_like(nodata, dtype=bool)
+    nb[1:, :] |= nodata[:-1, :]
+    nb[:-1, :] |= nodata[1:, :]
+    nb[:, 1:] |= nodata[:, :-1]
+    nb[:, :-1] |= nodata[:, 1:]
+    return nb
+
+
+def compute_visual_layers(dem: np.ndarray, sea_min: float, sea_max: float) -> tuple[np.ndarray, np.ndarray]:
+    """Precompute terrain colormap RGB and hillshade grayscale RGB.
+
+    Returns (terrain_rgb, hill_rgb), both float32 arrays in [0,1] with shape (ny,nx,3).
+    Requires Taichi to be initialized before call (for hillshade kernel).
+    """
+    ny, nx = dem.shape
+    valid_mask = ~np.isnan(dem)
+    dem_norm = np.zeros_like(dem, dtype=np.float32)
+    if np.any(valid_mask):
+        dem_norm[valid_mask] = (dem[valid_mask] - sea_min) / (sea_max - sea_min + 1e-6)
+    terrain_cmap = cm.get_cmap("terrain")
+    terrain_rgb = terrain_cmap(np.clip(dem_norm, 0.0, 1.0))[..., :3].astype(np.float32)
+
+    hs = np.zeros_like(dem, dtype=np.float32)
+    if hillshade_numpy is not None:
+        if cte is not None and hasattr(cte, "DX"):
+            hs = hillshade_numpy(dem.astype(np.float32), dx=cte.DX)
+        else:
+            hs = hillshade_numpy(dem.astype(np.float32))
+    hs = np.nan_to_num(hs, nan=0.0).astype(np.float32)
+    hill_rgb = np.stack([hs, hs, hs], axis=-1)
+    return terrain_rgb, hill_rgb
+
+
+def prepare_display_textures(dem: np.ndarray, sea_min: float, sea_max: float, max_dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int, float, float]:
+    from ..rastermanip import resize_to_max_dim
+    ny, nx = dem.shape
+    dem_disp = resize_to_max_dim(dem, max_dim)
+    ny_disp, nx_disp = dem_disp.shape
+    terrain_rgb, hill_rgb = compute_visual_layers(dem_disp, sea_min, sea_max)
+    terrain_u8 = (terrain_rgb * 255.0).clip(0, 255).astype(np.uint8)
+    hill_u8 = (hill_rgb[..., 0] * 255.0).clip(0, 255).astype(np.uint8)
+    sx = float(nx_disp) / float(nx)
+    sy = float(ny_disp) / float(ny)
+    return dem_disp, terrain_u8, hill_u8, nx_disp, ny_disp, sx, sy
+
+
+def compute_viewport(win_w: int, win_h: int, panel_w: int, margin: int, nx: int, ny: int) -> tuple[int, int, int, int, float, float, float, float]:
+    avail_x0 = panel_w + margin
+    avail_y0 = margin
+    avail_w = win_w - panel_w - 2 * margin
+    avail_h = win_h - 2 * margin
+    dem_aspect = nx / ny
+    vp_w = min(avail_w, int(avail_h * dem_aspect))
+    vp_h = min(avail_h, int(avail_w / dem_aspect))
+    vp_x0 = avail_x0 + (avail_w - vp_w) // 2
+    vp_y0 = avail_y0 + (avail_h - vp_h) // 2
+    vx0 = vp_x0 / win_w
+    vx1 = (vp_x0 + vp_w) / win_w
+    vy0 = vp_y0 / win_h
+    vy1 = (vp_y0 + vp_h) / win_h
+    return vp_x0, vp_y0, vp_w, vp_h, vx0, vx1, vy0, vy1
+
+
+def lasso_pixels_for_view(
+    lasso_path: list[tuple[float, float]], nx: int, ny: int, vp_x0: int, vp_y0: int, vp_w: int, vp_h: int,
+    view_x_min: float, view_y_min: float, view_w: float, view_h: float, zoom: float
+) -> list[tuple[int, int]]:
+    pts: list[tuple[int, int]] = []
+    if zoom >= 1.0:
+        for u, v in lasso_path:
+            x = u * nx
+            y = v * ny
+            px = int((x - view_x_min) / max(view_w, 1e-6) * vp_w) + vp_x0
+            py = int((1.0 - (y - view_y_min) / max(view_h, 1e-6)) * vp_h) + vp_y0
+            pts.append((px, py))
+    else:
+        out_w = max(1, int(vp_w * zoom))
+        out_h = max(1, int(vp_h * zoom))
+        base_x = vp_x0 + (vp_w - out_w) // 2
+        base_y = vp_y0 + (vp_h - out_h) // 2
+        for u, v in lasso_path:
+            px = int(u * out_w) + base_x
+            py = int((1.0 - v) * out_h) + base_y
+            pts.append((px, py))
+    return pts
+
+
+def pad_to_length(arr: np.ndarray, target: int, fill: int = 0) -> np.ndarray:
+    if arr.shape[0] == target:
+        return arr
+    out = np.empty((target,), dtype=arr.dtype)
+    n = min(arr.shape[0], target)
+    out[:n] = arr[:n]
+    if n == 0:
+        out[:] = fill
+    else:
+        out[n:] = arr[n - 1]
+    return out
+
+
+def burn_sea_level(boundaries: np.ndarray, dem: np.ndarray, sea_level: float) -> np.ndarray:
+    mask = dem < sea_level
+    boundaries[mask] = 0
+    return boundaries
+
+
+def live_nodata_mask(boundaries: np.ndarray, dem: np.ndarray, sea_level: float) -> np.ndarray:
+    return (boundaries == 0) | np.isnan(dem) | (dem < sea_level)
+
+
+def array_to_canvas(rgb_raw: np.ndarray) -> np.ndarray:
+    """Convert raster RGB (row-from-top, col-from-left) to Taichi canvas order.
+
+    Transpose to (x, y) and flip Y so top row appears at top on screen.
+    Output shape: (nx, ny, 3) float32.
+    """
+    return np.transpose(rgb_raw, (1, 0, 2))[:, ::-1, :].astype(np.float32)
+
+
+def place_on_padded(rgb_disp: np.ndarray, nx: int, ny: int, pad_left: int, pad_right: int, pad_top: int, pad_bottom: int) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    """Embed (nx,ny,3) display RGB into a padded buffer and return viewport bounds.
+
+    Returns (padded, (vx0,vx1,vy0,vy1)) where v* are normalized in [0,1] wrt padded size.
+    """
+    disp_w = nx + pad_left + pad_right
+    disp_h = ny + pad_top + pad_bottom
+    padded = np.zeros((disp_w, disp_h, 3), dtype=np.float32)
+    padded[pad_left:pad_left + nx, pad_bottom:pad_bottom + ny, :] = rgb_disp
+    vx0 = pad_left / disp_w
+    vx1 = (pad_left + nx) / disp_w
+    vy0 = pad_bottom / disp_h
+    vy1 = (pad_bottom + ny) / disp_h
+    return padded, (vx0, vx1, vy0, vy1)
+
+
+def sample_view_raw(
+    rgb_raw: np.ndarray,
+    view_x_min: float,
+    view_y_min: float,
+    view_w: float,
+    view_h: float,
+    out_w: int,
+    out_h: int,
+) -> np.ndarray:
+    """Nearest-neighbor sample a view from full-resolution rgb_raw (ny,nx,3).
+
+    View parameters are in array coordinates (cols, rows from top). Returns an
+    (out_h, out_w, 3) float32 array suitable for array_to_canvas transform.
+    """
+    ny, nx, _ = rgb_raw.shape
+    # Build sampling indices along X and Y
+    x_lin = (np.arange(out_w) + 0.5) / max(out_w, 1)
+    y_lin = (np.arange(out_h) + 0.5) / max(out_h, 1)
+    src_x = view_x_min + x_lin * view_w
+    src_y = view_y_min + y_lin * view_h
+    xi = np.clip(src_x.astype(np.int32), 0, nx - 1)
+    yi = np.clip(src_y.astype(np.int32), 0, ny - 1)
+    # Advanced indexing gather: rows then columns
+    return rgb_raw[yi[:, None], xi[None, :], :].astype(np.float32)
+
+
+def sample_view_mask(mask: np.ndarray, view_x_min: float, view_y_min: float, view_w: float, view_h: float, out_w: int, out_h: int) -> np.ndarray:
+    """Nearest-neighbor sample a boolean mask view into (out_h, out_w)."""
+    ny, nx = mask.shape
+    x_lin = (np.arange(out_w) + 0.5) / max(out_w, 1)
+    y_lin = (np.arange(out_h) + 0.5) / max(out_h, 1)
+    src_x = view_x_min + x_lin * view_w
+    src_y = view_y_min + y_lin * view_h
+    xi = np.clip(src_x.astype(np.int32), 0, nx - 1)
+    yi = np.clip(src_y.astype(np.int32), 0, ny - 1)
+    return mask[yi[:, None], xi[None, :]]
+
+
+def sample_view_uint8(arr: np.ndarray, view_x_min: float, view_y_min: float, view_w: float, view_h: float, out_w: int, out_h: int) -> np.ndarray:
+    """Nearest-neighbor sample a uint8 array view into (out_h, out_w)."""
+    ny, nx = arr.shape
+    x_lin = (np.arange(out_w) + 0.5) / max(out_w, 1)
+    y_lin = (np.arange(out_h) + 0.5) / max(out_h, 1)
+    src_x = view_x_min + x_lin * view_w
+    src_y = view_y_min + y_lin * view_h
+    xi = np.clip(src_x.astype(np.int32), 0, nx - 1)
+    yi = np.clip(src_y.astype(np.int32), 0, ny - 1)
+    return arr[yi[:, None], xi[None, :]]
+
+
+def draw_polyline(rgb: np.ndarray, pts: list[tuple[int, int]], color=(0.0, 1.0, 0.0), close=False) -> None:
+    """Draw polyline on rgb (array order, y,x). pts are (x,y) integer pixels."""
+    if len(pts) < 2:
+        return
+    for i in range(len(pts) - 1):
+        _draw_line(rgb, pts[i], pts[i + 1], color=color)
+    if close and len(pts) >= 3:
+        _draw_line(rgb, pts[-1], pts[0], color=color)
+
+
+def draw_points_px(rgb: np.ndarray, pts: list[tuple[int, int]], color=(1.0, 0.0, 1.0)) -> None:
+    ny, nx, _ = rgb.shape
+    for x, y in pts:
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                px, py = x + dx, y + dy
+                if 0 <= px < nx and 0 <= py < ny:
+                    rgb[py, px] = color
+
+
+def draw_lasso_points(rgb: np.ndarray, lasso_path: list[tuple[float, float]], nx: int, ny: int, color=(1.0, 0.0, 1.0)) -> None:
+    for p in lasso_path:
+        x = int(p[0] * nx)
+        y = int(p[1] * ny)
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                px, py = x + dx, y + dy
+                if 0 <= px < nx and 0 <= py < ny:
+                    rgb[py, px] = color
+
+
+def _draw_line(rgb: np.ndarray, p1: tuple[int, int], p2: tuple[int, int], color=(0.0, 1.0, 0.0), nx: int | None = None, ny: int | None = None) -> None:
+    if nx is None or ny is None:
+        ny, nx, _ = rgb.shape
+    x1, y1 = p1
+    x2, y2 = p2
+    x1 = max(0, min(nx - 1, x1))
+    y1 = max(0, min(ny - 1, y1))
+    x2 = max(0, min(nx - 1, x2))
+    y2 = max(0, min(ny - 1, y2))
+    dx = abs(x2 - x1)
+    dy = abs(y2 - y1)
+    sx = 1 if x1 < x2 else -1
+    sy = 1 if y1 < y2 else -1
+    err = dx - dy
+    x, y = x1, y1
+    while True:
+        if 0 <= x < nx and 0 <= y < ny:
+            rgb[y, x] = color
+        if x == x2 and y == y2:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x += sx
+        if e2 < dx:
+            err += dx
+            y += sy
+
+
+def draw_lasso_polygon(rgb: np.ndarray, lasso_path: list[tuple[float, float]], nx: int, ny: int, color=(0.0, 1.0, 0.0)) -> None:
+    if len(lasso_path) < 2:
+        return
+    pts: list[tuple[int, int]] = []
+    for u, v in lasso_path:
+        pts.append((int(u * nx), int(v * ny)))
+    for i in range(len(pts) - 1):
+        _draw_line(rgb, pts[i], pts[i + 1], color=color, nx=nx, ny=ny)
+    if len(pts) >= 3:
+        _draw_line(rgb, pts[-1], pts[0], color=color, nx=nx, ny=ny)
+
+
+def apply_lasso_to_boundaries(boundaries: np.ndarray, nodata: np.ndarray, lasso_path: list[tuple[float, float]]) -> None:
+    """Apply lasso selection: mark outlets (3) for selected edge/NoData-neighboring cells.
+
+    Modifies boundaries in place. Expects boundaries shape matches nodata.
+    """
+    if len(lasso_path) < 3:
+        return
+    ny, nx = boundaries.shape
+    poly = np.array([[u * nx, v * ny] for (u, v) in lasso_path], dtype=np.float32)
+    gx, gy = np.meshgrid(np.arange(nx), np.arange(ny))
+    pts = np.stack([gx.ravel(), gy.ravel()], axis=-1)
+    mask = Path(poly).contains_points(pts).reshape(ny, nx)
+    valid = mask & ~nodata
+    nb = nodata_neighbor_mask(nodata)
+    edges = np.zeros_like(valid, dtype=bool)
+    edges[0, :] = True
+    edges[-1, :] = True
+    edges[:, 0] = True
+    edges[:, -1] = True
+    boundaries[valid & (edges | nb)] = 3
