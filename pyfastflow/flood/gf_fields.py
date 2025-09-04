@@ -331,10 +331,12 @@ class Flooder:
         LM.fill(False)
 
         for _ in range(N):
-            pf.flood.gf_hydrodynamics.graphflood_diffuse_cte_P_cte_man(self.grid.z.field, self.h.field, self.router.Q.field, Q_.field, dh.field, temporal_filtering)
+            pf.flood.gf_hydrodynamics.graphflood_diffuse_cte_P_cte_man(self.grid.z.field, self.h.field, self.router.Q.field, Q_.field, dh.field, 
+                self.flow.receivers.field, LM.field, temporal_filtering)
 
         Q_.release()
         dh.release()
+        LM.release()
 
     def run_LS(self, N=1000, input_mode="constant_prec", mode=None):
         """
