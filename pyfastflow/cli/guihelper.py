@@ -62,6 +62,83 @@ def compute_visual_layers(dem: np.ndarray, sea_min: float, sea_max: float) -> tu
     return terrain_rgb, hill_rgb
 
 
+def prepare_display_textures(dem: np.ndarray, sea_min: float, sea_max: float, max_dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int, float, float]:
+    from ..rastermanip import resize_to_max_dim
+    ny, nx = dem.shape
+    dem_disp = resize_to_max_dim(dem, max_dim)
+    ny_disp, nx_disp = dem_disp.shape
+    terrain_rgb, hill_rgb = compute_visual_layers(dem_disp, sea_min, sea_max)
+    terrain_u8 = (terrain_rgb * 255.0).clip(0, 255).astype(np.uint8)
+    hill_u8 = (hill_rgb[..., 0] * 255.0).clip(0, 255).astype(np.uint8)
+    sx = float(nx_disp) / float(nx)
+    sy = float(ny_disp) / float(ny)
+    return dem_disp, terrain_u8, hill_u8, nx_disp, ny_disp, sx, sy
+
+
+def compute_viewport(win_w: int, win_h: int, panel_w: int, margin: int, nx: int, ny: int) -> tuple[int, int, int, int, float, float, float, float]:
+    avail_x0 = panel_w + margin
+    avail_y0 = margin
+    avail_w = win_w - panel_w - 2 * margin
+    avail_h = win_h - 2 * margin
+    dem_aspect = nx / ny
+    vp_w = min(avail_w, int(avail_h * dem_aspect))
+    vp_h = min(avail_h, int(avail_w / dem_aspect))
+    vp_x0 = avail_x0 + (avail_w - vp_w) // 2
+    vp_y0 = avail_y0 + (avail_h - vp_h) // 2
+    vx0 = vp_x0 / win_w
+    vx1 = (vp_x0 + vp_w) / win_w
+    vy0 = vp_y0 / win_h
+    vy1 = (vp_y0 + vp_h) / win_h
+    return vp_x0, vp_y0, vp_w, vp_h, vx0, vx1, vy0, vy1
+
+
+def lasso_pixels_for_view(
+    lasso_path: list[tuple[float, float]], nx: int, ny: int, vp_x0: int, vp_y0: int, vp_w: int, vp_h: int,
+    view_x_min: float, view_y_min: float, view_w: float, view_h: float, zoom: float
+) -> list[tuple[int, int]]:
+    pts: list[tuple[int, int]] = []
+    if zoom >= 1.0:
+        for u, v in lasso_path:
+            x = u * nx
+            y = v * ny
+            px = int((x - view_x_min) / max(view_w, 1e-6) * vp_w) + vp_x0
+            py = int((1.0 - (y - view_y_min) / max(view_h, 1e-6)) * vp_h) + vp_y0
+            pts.append((px, py))
+    else:
+        out_w = max(1, int(vp_w * zoom))
+        out_h = max(1, int(vp_h * zoom))
+        base_x = vp_x0 + (vp_w - out_w) // 2
+        base_y = vp_y0 + (vp_h - out_h) // 2
+        for u, v in lasso_path:
+            px = int(u * out_w) + base_x
+            py = int((1.0 - v) * out_h) + base_y
+            pts.append((px, py))
+    return pts
+
+
+def pad_to_length(arr: np.ndarray, target: int, fill: int = 0) -> np.ndarray:
+    if arr.shape[0] == target:
+        return arr
+    out = np.empty((target,), dtype=arr.dtype)
+    n = min(arr.shape[0], target)
+    out[:n] = arr[:n]
+    if n == 0:
+        out[:] = fill
+    else:
+        out[n:] = arr[n - 1]
+    return out
+
+
+def burn_sea_level(boundaries: np.ndarray, dem: np.ndarray, sea_level: float) -> np.ndarray:
+    mask = dem < sea_level
+    boundaries[mask] = 0
+    return boundaries
+
+
+def live_nodata_mask(boundaries: np.ndarray, dem: np.ndarray, sea_level: float) -> np.ndarray:
+    return (boundaries == 0) | np.isnan(dem) | (dem < sea_level)
+
+
 def array_to_canvas(rgb_raw: np.ndarray) -> np.ndarray:
     """Convert raster RGB (row-from-top, col-from-left) to Taichi canvas order.
 
