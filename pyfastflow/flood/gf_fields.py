@@ -465,6 +465,21 @@ class Flooder:
         """
         return self.router.Q.field.to_numpy().reshape(self.rshp)
 
+    def get_Qo(self):
+        """
+        Get current discharge field from router as numpy array.
+
+        Returns:
+                numpy.ndarray: Discharge values (m³/s) reshaped to 2D grid
+        """
+        Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        pf.flood.gf_hydrodynamics.graphflood_get_Qo(self.grid.z.field, self.h.field, Q_.field)
+        Qo = Q_.field.to_numpy().reshape(self.rshp)
+        Q_.release()
+        return Qo
+
+    
+
     def destroy(self):
         """
         Release all pooled fields and free GPU memory.
