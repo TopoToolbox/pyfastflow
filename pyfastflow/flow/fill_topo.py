@@ -90,14 +90,26 @@ def topofill(flow_field, epsilon=1e-3, custom_z=None):
         z_.copy_from(flow_field.grid.z)
         z__.copy_from(flow_field.grid.z)
         for it in range(math.ceil(math.log2(cte.NX * cte.NY))):
-            _topofill(flow_field.grid.z, z_, receivers_, receivers__, epsilon, it + 1)
-        flow_field.grid.z.copy_from(z_)
+            _topofill(
+                flow_field.grid.z.field,
+                z_.field,
+                receivers_.field,
+                receivers__.field,
+                epsilon,
+                it + 1,
+            )
+        flow_field.grid.z.field.copy_from(z_.field)
     else:
         # Use custom elevation field for output
         custom_z.copy_from(flow_field.grid.z)
         for it in range(math.ceil(math.log2(cte.NX * cte.NY))):
             _topofill(
-                flow_field.grid.z, custom_z, receivers_, receivers__, epsilon, it + 1
+                flow_field.grid.z.field,
+                custom_z.field,
+                receivers_.field,
+                receivers__.field,
+                epsilon,
+                it + 1,
             )
 
     # Release temporary fields back to pool
@@ -151,7 +163,7 @@ def fill_z_add_delta(zh, h, z_, receivers, receivers_, receivers__, epsilon=1e-3
 
     # Perform iterative filling
     for it in range(math.ceil(math.log2(cte.NX * cte.NY))):
-        _topofill(zh, z_, receivers_, receivers__, epsilon, it)
+        _topofill(zh.field, z_.field, receivers_.field, receivers__.field, epsilon, it)
 
     # Apply changes and track deltas
-    _apply_fill_z_add_delta(zh, h, z_)
+    _apply_fill_z_add_delta(zh.field, h.field, z_.field)

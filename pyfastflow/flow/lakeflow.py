@@ -421,6 +421,7 @@ def iteration_reroute_carve(
     tag_: ti.template(),
     rec: ti.template(),
     rec_: ti.template(),
+    bid: ti.template(),
 ):
     """
     Single iteration of carving algorithm with pointer jumping.
@@ -430,6 +431,7 @@ def iteration_reroute_carve(
             tag_: Secondary tagging array
             rec: Primary receiver array
             rec_: Secondary receiver array
+            change: Convergence flag
 
     Note:
             Uses pointer jumping to accelerate carving propagation
@@ -439,26 +441,21 @@ def iteration_reroute_carve(
     """
     # First pass: propagate tags and copy receivers
     for i in tag:
-        
-        if(rec[i] == rec[rec[i]]):
+        if(bid[i] == 0):
             continue
-
         if tag[i]:
             tag_[rec[i]] = True  # Propagate tag to receiver
 
-        # rec_[i] = rec[i]  # Copy receiver array
+        rec_[i] = rec[i]  # Copy receiver array
 
     # Second pass: pointer jumping and convergence check
     for i in tag:
-        
-        if(rec[i] == rec[rec[i]]):
+        if(bid[i] == 0):
             continue
+        rec[i] = rec_[rec_[i]]  # Pointer jumping: skip intermediate receivers
 
-        if(tag[i] != tag_[i]):
-            rec[i] = rec_[rec_[i]]  # Pointer jumping: skip intermediate receivers
-            rec_[i] = rec[i]
-
-            tag[i] = tag_[i]  # Update tag array
+        # Check for convergence
+        tag[i] = tag_[i]  # Update tag array
 
 
 @ti.kernel
@@ -565,6 +562,7 @@ def reroute_carve(
     outlet,
     change: ti.template(),
     rerouted: ti.template(),
+    bid: ti.template()
 ):
     """
     Main carving algorithm that creates channels through saddle points.
@@ -596,7 +594,7 @@ def reroute_carve(
         it += 1
         # change[None] = False
         # iteration_reroute_carve_ncheck(tag, tag_, rec, rec_, change)
-        iteration_reroute_carve(tag, tag_, rec, rec_)
+        iteration_reroute_carve(tag, tag_, rec, rec_, bid)
 
     # Finalize the carving process
     finalise_reroute_carve(rec, rec__, tag, saddlenode, outlet, rerouted)
@@ -702,7 +700,7 @@ def reroute_flow(
         if carve:
             # Carving: create channels through saddle points
             reroute_carve(
-                rec, rec_, rec__, tag, tag_, basin_saddlenode, outlet, change, rerouted
+                rec, rec_, rec__, tag, tag_, basin_saddlenode, outlet, change, rerouted, bid
             )
             rec_.copy_from(rec)
         else:
@@ -711,7 +709,10 @@ def reroute_flow(
         # print (np.unique(rec_.to_numpy() - nump).shape)
 
     # Final basin identification and cleanup
-    basin_id_init(bid)
+    # basin_id_init(bid)
+    import matplotlib.pyplot as plt
+    plt.imshow(bid.to_numpy().reshape(1024,1024))
+    plt.show()
     return
     # Not needeed?
     # rec__.copy_from(rec_)

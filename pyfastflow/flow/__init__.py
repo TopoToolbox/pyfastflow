@@ -120,6 +120,7 @@ from . import (
     flowfields,
     lakeflow,
     level_acc,
+    level_based,
     receivers,
 )
 from .fill_topo import fill_z_add_delta, topofill
@@ -148,6 +149,7 @@ __all__ = [
     "downstream_propag",
     "lakeflow",
     "level_acc",
+    "level_based",
     "f32_i32_struct",
     "util_taichi",
     "flowfields",

@@ -143,6 +143,49 @@ class TPField:
     def from_numpy(self, val):
         return self.field.from_numpy(val)
 
+    def copy_from(self, src):
+        """
+        Copy data into this pooled field from another TPField, Taichi field, or numpy array.
+
+        Args:
+            src: One of
+                - TPField: copies from its underlying `.field`
+                - Taichi field: passed directly to `.field.copy_from(src)`
+                - numpy array / array-like: copied via `.field.from_numpy(...)` with reshape if needed
+        """
+        # TPField -> copy underlying Taichi field
+        if isinstance(src, TPField):
+            self.field.copy_from(src.field)
+            return
+
+        # Taichi field (duck-typed: has .to_numpy or .shape and supports copy_from)
+        if hasattr(src, "copy_from") or hasattr(src, "to_numpy"):
+            try:
+                self.field.copy_from(src)
+                return
+            except Exception:
+                pass
+
+        # Numpy / array-like fallback
+        try:
+            import numpy as np  # local import to avoid hard dependency at module import time
+
+            arr = np.asarray(src)
+            # If destination is 0D, expect scalar
+            if self.shape == ():
+                arr = np.asarray([arr])
+            # Flatten/reshape to destination shape when possible
+            try:
+                reshaped = arr.reshape(self.field.shape) if hasattr(self.field, "shape") else arr.reshape(self.shape)
+            except Exception:
+                reshaped = arr
+            self.field.from_numpy(reshaped)
+            return
+        except Exception as e:
+            pass
+
+        raise TypeError("Unsupported source type for TPField.copy_from")
+
     def __enter__(self):
         """Context manager entry - return the field for use."""
         return self
