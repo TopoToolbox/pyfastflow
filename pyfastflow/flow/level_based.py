@@ -180,7 +180,7 @@ def process_all_bruteforce_precomp(
 
 @ti.kernel
 def atomic_compact_ids_precomp(
-    z: ti.template(), state: ti.template(), ids: ti.template(), count: ti.template()
+    up_idx: ti.template(), state: ti.template(), ids: ti.template(), count: ti.template()
 ):
     """
     Build active list of processable nodes using an atomic counter.
@@ -189,7 +189,7 @@ def atomic_compact_ids_precomp(
     """
     count[None] = 0
     for i in state:
-        if state[i] == S_PROCESSABLE() and donors_processed(z, state, i):
+        if state[i] == S_PROCESSABLE() and donors_processed_up(up_idx, state, i):
             pos = ti.atomic_add(count[None], 1)
             ids[pos] = i
 
@@ -232,17 +232,23 @@ def parallel_scan_compact(
     return count
 
 
-def mfd_iteration_bruteforce(Q, z, state, dn_idx, w, wsum) -> bool:
-    """One iteration: single pass processes nodes whose donors are all processed."""
-    return bool(process_all_bruteforce_precomp(Q, state, dn_idx, w, wsum, z))
+def mfd_iteration_bruteforce(Q, state, dn_idx, w, wsum, up_idx) -> bool:
+    """One iteration: single pass processes nodes whose donors are all processed (uses precomputed up_idx)."""
+    return bool(process_all_bruteforce_precomp(Q, state, dn_idx, w, wsum, up_idx))
 
 
-def mfd_iteration_atomic(Q, z, state, ids, count_scalar, dn_idx, w, wsum) -> int:
+def mfd_iteration_atomic(Q, z, state, ids, count_scalar, dn_idx, w, wsum, up_idx=None) -> int:
     """One iteration: flag, atomic compact, process list; returns processed count."""
     # Mark processable
-    flag_processable(z, state)
+    if up_idx is None:
+        flag_processable(z, state)  # fallback
+    else:
+        flag_processable_up(up_idx, state)
     # Build list
-    atomic_compact_ids_precomp(z, state, ids, count_scalar)
+    if up_idx is None:
+        atomic_compact_ids_precomp(z, state, ids, count_scalar)  # type: ignore
+    else:
+        atomic_compact_ids_precomp(up_idx, state, ids, count_scalar)
     count = int(count_scalar[None])
     if count == 0:
         return 0
@@ -250,12 +256,18 @@ def mfd_iteration_atomic(Q, z, state, ids, count_scalar, dn_idx, w, wsum) -> int
     return count
 
 
-def mfd_iteration_scan(Q, z, state, flags, scan_out, work, ids, n: int, count_scalar=None, dn_idx=None, w=None, wsum=None) -> int:
+def mfd_iteration_scan(Q, z, state, flags, scan_out, work, ids, n: int, count_scalar=None, dn_idx=None, w=None, wsum=None, up_idx=None) -> int:
     """One iteration: flag, scan-compact, process list; returns processed count."""
     # First flag nodes that became processable in this iteration
-    flag_processable(z, state)
+    if up_idx is None:
+        flag_processable(z, state)
+    else:
+        flag_processable_up(up_idx, state)
     # Build flags
-    build_flags_from_state(z, state, flags)
+    if up_idx is None:
+        build_flags_from_state(z, state, flags)
+    else:
+        build_flags_from_state_up(up_idx, state, flags)
     # Prepare a 0D count scalar if not supplied
     created = False
     if count_scalar is None:

@@ -833,6 +833,75 @@ class FlowRouter:
         self.Q.field.copy_from(fullQ.field)
         fullQ.release()
 
+    def accumulate_constant_Q_mfd(self, value, area=True, N = 5, temporal_filtering = 0.5):
+        """
+        TO BE TESTED
+        Author: B.G.
+        """
+        # Get temporary accumulation field
+        fullQ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        fullQ.field.fill(0.0)
+        done_once = False
+
+        # Calculate number of iterations needed (log₂ of grid size)
+        logn = math.ceil(math.log2(self.nx * self.ny)) + 1
+
+        # Get temporary fields from pool for rake-compress algorithm
+        ndonors = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx * self.ny))
+        donors = pf.pool.taipool.get_tpfield(
+            dtype=ti.i32, shape=(self.nx * self.ny * 4)
+        )
+        src = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx * self.ny))
+        donors_ = pf.pool.taipool.get_tpfield(
+            dtype=ti.i32, shape=(self.nx * self.ny * 4)
+        )
+        ndonors_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx * self.ny))
+        Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+    
+        for __ in range(N):
+            self.compute_stochastic_receivers()
+
+            # Initialize arrays for rake-compress algorithm
+            ndonors.field.fill(0)  # Reset donor counts
+            src.field.fill(0)  # Reset ping-pong state
+
+            # Initialize flow values (multiply by area if requested)
+            self.Q.field.fill(value * (cte.DX * cte.DX if area else 1.0))
+
+            # Build donor-receiver relationships from receiver array
+            dpr.rcv2donor(self.receivers.field, donors.field, ndonors.field)
+
+            # Rake-compress iterations for parallel tree accumulation
+            # Each iteration doubles the effective path length being compressed
+            for i in range(logn + 1):
+                dpr.rake_compress_accum(
+                    donors.field,
+                    ndonors.field,
+                    self.Q.field,
+                    src.field,
+                    donors_.field,
+                    ndonors_.field,
+                    Q_.field,
+                    i,
+                )
+
+            # Final fuse step to consolidate results from ping-pong buffers
+            # Merge accumulated values from working arrays back to primary array
+            gena.fuse(self.Q.field, src.field, Q_.field, logn)
+
+            ut.weighted_mean_B_in_A(fullQ.field, self.Q.field, 1. - temporal_filtering)
+
+        # Release temporary fields for this iteration
+        ndonors.release()
+        donors.release()
+        src.release()
+        donors_.release()
+        ndonors_.release()
+        Q_.release()
+
+        self.Q.field.copy_from(fullQ.field)
+        fullQ.release()
+
     def fill_z(self, epsilon=1e-3):
         """
         Fill topographic depressions to ensure proper flow routing.

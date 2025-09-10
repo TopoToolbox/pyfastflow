@@ -490,6 +490,10 @@ def can_leave_domain_custom(i: ti.i32):
     """Check if flow can leave domain (only through left/right edges)."""
     return cte.boundaries[i] == 3
 
+@ti.func
+def nodata_custom(i:ti.i32):
+    return cte.boundaries[i] == 0
+
 
 #########################################
 ###### EXPOSED FUNCTIONS ################
@@ -619,10 +623,33 @@ def can_leave_domain(i: ti.i32):
         res = can_leave_domain_custom(i)
     return res
 
+def nodata(i: ti.i32):
+    """
+    Check if node is nodata - switches between boundary modes.
+
+    Args:
+            i: Vectorized grid index
+
+    Returns:
+            bool: True if nodata
+
+    Author: B.G.
+    """
+    res = -1
+    if ti.static(cte.BOUND_MODE == 0):
+        res = False # lol no nodata in this moooode (🐄)
+    elif ti.static(cte.BOUND_MODE == 1):
+        res = False # lol no nodata in this moooode (🐄)
+    elif ti.static(cte.BOUND_MODE == 2):
+        res = False # lol no nodata in this moooode (🐄)
+    elif ti.static(cte.BOUND_MODE == 3):
+        res = nodata_custom(i)
+    return res
+
 
 # Main API functions - automatically switch based on cte.BOUND_MODE
 def compile_neighbourer():
-    global top, left, right, bottom, validate_link, neighbour, can_leave_domain
+    global top, left, right, bottom, validate_link, neighbour, can_leave_domain, nodata
 
     top = ti.func(top)
     left = ti.func(left)
@@ -631,6 +658,7 @@ def compile_neighbourer():
     validate_link = ti.func(validate_link)
     neighbour = ti.func(neighbour)
     can_leave_domain = ti.func(can_leave_domain)
+    nodata = ti.func(nodata)
 
 
 @ti.kernel

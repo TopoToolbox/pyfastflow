@@ -163,7 +163,13 @@ def fill_z_add_delta(zh, h, z_, receivers, receivers_, receivers__, epsilon=1e-3
 
     # Perform iterative filling
     for it in range(math.ceil(math.log2(cte.NX * cte.NY))):
-        _topofill(zh.field, z_.field, receivers_.field, receivers__.field, epsilon, it)
+        _topofill(zh.field if isinstance(zh, pf.pool.TPField) else zh, 
+            z_.field if isinstance(z_, pf.pool.TPField) else z_, 
+            receivers_.field if isinstance(receivers_, pf.pool.TPField) else receivers_, 
+            receivers__.field if isinstance(receivers__, pf.pool.TPField) else receivers__, 
+            epsilon, it)
 
     # Apply changes and track deltas
-    _apply_fill_z_add_delta(zh.field, h.field, z_.field)
+    _apply_fill_z_add_delta(zh.field if isinstance(zh, pf.pool.TPField) else zh, 
+        h.field if isinstance( h, pf.pool.TPField) else  h,
+         z_.field if isinstance(z_, pf.pool.TPField) else z_)

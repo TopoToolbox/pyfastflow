@@ -122,6 +122,7 @@ from . import (
     level_acc,
     level_based,
     receivers,
+    sweeper,
 )
 from .fill_topo import fill_z_add_delta, topofill
 from .flowfields import FlowRouter
@@ -154,5 +155,6 @@ __all__ = [
     "util_taichi",
     "flowfields",
     "fill_topo",
+    "sweeper",
     "constants",
 ]

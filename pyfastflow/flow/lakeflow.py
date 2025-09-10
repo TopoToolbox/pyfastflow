@@ -708,11 +708,6 @@ def reroute_flow(
             reroute_jump(rec_, outlet, rerouted)
         # print (np.unique(rec_.to_numpy() - nump).shape)
 
-    # Final basin identification and cleanup
-    # basin_id_init(bid)
-    import matplotlib.pyplot as plt
-    plt.imshow(bid.to_numpy().reshape(1024,1024))
-    plt.show()
     return
     # Not needeed?
     # rec__.copy_from(rec_)
