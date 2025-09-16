@@ -42,6 +42,20 @@ setup(
         "topotoolbox": [
             "topotoolbox",
         ],
+        "visugl": [
+            "moderngl>=5.8.0",
+            "moderngl-window>=2.4.0",
+            "imgui[glfw]>=1.4.0",
+            "glfw>=2.5.0",
+        ],
+        "3dterrain": [
+            "moderngl>=5.8.0",
+            "moderngl-window>=2.4.0",
+            "imgui[glfw]>=1.4.0",
+            "glfw>=2.5.0",
+            "rasterio>=1.3.0",
+            "scipy>=1.7.0",
+        ],
     },
     keywords="geomorphology hydraulics flow routing GPU taichi",
     project_urls={
@@ -55,6 +69,7 @@ setup(
             "pff-downscale=pyfastflow.cli.rastermanip_commands:raster_downscale",
             "pff-boundary-gui=pyfastflow.cli.grid_commands:boundary_gui",
             "pff-precip-gui=pyfastflow.cli.precip_commands:precipitation_gui",
+            "pff-terrain3d=pyfastflow.cli.terrain3d_cli:main",
         ],
     },
 )

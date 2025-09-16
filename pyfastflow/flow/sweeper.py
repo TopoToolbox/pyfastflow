@@ -22,7 +22,7 @@ def build_S(S: ti.template()):
 
 @ti.kernel
 def sweep_color(Q: ti.template(), zh: ti.template(), S: ti.template(),
-                parity: ti.i32):
+                parity: ti.i32, omega:ti.f32):
     for lin in zh:
         if flow.neighbourer_flat.can_leave_domain(lin) or flow.neighbourer_flat.nodata(lin):
             continue
@@ -51,9 +51,46 @@ def sweep_color(Q: ti.template(), zh: ti.template(), S: ti.template(),
 
             if sums_j > 0.0:
                 acc += slope_pos(zj, zh[lin]) / sums_j * Q[j]
+
         if has_hz == False:
-        	zh[lin] += 2e-3 + ti.random() * 1e-2
+        	zh[lin] += 1e-3 + ti.random() * 1e-3
 
         # Optional SOR to converge faster (omega in (1,2))
-        omega = 1.
+        # omega = 0.2
         Q[lin] = (1.0 - omega) * Q[lin] + omega * acc
+
+
+@ti.kernel
+def sweep_Qapp_tiled_init(Q: ti.template(), Qapp: ti.template(), zh: ti.template(), S: ti.template(), tyler:ti.template()):
+
+    for lin in zh:
+
+        if flow.neighbourer_flat.can_leave_domain(lin) or flow.neighbourer_flat.nodata(lin):
+            continue
+        
+        Qapp = S[lin]  # <-- Local source added every sweep/acc
+
+        sums = 0. 
+
+        # gather influx from opposite-color neighbors
+        has = False
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(lin, k)
+            if j == -1 or flow.neighbourer_flat.nodata(j): 
+                continue
+            ts = slope_pos(zh[i], zh[j])
+
+            if(tyler[j] != tyler[i] and ts > 0):
+                has = True
+            sums += ti.max(ts,0.)
+
+        if(has and sums>0):
+
+            for k in range(4):
+                j = flow.neighbourer_flat.neighbour(lin, k)
+                if j == -1 or flow.neighbourer_flat.nodata(j): 
+                    continue
+                ts = slope_pos(zh[i], zh[j])
+
+                if(tyler[j] != tyler[i] and ts > 0):
+                    ti.atomic_add(Qapp[j], Q[i]*ts/sums)

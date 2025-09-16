@@ -9,20 +9,30 @@ Available Commands:
 - raster-upscale: Double raster resolution using rastermanip utilities
 - raster-downscale: Halve raster resolution using rastermanip utilities
 - precip-gui: Interactive precipitation map editor
+- terrain3d: 3D terrain visualization using visuGL
 
 Author: B.G.
 """
 
-from .raster_commands import raster2npy
-from .rastermanip_commands import raster_downscale, raster_upscale
-from .grid_commands import boundary_gui
-from .precip_commands import precipitation_gui
+_CLI_SUBMODULES = {
+    "raster2npy": (".raster_commands", "raster2npy"),
+    "raster_upscale": (".rastermanip_commands", "raster_upscale"),
+    "raster_downscale": (".rastermanip_commands", "raster_downscale"),
+    "boundary_gui": (".grid_commands", "boundary_gui"),
+    "precipitation_gui": (".precip_commands", "precipitation_gui"),
+    "terrain3d": (".terrain3d_cli", "main"),
+}
 
-# Export public API
-__all__ = [
-    "raster2npy",
-    "raster_upscale",
-    "raster_downscale",
-    "boundary_gui",
-    "precipitation_gui",
-]
+__all__ = list(_CLI_SUBMODULES.keys())
+
+
+def __getattr__(name):
+    info = _CLI_SUBMODULES.get(name)
+    if info is None:
+        raise AttributeError(name)
+    pkg, attr = info
+    import importlib
+    mod = importlib.import_module(pkg, __package__)
+    obj = getattr(mod, attr)
+    globals()[name] = obj
+    return obj

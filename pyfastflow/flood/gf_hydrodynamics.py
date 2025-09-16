@@ -770,6 +770,49 @@ def graphflood_cte_man_dt_nopropag(z: ti.template(), h:ti.template(), Q: ti.temp
             h[i] = 0
 
 @ti.kernel
+def graphflood_cte_man_analytical(z: ti.template(), h:ti.template(), Q: ti.template(), temporal_filtering:ti.f32):
+    """
+    NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
+
+    Author: B.G.
+    """
+
+    # Diffuse discharge based on slope gradients
+    for i in z:
+
+        # Skip boundary cells
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+
+        # Calculate total slope gradient sum for normalization
+        msx  = 0.0
+        msy  = 0.0
+        for k in range(4):  # Check all 4 neighbors
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                continue
+
+            ts = ti.max(0.0, (((z[i]+h[i]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
+            msx = ti.max(ts, msx) if k == 1 or k == 2 else msx
+            msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
+
+        if(msx == 0 and msy == 0):
+            for k in range(4):  # Check all 4 neighbors
+                j = flow.neighbourer_flat.neighbour(i, k)
+                if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                    continue
+
+                ts = ti.max(0.0, ((z[i] - z[j]) / cte.DX) if j != -1 else 0.0)
+                msx = ti.max(ts, msx) if k == 1 or k == 2 else msx
+                msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
+
+        norms = 1e-7
+        norms = ti.math.max(ti.math.sqrt(msx**2 + msy**2), norms) # if (sums > 0.) else ti.max((z[i]+h[i] - z[srecs[i]] - h[srecs[i]])/cte.DX,1e-3)
+            
+        # Qo = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(norms)
+        h[i] = (1- temporal_filtering) * h[i] + temporal_filtering * (Q[i] * cte.MANNING / ti.math.sqrt(norms) / cte.DX)**(3./5.)
+
+@ti.kernel
 def graphflood_get_Qo(z: ti.template(), h:ti.template(), Qo: ti.template()):
     """
 

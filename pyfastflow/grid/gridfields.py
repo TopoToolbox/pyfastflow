@@ -203,3 +203,7 @@ class Grid:
             weights,
             style,
         )
+
+
+    def get_z(self):
+        return self.z.to_numpy().reshape(self.rshp) 

@@ -91,25 +91,8 @@ Author: B.G.
 __version__ = "0.1.0"
 __author__ = "B.G."
 
-# Import all submodules in alphabetical order
-from . import (
-    cli,
-    constants,
-    erodep,
-    flood,
-    flow,
-    general_algorithms,
-    grid,
-    io,
-    misc,
-    noise,
-    pool,
-    rastermanip,
-    visu,
-)
-
-# Export all submodules
-__all__ = [
+# Lazy submodule loading to avoid heavy side effects at import time
+_LAZY_SUBMODULES = [
     "cli",
     "constants",
     "erodep",
@@ -123,4 +106,16 @@ __all__ = [
     "pool",
     "rastermanip",
     "visu",
+    "visuGL",
 ]
+
+__all__ = list(_LAZY_SUBMODULES)
+
+
+def __getattr__(name):
+    if name in _LAZY_SUBMODULES:
+        import importlib
+        mod = importlib.import_module(f".{name}", __name__)
+        globals()[name] = mod
+        return mod
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -344,12 +344,13 @@ class Flooder:
         dh.release()
         LM.release()
 
-    def run_graphflood_diffuse_nopropag(self, N=100, dt = None):
+    def run_graphflood_diffuse_nopropag(self, N=10, dt = None):
 
         dh = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
 
         for _ in range(N):
-            pf.flood.gf_hydrodynamics.graphflood_cte_man_dt_nopropag(self.grid.z.field, self.h.field, self.router.Q.field, dh.field, self.dt_hydro if dt is None else dt)
+            pf.flood.gf_hydrodynamics.graphflood_cte_man_dt_nopropag(self.grid.z.field, self.h.field, 
+                self.router.Q.field, dh.field, cte.DT_HYDRO if dt is None else dt)
 
         dh.release()
 
@@ -474,8 +475,45 @@ class Flooder:
         receivers__.release()
 
 
+    def fill_lakes(self, epsilon=2e-3):
 
-    def run_N_sweep(self, NSW = 5):
+        z_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+
+        receivers_ = pf.pool.taipool.get_tpfield(
+            dtype=ti.i32, shape=(self.nx * self.ny)
+        )
+        receivers__ = pf.pool.taipool.get_tpfield(
+            dtype=ti.i32, shape=(self.nx * self.ny)
+        )
+
+        pf.general_algorithms.util_taichi.add_B_to_A(
+            self.grid.z.field, self.h.field
+        )
+        
+
+        # fills with water
+        pf.flow.fill_z_add_delta(
+            self.grid.z.field,
+            self.h.field,
+            z_.field,
+            self.router.receivers.field,
+            receivers_.field,
+            receivers__.field,
+            epsilon=epsilon,
+        )
+
+        # z is filled with h, I wanna remove the wxtra z
+        pf.general_algorithms.util_taichi.add_B_to_weighted_A(
+            self.grid.z.field, self.h.field, -1.0
+        )
+
+        z_.release()
+        receivers_.release()
+        receivers__.release()
+
+
+
+    def run_N_sweep(self, NSW = 5, locarve = False, omega = 1.):
         S = pf.pool.taipool.get_tpfield(
             dtype=ti.f32, shape=(self.nx * self.ny)
         )
@@ -489,18 +527,29 @@ class Flooder:
         pf.general_algorithms.util_taichi.add_B_to_A(zh.field, self.h.field)
         pf.flow.sweeper.build_S(S.field)             # temp = S (precip * DX^2), if S changes each step
 
-        for it in range(NSW):         # e.g., N_rb = 5–10
-            pf.flow.sweeper.sweep_color(self.router.Q.field, zh.field, S.field, 0)  # red
-            pf.flow.sweeper.sweep_color(self.router.Q.field, zh.field, S.field, 1)  # black
-        # then do your dh/h update using the converged-ish Q
-        pf.general_algorithms.util_taichi.add_B_to_weighted_A(
-            zh.field, self.grid.z.field, -1.0
-        )
+        if(locarve):
+            for i in range(5):
+                pf.flow.locarve.locarve(zh.field, self.router.receivers.field)
 
-        self.h.field.copy_from(zh.field)
+        for it in range(NSW):         # e.g., N_rb = 5–10
+            pf.flow.sweeper.sweep_color(self.router.Q.field, zh.field, S.field, 0, omega)  # red
+            pf.flow.sweeper.sweep_color(self.router.Q.field, zh.field, S.field, 1, omega)  # black
+        # then do your dh/h update using the converged-ish Q
+        # pf.general_algorithms.util_taichi.add_B_to_weighted_A(
+        #     zh.field, self.grid.z.field, -1.0
+        # )
+
+        pf.flow.locarve.zh_to_z_h(zh.field, self.grid.z.field, self.h.field)
+
+        # self.h.field.copy_from(zh.field)
 
         S.release()
         zh.release()
+
+    def run_N_analytical(self, N=2, temporal_filtering = 0.2):
+
+        for _ in range(N):
+            pf.flood.gf_hydrodynamics.graphflood_cte_man_analytical(self.grid.z.field, self.h.field, self.router.Q.field, temporal_filtering)
 
 
     def set_h(self, val):

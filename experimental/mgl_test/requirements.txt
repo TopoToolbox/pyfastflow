@@ -1,0 +1,16 @@
+# 3D Terrain Demo Dependencies
+# Modern OpenGL rendering and GUI framework
+
+# Core OpenGL and windowing
+moderngl>=5.8.0
+glfw>=2.5.0
+
+# GUI framework
+imgui[glfw]==1.4.1
+moderngl-window>=2.4.5
+
+# Math and data handling (should be available with PyFastFlow)
+numpy>=1.20.0
+
+# Note: PyFastFlow should be installed from the parent directory
+# Install with: pip install -e ../..

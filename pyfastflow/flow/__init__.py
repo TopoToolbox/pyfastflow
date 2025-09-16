@@ -123,6 +123,7 @@ from . import (
     level_based,
     receivers,
     sweeper,
+    locarve,
 )
 from .fill_topo import fill_z_add_delta, topofill
 from .flowfields import FlowRouter
@@ -156,5 +157,6 @@ __all__ = [
     "flowfields",
     "fill_topo",
     "sweeper",
+    "locarve",
     "constants",
 ]
