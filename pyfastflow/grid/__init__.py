@@ -64,6 +64,7 @@ from . import neighbourer_flat
 from . import neighbourer_2D
 from . import neighbourer_flat_param
 from . import neighbourer_2D_param
+from . import tiled_generator
 
 # Export main classes
-__all__ = ["Grid", "neighbourer_flat", "neighbourer_2D", "neighbourer_flat_param", "neighbourer_2D_param"]
+__all__ = ["Grid", "neighbourer_flat", "neighbourer_2D", "neighbourer_flat_param", "neighbourer_2D_param", "tiled_generator"]

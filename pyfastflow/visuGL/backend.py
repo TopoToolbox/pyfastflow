@@ -126,6 +126,11 @@ def run_glfw_app(glapp) -> None:
                 if key == self.wnd.keys.F11:
                     try:
                         self.wnd.toggle_fullscreen()
+                        # Force viewport and ImGui IO update after toggle
+                        ww, wh = self.wnd.size
+                        fbw, fbh = self.wnd.buffer_size
+                        self.ctx.viewport = (0, 0, int(fbw), int(fbh))
+                        self._update_imgui_display(int(ww), int(wh), int(fbw), int(fbh))
                     except Exception:
                         pass
 
@@ -453,41 +458,7 @@ def run_glfw_app(glapp) -> None:
                     pass
             glapp.ui._draw_all_panels(imgui)
 
-            # Debug overlay to inspect IO and events
-            try:
-                imgui.set_next_window_bg_alpha(0.85)
-                imgui.set_next_window_position(12.0, 12.0)
-                flags = (imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_RESIZE |
-                         imgui.WINDOW_ALWAYS_AUTO_RESIZE | imgui.WINDOW_NO_SAVED_SETTINGS)
-                imgui.begin("IO-Debug", True, flags)
-                io_dbg = imgui.get_io()
-                imgui.text(f"want_capture_mouse={bool(io_dbg.want_capture_mouse)}")
-                imgui.text(f"display_size={tuple(map(int, io_dbg.display_size))}")
-                imgui.text(f"display_fb_scale={io_dbg.display_fb_scale}")
-                try:
-                    ww, wh = self.wnd.size
-                    fbw, fbh = self.wnd.buffer_size
-                    imgui.text(f"wnd.size={int(ww)},{int(wh)} fb={int(fbw)},{int(fbh)}")
-                except Exception:
-                    pass
-                try:
-                    mp = tuple(io_dbg.mouse_pos)
-                    imgui.text(f"io.mouse_pos={int(mp[0])},{int(mp[1])}")
-                except Exception:
-                    pass
-                try:
-                    raw_win = self._get_glfw_window()
-                    if raw_win is not None:
-                        import glfw  # type: ignore
-                        cx, cy = glfw.get_cursor_pos(raw_win)
-                        imgui.text(f"glfw.cursor={int(cx)},{int(cy)}")
-                except Exception:
-                    pass
-                imgui.text(f"mouse_down={tuple(int(x) for x in io_dbg.mouse_down[:3])}")
-                imgui.text(f"evt pos/drag/press/release/scroll={self._evt_counts['pos']}/{self._evt_counts['drag']}/{self._evt_counts['press']}/{self._evt_counts['release']}/{self._evt_counts['scroll']}")
-                imgui.end()
-            except Exception:
-                pass
+            # Debug overlay removed for production CLI
             imgui.render()
             self.imgui.render(imgui.get_draw_data())
 

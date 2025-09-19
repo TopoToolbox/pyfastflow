@@ -107,8 +107,8 @@ def perlin_noise_at(x: ti.f32, y: ti.f32, perm: ti.template(), gradients: ti.tem
 
 
 @ti.kernel
-def perlin_noise_kernel(noise_field: ti.template(), frequency: ti.f32, octaves: ti.i32, 
-                       persistence: ti.f32, amplitude: ti.f32, perm: ti.template(), 
+def perlin_noise_kernel(noise_field: ti.template(), frequency_x: ti.f32, frequency_y: ti.f32, octaves: ti.i32,
+                       persistence: ti.f32, amplitude: ti.f32, perm: ti.template(),
                        gradients: ti.template()):
     """
     Generate Perlin noise with multiple octaves in a Taichi field.
@@ -126,8 +126,8 @@ def perlin_noise_kernel(noise_field: ti.template(), frequency: ti.f32, octaves: 
     
     for j, i in noise_field:
         # Convert grid coordinates to noise space
-        x = ti.cast(i, ti.f32) * frequency / ti.cast(nx, ti.f32)
-        y = ti.cast(j, ti.f32) * frequency / ti.cast(ny, ti.f32)
+        x = ti.cast(i, ti.f32) * frequency_x / ti.cast(nx, ti.f32)
+        y = ti.cast(j, ti.f32) * frequency_y / ti.cast(ny, ti.f32)
         
         total = 0.0
         max_value = 0.0
@@ -150,9 +150,9 @@ def perlin_noise_kernel(noise_field: ti.template(), frequency: ti.f32, octaves: 
             noise_field[j, i] = 0.0
 
 
-def perlin_noise(nx: int, ny: int, frequency: float = 8.0, octaves: int = 4, 
-                persistence: float = 0.5, amplitude: float = 1.0, seed: int = 42, 
-                return_field: bool = False):
+def perlin_noise(nx: int, ny: int, frequency: float = 8.0, octaves: int = 4,
+                persistence: float = 0.5, amplitude: float = 1.0, seed: int = 42,
+                return_field: bool = False, frequency_x: float | None = None, frequency_y: float | None = None):
     """
     Generate Perlin noise with multiple octaves using proper permutation tables.
     
@@ -203,7 +203,10 @@ def perlin_noise(nx: int, ny: int, frequency: float = 8.0, octaves: int = 4,
     noise_field = pool.get_temp_field(ti.f32, (ny, nx))
     
     # Note: Taichi random state is global, seeding happens at permutation generation level
-    perlin_noise_kernel(noise_field.field, frequency, octaves, 
+    # Allow anisotropic frequency for world-isotropic noise when mapping non-square textures
+    fx = float(frequency_x if frequency_x is not None else frequency)
+    fy = float(frequency_y if frequency_y is not None else frequency)
+    perlin_noise_kernel(noise_field.field, fx, fy, octaves,
                        persistence, amplitude, perm_field, gradients_field)
     
     if return_field:

@@ -20,6 +20,7 @@ Author: B.G.
 """
 
 import taichi as ti
+import numpy as np
 
 import pyfastflow as pf
 
@@ -354,7 +355,40 @@ class Flooder:
 
         dh.release()
 
-    
+
+    def run_N_tiled_sweep(self, N = 10, tiles = 200 ):
+
+        release_tiles = False
+        if isinstance(tiles, pf.pool.TPField):
+            tiles_field = tiles.field
+        else:
+            release_tiles = True
+            ttiles = pf.pool.taipool.get_tpfield(dtype=ti.u32, shape=(self.nx * self.ny))
+
+            if(isinstance(tiles, np.ndarray)):
+                ttiles.from_numpy(tiles)
+            else:
+                tttiles = pf.grid.tiled_generator.create_tiled_array((self.ny,self.nx), tiles, shift=(0, 0))
+                ttiles.from_numpy(tttiles.ravel())
+
+            tiles_field = ttiles.field
+
+
+        Qapp  = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        Qtemp = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        S     = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+
+        pf.flow.sweeper.build_S(S.field) 
+        pf.flow.sweeper.sweep_Qapp_tiled_init(self.router.Q.field, Qapp.field, self.grid.z.field, self.h.field, S.field, tiles_field)
+        for i in range(N):
+            pf.flow.sweeper.sweep_Qapp_tiled_iter(self.router.Q.field, Qapp.field, Qtemp.field, self.grid.z.field, self.h.field, tiles_field)
+
+        Qapp.release()
+        Qtemp.release()
+        S.release()
+
+        if(release_tiles):
+            ttiles.release()
 
     def run_LS(self, N=1000, input_mode="constant_prec", mode=None):
         """

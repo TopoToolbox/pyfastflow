@@ -806,7 +806,7 @@ def graphflood_cte_man_analytical(z: ti.template(), h:ti.template(), Q: ti.templ
                 msx = ti.max(ts, msx) if k == 1 or k == 2 else msx
                 msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
 
-        norms = 1e-7
+        norms = 1e-4
         norms = ti.math.max(ti.math.sqrt(msx**2 + msy**2), norms) # if (sums > 0.) else ti.max((z[i]+h[i] - z[srecs[i]] - h[srecs[i]])/cte.DX,1e-3)
             
         # Qo = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(norms)

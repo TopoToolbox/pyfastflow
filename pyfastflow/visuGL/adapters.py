@@ -302,6 +302,10 @@ class Heightfield3D(Layer):
             }
         }
         void main() {
+            // Discard masked fragments (negative sentinel from CPU preprocessing)
+            if (v_height < 0.0) {
+                discard;
+            }
             if (u_hide_underside > 0.5 && !gl_FrontFacing) {
                 discard;
             }
@@ -349,16 +353,25 @@ class Heightfield3D(Layer):
         tri2 = np.stack([tr, bl, br], axis=-1)
         indices = np.concatenate([tri1.reshape(-1, 3), tri2.reshape(-1, 3)], axis=0).astype(np.uint32, copy=False).reshape(-1)
 
+        # Release previous GPU resources to avoid leaks when regenerating
+        if self._vao is not None:
+            try:
+                self._vao.release()
+            except Exception:
+                pass
+            self._vao = None
         if self._vbo_texcoords is not None:
             try:
                 self._vbo_texcoords.release()
             except Exception:
                 pass
+            self._vbo_texcoords = None
         if self._ibo is not None:
             try:
                 self._ibo.release()
             except Exception:
                 pass
+            self._ibo = None
         self._vbo_texcoords = self._ctx.buffer(np.ascontiguousarray(texcoords))
         self._ibo = self._ctx.buffer(np.ascontiguousarray(indices))
         self._vao = self._ctx.vertex_array(self._program, [(self._vbo_texcoords, '2f', 'in_texcoord')], self._ibo)
