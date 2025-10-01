@@ -1116,6 +1116,8 @@ class FlowRouter:
         b_field = b_tpfield.field           # Local source terms field
         xroot_field = x_root_tpfield.field  # Boundary values field
         result_field = result_tpfield.field # Output field
+        x_boundary = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))
+        x_boundary.field.copy_from(xroot_field)
 
         # Phase 1: Initialize affine parameters and parent pointers
         # Sets up initial transform: x[i] = a * x[rcv[i]] + b[i]
@@ -1162,7 +1164,7 @@ class FlowRouter:
             P.field,        # Input: final parent pointers (point to roots)
             A.field,        # Input: final cumulative coefficients
             B.field,        # Input: final cumulative offsets
-            xroot_field,    # Input: boundary values at root nodes
+            x_boundary.field,  # Input: boundary values at root nodes (snapshot)
             result_field    # Output: computed values x[i]
         )
 
@@ -1174,276 +1176,23 @@ class FlowRouter:
         A_.release()
         B_.release()
         P_.release()
+        x_boundary.release()
 
-    def propagate_upstream_affine_var(self, a_tpfield, b_tpfield, x_root_tpfield, result_tpfield):
-        """
-        Propagate values upstream using spatially varying affine transformation: x[i] = a[i] * x[rcv[i]] + b[i].
+    def propagate_upstream_affine_var(self, a_tpfield, b_tpfield, x_tpfield):
+        """Propagate x upstream using spatially varying affine transforms.
 
-        This function solves the upstream propagation problem where each node's value depends
-        on its receiver's value through a spatially varying linear affine transformation. Unlike
-        the constant version, each node has its own transmission coefficient 'a[i]' and source
-        term 'b[i]', enabling heterogeneous material properties and spatially variable processes.
-
-        Mathematical Formulation:
-        ========================
-        For each node i in the drainage network:
-            x[i] = a[i] * x[rcv[i]] + b[i]
-
-        Where:
-        - x[i]: Final value at node i (what we're solving for)
-        - a[i]: Spatially varying transmission/propagation coefficient at node i (0 ≤ a[i] ≤ 1 typically)
-        - x[rcv[i]]: Value at the receiver (downstream node) of node i
-        - b[i]: Local source term at node i (can be positive or negative)
-        - rcv[i]: Receiver index for node i (downstream neighbor in flow network)
-
-        Special Cases:
-        - Root nodes (rcv[i] == i): Use boundary values from x_root_tpfield
-        - Different nodes can have vastly different transmission properties
-        - Enables modeling of heterogeneous landscapes with varying material properties
-
-        Algorithm Details:
-        ==================
-        Uses parallel pointer jumping with spatially varying coefficients in O(log N) iterations:
-
-        1. **Initialization**: Set up affine parameters (A, B) and parent pointers (P)
-           - For non-root nodes: A[i] = a[i], B[i] = b[i], P[i] = rcv[i]
-           - For root nodes: A[i] = 1, B[i] = 0, P[i] = i (identity transform)
-
-        2. **Pointer Jumping**: Iteratively compose variable transforms by path doubling
-           - Each iteration doubles the effective path length
-           - Composes variable affine transforms maintaining spatial heterogeneity
-           - A_new[i] = A[i] * A[P[i]]  (product of transmission along path)
-           - B_new[i] = B[i] + A[i] * B[P[i]]  (accumulated sources with transmission)
-           - P_new[i] = P[P[i]]  (skip intermediate nodes)
-
-        3. **Finalization**: Apply final transform using root boundary values
-           - x[i] = A[i] * x_root[P[i]] + B[i]
-
-        Physical Interpretation Examples:
-        =================================
-        - **Heterogeneous heat conduction**: a[i] = thermal conductivity map, b[i] = heat sources/sinks
-        - **Variable pollutant transport**: a[i] = local transmission/decay rates, b[i] = pollution sources
-        - **Landscape erosion**: a[i] = rock resistance, b[i] = uplift rates
-        - **Groundwater flow**: a[i] = hydraulic conductivity, b[i] = recharge/discharge
-        - **Economic networks**: a[i] = local efficiency, b[i] = local production
-        - **Ecosystem services**: a[i] = habitat connectivity, b[i] = local service provision
-
-        Comparison with Constant Version:
-        ================================
-        - **Constant a**: All nodes have same transmission properties (homogeneous landscape)
-        - **Variable a[i]**: Each node can have different properties (heterogeneous landscape)
-        - **Computational cost**: Variable version is slightly more expensive due to field access
-        - **Memory usage**: Variable version requires additional storage for a[i] field
-        - **Modeling power**: Variable version can represent much more complex systems
+        Solves ``x[i] = a[i] * x[rcv[i]] + b[i]`` with pointer jumping. The field
+        ``x_tpfield`` must contain boundary values for root nodes before the call;
+        it is updated in place with the full solution.
 
         Args:
-            a_tpfield (TPField): Spatially varying transmission coefficients for each node.
-                               Must have shape (nx*ny,). Contains a[i] values that represent:
-                               - Local transmission efficiency at each node
-                               - Typical range: 0 ≤ a[i] ≤ 1, but can be outside for special cases
-                               - a[i] = 1.0: Perfect transmission (no local loss)
-                               - a[i] = 0.0: Complete absorption (no upstream influence)
-                               - 0 < a[i] < 1: Partial transmission with local decay
-                               - a[i] > 1.0: Local amplification (rare, can cause instability)
-
-            b_tpfield (TPField): Local source terms for each node. Must have shape (nx*ny,).
-                               Contains b[i] values that represent:
-                               - Local inputs/outputs at each node
-                               - Can be positive (sources) or negative (sinks)
-                               - Units depend on application context
-                               - Can vary dramatically across the domain
-
-            x_root_tpfield (TPField): Boundary values for root/outlet nodes. Must have shape (nx*ny,).
-                                    Only values at root positions (where rcv[i] == i) are used.
-                                    These define the boundary conditions for the system.
-
-            result_tpfield (TPField): Output field where results will be stored. Must have shape (nx*ny,).
-                                    Will contain the computed x[i] values after propagation.
+            a_tpfield (TPField): Spatially varying transmission coefficients ``a[i]``.
+            b_tpfield (TPField): Local source terms ``b[i]``.
+            x_tpfield (TPField): Field storing ``x``. Root entries supply boundary
+                conditions and the result overwrites the field in place.
 
         Returns:
-            None: Results are stored directly in result_tpfield
-
-        Raises:
-            AttributeError: If tpfields don't have .field attribute
-            ValueError: If field shapes don't match grid dimensions
-            RuntimeError: If transmission coefficients cause numerical instability
-
-        Example Usage:
-        ==============
-        ```python
-        import numpy as np
-        import taichi as ti
-        import pyfastflow as pf
-
-        # Setup grid and flow router
-        nx, ny = 100, 100
-        grid = pf.create_grid(nx, ny, dx=1.0)
-        router = pf.FlowRouter(grid)
-
-        # Compute flow network
-        router.compute_receivers()
-
-        # Example 1: Heterogeneous landscape erosion
-        # Variable rock resistance with spatially varying uplift
-
-        # Create spatially varying rock resistance (transmission coefficient)
-        # Higher values = less resistant rock (more transmission)
-        # Lower values = more resistant rock (less transmission)
-        elevation = grid.get_Z()
-        a_data = np.ones((ny, nx)) * 0.8  # Base resistance
-        a_data[elevation > np.percentile(elevation, 75)] = 0.3  # High elevation = resistant
-        a_data[elevation < np.percentile(elevation, 25)] = 0.95  # Low elevation = weak
-        a_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-        a_tpfield.field.from_numpy(a_data.flatten())
-
-        # Create spatially varying uplift pattern (source terms)
-        x_coords, y_coords = np.meshgrid(np.arange(nx), np.arange(ny))
-        center_x, center_y = nx//2, ny//2
-        distance = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
-        b_data = 10.0 * np.exp(-distance**2 / (2 * (nx/6)**2))  # Gaussian uplift
-        b_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-        b_tpfield.field.from_numpy(b_data.flatten())
-
-        # Boundary conditions (base level at outlets)
-        x_root_data = np.zeros((ny, nx))
-        x_root_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-        x_root_tpfield.field.from_numpy(x_root_data.flatten())
-
-        # Create result field
-        result_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-
-        # Propagate erosion upstream with variable rock resistance
-        router.propagate_upstream_affine_var(a_tpfield, b_tpfield, x_root_tpfield, result_tpfield)
-
-        # Extract and analyze results
-        erosion_potential = result_tpfield.field.to_numpy().reshape((ny, nx))
-        print(f"Max erosion potential: {erosion_potential.max():.2f}")
-        print(f"Mean erosion potential: {erosion_potential.mean():.2f}")
-
-        # Example 2: Pollutant transport with variable decay rates
-        # Different land use types have different pollutant retention
-
-        # Create land use based transmission (simplified)
-        land_use = np.random.choice([0, 1, 2], size=(ny, nx), p=[0.4, 0.4, 0.2])
-        a_land = np.zeros((ny, nx))
-        a_land[land_use == 0] = 0.9   # Urban: high transmission
-        a_land[land_use == 1] = 0.6   # Forest: medium retention
-        a_land[land_use == 2] = 0.3   # Wetland: high retention
-        a_tpfield.field.from_numpy(a_land.flatten())
-
-        # Point source pollution pattern
-        pollution_sources = np.zeros((ny, nx))
-        n_sources = 5
-        for _ in range(n_sources):
-            sx, sy = np.random.randint(10, nx-10), np.random.randint(10, ny-10)
-            pollution_sources[sy-2:sy+3, sx-2:sx+3] = np.random.exponential(50.0)
-        b_tpfield.field.from_numpy(pollution_sources.flatten())
-
-        # Clean boundaries
-        x_root_data.fill(0.0)
-        x_root_tpfield.field.from_numpy(x_root_data.flatten())
-
-        # Propagate pollution with land use dependent retention
-        router.propagate_upstream_affine_var(a_tpfield, b_tpfield, x_root_tpfield, result_tpfield)
-
-        pollution_map = result_tpfield.field.to_numpy().reshape((ny, nx))
-
-        # Analyze pollution by land use
-        for lu, name in enumerate(['Urban', 'Forest', 'Wetland']):
-            mask = land_use == lu
-            if mask.any():
-                mean_pollution = pollution_map[mask].mean()
-                print(f"{name} average pollution: {mean_pollution:.2f}")
-
-        # Clean up all fields
-        a_tpfield.release()
-        b_tpfield.release()
-        x_root_tpfield.release()
-        result_tpfield.release()
-
-        # Example 3: Advanced ecosystem connectivity modeling
-        # Habitat quality affects species dispersal efficiency
-
-        # Create habitat quality map (affects transmission)
-        np.random.seed(42)
-        habitat_quality = np.random.beta(2, 2, (ny, nx))  # Values between 0 and 1
-        # Add some large protected areas
-        protected_areas = np.zeros((ny, nx))
-        for _ in range(3):
-            cx, cy = np.random.randint(20, nx-20), np.random.randint(20, ny-20)
-            radius = np.random.randint(8, 15)
-            for i in range(ny):
-                for j in range(nx):
-                    if (i-cy)**2 + (j-cx)**2 <= radius**2:
-                        protected_areas[i, j] = 1
-
-        # High quality in protected areas
-        habitat_quality = np.where(protected_areas,
-                                 np.clip(habitat_quality + 0.4, 0, 1),
-                                 habitat_quality)
-
-        a_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-        a_tpfield.field.from_numpy(habitat_quality.flatten())
-
-        # Species source populations (breeding sites)
-        breeding_sites = protected_areas * np.random.exponential(20.0, (ny, nx))
-        b_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-        b_tpfield.field.from_numpy(breeding_sites.flatten())
-
-        # Population sinks at boundaries
-        x_root_data.fill(0.0)
-        x_root_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-        x_root_tpfield.field.from_numpy(x_root_data.flatten())
-
-        result_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-
-        # Model species connectivity
-        router.propagate_upstream_affine_var(a_tpfield, b_tpfield, x_root_tpfield, result_tpfield)
-
-        species_density = result_tpfield.field.to_numpy().reshape((ny, nx))
-        connectivity_index = (species_density * habitat_quality).sum()
-        print(f"Landscape connectivity index: {connectivity_index:.1f}")
-
-        # Clean up
-        a_tpfield.release()
-        b_tpfield.release()
-        x_root_tpfield.release()
-        result_tpfield.release()
-        ```
-
-        Performance Notes:
-        ==================
-        - Time complexity: O(log N) where N = nx * ny (same as constant version)
-        - Space complexity: O(N) for temporary fields plus input field storage
-        - GPU-accelerated using Taichi parallel kernels with efficient memory access
-        - Slightly slower than constant version due to variable coefficient access
-        - Memory bandwidth limited for large grids (optimize data layout)
-        - Suitable for grids up to millions of nodes with careful memory management
-
-        Implementation Notes:
-        =====================
-        - Uses same pointer jumping algorithm as constant version
-        - Variable coefficients maintained throughout pointer jumping process
-        - Temporary fields (A, B, P) automatically managed via pool system
-        - All computations performed on GPU with coalesced memory access
-        - Handles arbitrary drainage network topologies including multiple outlets
-        - Numerically stable for reasonable coefficient ranges (avoid a[i] >> 1)
-        - Supports both positive and negative coefficients for advanced modeling
-
-        Numerical Considerations:
-        ========================
-        - Avoid a[i] significantly greater than 1.0 to prevent instability
-        - Very small a[i] values (< 1e-6) may cause precision issues
-        - Large dynamic ranges in a[i] or b[i] may require careful scaling
-        - Monitor for overflow/underflow in accumulated products along long paths
-
-        See Also:
-        =========
-        propagate_upstream_affine: Version with constant transmission coefficient
-        accumulate_affine_var: Downstream accumulation with variable coefficients
-        compute_loss_affine_var: Compute loss/deposition patterns
-
-        Author: B.G.
+            None. Results are written in place into ``x_tpfield``.
         """
         import math
 
@@ -1458,29 +1207,32 @@ class FlowRouter:
         A = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))      # Current coefficients
         B = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))      # Current offsets
         P = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(N,))      # Current parent pointers
+        P.copy_from(self.receivers)
         A_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))     # Next iteration coefficients
         B_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))     # Next iteration offsets
         P_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(N,))     # Next iteration pointers
+        P.copy_from(self.receivers)
 
         # Extract taichi fields from tpfield wrappers for kernel calls
-        a_field = a_tpfield.field           # Spatially varying transmission coefficients
-        b_field = b_tpfield.field           # Local source terms field
-        xroot_field = x_root_tpfield.field  # Boundary values field
-        result_field = result_tpfield.field # Output field
+        a = a_tpfield.field           # Spatially varying transmission coefficients
+        b = b_tpfield.field           # Local source terms field
+        x_field = x_tpfield.field           # Field containing boundary values at roots
+        x_boundary = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))
+        x_boundary.field.copy_from(x_field)
 
         # Phase 1: Initialize affine parameters and parent pointers with variable coefficients
         # Sets up initial transform: x[i] = a[i] * x[rcv[i]] + b[i]
         # For root nodes (rcv[i] == i): A[i] = 1, B[i] = 0, P[i] = i (identity)
         # For regular nodes: A[i] = a[i], B[i] = b[i], P[i] = rcv[i]
         # This initialization preserves spatial heterogeneity in transmission properties
-        pup.init_upstream_AB_var(
-            self.receivers.field,  # Receiver network (rcv[i] for each node i)
-            A.field,               # Output: coefficient array A[i] = a[i]
-            B.field,               # Output: offset array B[i] = b[i]
-            P.field,               # Output: parent pointer array P[i] = rcv[i]
-            a_field,               # Input: spatially varying transmission coefficients a[i]
-            b_field                # Input: local source terms b[i]
-        )
+        # pup.init_upstream_AB_var(
+        #     self.receivers.field,  # Receiver network (rcv[i] for each node i)
+        #     A.field,               # Output: coefficient array A[i] = a[i]
+        #     B.field,               # Output: offset array B[i] = b[i]
+        #     P.field,               # Output: parent pointer array P[i] = rcv[i]
+        #     a_field,               # Input: spatially varying transmission coefficients a[i]
+        #     b_field                # Input: local source terms b[i]
+        # )
 
         # Phase 2: Pointer jumping iterations to compose variable affine transforms
         # Each iteration doubles the effective path length by composing heterogeneous transforms:
@@ -1496,8 +1248,8 @@ class FlowRouter:
             # This preserves the heterogeneous nature of transmission through the network
             pup.pointer_jump_affine(
                 P.field,   # Input: current parent pointers P[i]
-                A.field,   # Input: current cumulative coefficients A[i]
-                B.field,   # Input: current cumulative offsets B[i]
+                a,   # Input: current cumulative coefficients A[i]
+                b,   # Input: current cumulative offsets B[i]
                 P_.field,  # Output: updated parent pointers P_[i] = P[P[i]]
                 A_.field,  # Output: updated coefficients A_[i] = A[i] * A[P[i]]
                 B_.field   # Output: updated offsets B_[i] = B[i] + A[i] * B[P[i]]
@@ -1507,21 +1259,23 @@ class FlowRouter:
             # This avoids race conditions during parallel updates while maintaining
             # the accumulated products of variable coefficients
             P.field.copy_from(P_.field)   # Update parent pointers
-            A.field.copy_from(A_.field)   # Update cumulative coefficients
-            B.field.copy_from(B_.field)   # Update cumulative offsets
+            a.copy_from(A_.field)   # Update cumulative coefficients
+            b.copy_from(B_.field)   # Update cumulative offsets
+
+        x_field.copy_from(b)
 
         # Phase 3: Finalize by applying variable transforms with boundary conditions
         # After pointer jumping, each node i has direct transform to its root incorporating
-        # all variable coefficients along the path: x[i] = A[i] * x_root[P[i]] + B[i]
+        # all variable coefficients along the path: x[i] = A[i] * x[P[i]] + B[i]
         # where A[i] contains the product of all a[k] values from i to its root
         # and B[i] contains the sum of all weighted source terms along the path
-        pup.finalize_upstream_x(
-            P.field,        # Input: final parent pointers (point to roots)
-            A.field,        # Input: final cumulative coefficients (products of a[k])
-            B.field,        # Input: final cumulative offsets (weighted sums of b[k])
-            xroot_field,    # Input: boundary values at root nodes
-            result_field    # Output: computed values x[i]
-        )
+        # pup.finalize_upstream_x(
+        #     P.field,        # Input: final parent pointers (point to roots)
+        #     A.field,        # Input: final cumulative coefficients (products of a[k])
+        #     B.field,        # Input: final cumulative offsets (weighted sums of b[k])
+        #     x_boundary.field,  # Input: boundary values at root nodes (snapshot)
+        #     x_field         # Output: computed values x[i] (updated in place)
+        # )
 
         # Phase 4: Release temporary fields back to pool
         # Ensures efficient memory management and prevents GPU memory leaks
@@ -1531,6 +1285,7 @@ class FlowRouter:
         A_.release()
         B_.release()
         P_.release()
+        x_boundary.release()
 
     def get_Z(self):
         """
