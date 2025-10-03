@@ -547,7 +547,7 @@ class Flooder:
 
 
 
-    def run_N_sweep(self, NSW = 5, locarve = False, omega = 1.):
+    def run_N_sweep(self, NSW = 5, omega = 1., custom_Qin = None):
         S = pf.pool.taipool.get_tpfield(
             dtype=ti.f32, shape=(self.nx * self.ny)
         )
@@ -555,19 +555,31 @@ class Flooder:
         zh = pf.pool.taipool.get_tpfield(
             dtype=ti.f32, shape=(self.nx * self.ny)
         )
+        Q_ = pf.pool.taipool.get_tpfield(
+            dtype=ti.f32, shape=(self.nx * self.ny)
+        )
 
         zh.copy_from(self.grid.z.field)
 
         pf.general_algorithms.util_taichi.add_B_to_A(zh.field, self.h.field)
-        pf.flow.sweeper.build_S(S.field)             # temp = S (precip * DX^2), if S changes each step
+        cField = None
+        
+        if(custom_Qin is None):
+            pf.flow.sweeper.build_S(S.field)             # temp = S (precip * DX^2), if S changes each step
+        elif isinstance(custom_Qin, np.ndarray):
+            cField = pf.pool.taipool.get_tpfield(
+                dtype=ti.f32, shape=(self.nx * self.ny)
+            )
+            cField.from_numpy(custom_Qin.ravel())
+            pf.flow.sweeper.build_S_var(S.field,cField.field)
+        else:
+            raise ValueError('run_N_sweep custom_Qin has to be numpy so far')
 
-        if(locarve):
-            for i in range(5):
-                pf.flow.locarve.locarve(zh.field, self.router.receivers.field)
 
         for it in range(NSW):         # e.g., N_rb = 5–10
-            pf.flow.sweeper.sweep_color(self.router.Q.field, zh.field, S.field, 0, omega)  # red
-            pf.flow.sweeper.sweep_color(self.router.Q.field, zh.field, S.field, 1, omega)  # black
+            pf.flow.sweeper.sweep_sweep(self.router.Q.field, Q_.field, zh.field, S.field, omega)
+            # pf.flow.sweeper.sweep_color(self.router.Q.field, zh.field, S.field, 0, omega)  # red
+            # pf.flow.sweeper.sweep_color(self.router.Q.field, zh.field, S.field, 1, omega)  # black
         # then do your dh/h update using the converged-ish Q
         # pf.general_algorithms.util_taichi.add_B_to_weighted_A(
         #     zh.field, self.grid.z.field, -1.0
@@ -579,6 +591,9 @@ class Flooder:
 
         S.release()
         zh.release()
+        Q_.release()
+        if not cField is None:
+            cField.release()
 
     def run_N_analytical(self, N=2, temporal_filtering = 0.2):
 

@@ -316,11 +316,11 @@ class FlowRouter:
         # Rake-compress iterations for parallel tree accumulation
         # Each iteration doubles the effective path length being compressed
         for i in range(logn + 1):
-            dpr.rake_compress_accum(donors, ndonors, Acc, src, donors_, ndonors_, Q_, i)
+            dpr.rake_compress_accum(donors.field, ndonors.field, Acc, src.field, donors_.field, ndonors_.field, Q_.field, i)
 
         # Final fuse step to consolidate results from ping-pong buffers
         # Merge accumulated values from working arrays back to primary array
-        gena.fuse(Acc, src, Q_, logn)
+        gena.fuse(Acc, src.field, Q_.field, logn)
 
         # Release all temporary fields back to pool
         ndonors.release()
@@ -924,261 +924,8 @@ class FlowRouter:
         """
         return self.Q.field.to_numpy().reshape(self.rshp)
 
-    def propagate_upstream_affine(self, a: float, b_tpfield, x_root_tpfield, result_tpfield):
-        """
-        Propagate values upstream using constant affine transformation: x[i] = a * x[rcv[i]] + b[i].
 
-        This function solves the upstream propagation problem where each node's value depends
-        on its receiver's value through a linear affine transformation. The constant coefficient
-        'a' is applied uniformly across all nodes, while each node has its own source term 'b[i]'.
-
-        Mathematical Formulation:
-        ========================
-        For each node i in the drainage network:
-            x[i] = a * x[rcv[i]] + b[i]
-
-        Where:
-        - x[i]: Final value at node i (what we're solving for)
-        - a: Constant transmission/propagation coefficient (scalar, 0 ≤ a ≤ 1 typically)
-        - x[rcv[i]]: Value at the receiver (downstream node) of node i
-        - b[i]: Local source term at node i (can be positive or negative)
-        - rcv[i]: Receiver index for node i (downstream neighbor in flow network)
-
-        Special Cases:
-        - Root nodes (rcv[i] == i): Use boundary values from x_root_tpfield
-        - Outlet nodes: Typically have x_root values that define system boundaries
-
-        Algorithm Details:
-        ==================
-        Uses parallel pointer jumping to solve the system in O(log N) iterations:
-
-        1. **Initialization**: Set up affine parameters (A, B) and parent pointers (P)
-           - For non-root nodes: A[i] = a, B[i] = b[i], P[i] = rcv[i]
-           - For root nodes: A[i] = 1, B[i] = 0, P[i] = i (identity transform)
-
-        2. **Pointer Jumping**: Iteratively compose transforms by path doubling
-           - Each iteration doubles the effective path length
-           - Composes affine transforms: (A_new, B_new) = compose(A_old, A_parent, B_old, B_parent)
-           - A_new[i] = A[i] * A[P[i]]
-           - B_new[i] = B[i] + A[i] * B[P[i]]
-           - P_new[i] = P[P[i]]
-
-        3. **Finalization**: Apply final transform using root boundary values
-           - x[i] = A[i] * x_root[P[i]] + B[i]
-
-        Physical Interpretation Examples:
-        =================================
-        - **Heat conduction**: a = thermal diffusivity, b = heat sources/sinks
-        - **Pollutant transport**: a = transmission rate, b = local emissions
-        - **Economic flow**: a = efficiency factor, b = local production
-        - **Water chemistry**: a = reaction rate, b = local inputs
-
-        Args:
-            a (float): Constant transmission coefficient applied uniformly to all nodes.
-                      Typical range: 0 ≤ a ≤ 1
-                      - a = 1.0: Perfect transmission (no loss)
-                      - a = 0.0: No upstream influence (local sources only)
-                      - 0 < a < 1: Partial transmission with decay
-
-            b_tpfield (TPField): Local source terms for each node. Must have shape (nx*ny,).
-                               Contains b[i] values that represent:
-                               - Local inputs/outputs at each node
-                               - Can be positive (sources) or negative (sinks)
-                               - Units depend on application context
-
-            x_root_tpfield (TPField): Boundary values for root/outlet nodes. Must have shape (nx*ny,).
-                                    Only values at root positions (where rcv[i] == i) are used.
-                                    These define the boundary conditions for the system.
-
-            result_tpfield (TPField): Output field where results will be stored. Must have shape (nx*ny,).
-                                    Will contain the computed x[i] values after propagation.
-
-        Returns:
-            None: Results are stored directly in result_tpfield
-
-        Raises:
-            AttributeError: If tpfields don't have .field attribute
-            ValueError: If field shapes don't match grid dimensions
-
-        Example Usage:
-        ==============
-        ```python
-        import numpy as np
-        import taichi as ti
-        import pyfastflow as pf
-
-        # Setup grid and flow router
-        nx, ny = 100, 100
-        grid = pf.create_grid(nx, ny, dx=1.0)
-        router = pf.FlowRouter(grid)
-
-        # Compute flow network
-        router.compute_receivers()
-
-        # Example 1: Simple heat diffusion
-        # Heat conducts upstream with 90% efficiency, local heat sources
-        a = 0.9  # 90% heat transmission
-
-        # Create local heat sources (more heat in center)
-        b_data = np.zeros((ny, nx))
-        b_data[ny//2-10:ny//2+10, nx//2-10:nx//2+10] = 100.0  # Central heat source
-        b_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-        b_tpfield.field.from_numpy(b_data.flatten())
-
-        # Set boundary conditions (outlets at 0°C)
-        x_root_data = np.zeros((ny, nx))  # All outlets at 0°C
-        x_root_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-        x_root_tpfield.field.from_numpy(x_root_data.flatten())
-
-        # Create result field
-        result_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-
-        # Propagate heat upstream
-        router.propagate_upstream_affine(a, b_tpfield, x_root_tpfield, result_tpfield)
-
-        # Extract results
-        temperature = result_tpfield.field.to_numpy().reshape((ny, nx))
-        print(f"Max temperature: {temperature.max():.2f}°C")
-
-        # Clean up
-        b_tpfield.release()
-        x_root_tpfield.release()
-        result_tpfield.release()
-
-        # Example 2: Pollutant transport with decay
-        # 80% of pollutant survives transport, industrial sources
-        a = 0.8  # 20% decay during transport
-
-        # Industrial pollution sources
-        pollution_sources = np.random.exponential(10.0, (ny, nx))  # Random industrial sources
-        b_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-        b_tpfield.field.from_numpy(pollution_sources.flatten())
-
-        # Clean water at outlets
-        clean_boundary = np.zeros((ny, nx))
-        x_root_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-        x_root_tpfield.field.from_numpy(clean_boundary.flatten())
-
-        result_tpfield = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx*ny,))
-
-        router.propagate_upstream_affine(a, b_tpfield, x_root_tpfield, result_tpfield)
-
-        pollution_map = result_tpfield.field.to_numpy().reshape((ny, nx))
-        print(f"Max pollution level: {pollution_map.max():.2f}")
-
-        # Clean up
-        b_tpfield.release()
-        x_root_tpfield.release()
-        result_tpfield.release()
-        ```
-
-        Performance Notes:
-        ==================
-        - Time complexity: O(log N) where N = nx * ny
-        - Space complexity: O(N) for temporary fields
-        - GPU-accelerated using Taichi parallel kernels
-        - Memory efficient with automatic cleanup of temporary fields
-        - Suitable for grids up to millions of nodes
-
-        Implementation Notes:
-        =====================
-        - Uses pointer jumping algorithm for parallel tree traversal
-        - Temporary fields (A, B, P) are automatically managed via pool system
-        - All computations performed on GPU for maximum efficiency
-        - Handles arbitrary drainage network topologies including multiple outlets
-        - Numerically stable for typical coefficient ranges
-
-        See Also:
-        =========
-        propagate_upstream_affine_var: Version with spatially varying coefficients
-        accumulate_affine: Downstream accumulation with affine transforms
-
-        Author: B.G.
-        """
-        import math
-
-        # Grid dimensions and logarithmic iteration count for pointer jumping
-        N = self.nx * self.ny  # Total number of grid nodes
-        logn = math.ceil(math.log2(N)) + 1  # Number of pointer jumping iterations needed
-
-        # Allocate temporary fields from pool for affine transform parameters
-        # A[i]: Cumulative coefficient from node i to its final ancestor
-        # B[i]: Cumulative offset from node i to its final ancestor
-        # P[i]: Parent pointer - points to upstream node in current iteration
-        A = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))      # Current coefficients
-        B = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))      # Current offsets
-        P = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(N,))      # Current parent pointers
-        A_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))     # Next iteration coefficients
-        B_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))     # Next iteration offsets
-        P_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(N,))     # Next iteration pointers
-
-        # Extract taichi fields from tpfield wrappers for kernel calls
-        b_field = b_tpfield.field           # Local source terms field
-        xroot_field = x_root_tpfield.field  # Boundary values field
-        result_field = result_tpfield.field # Output field
-        x_boundary = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))
-        x_boundary.field.copy_from(xroot_field)
-
-        # Phase 1: Initialize affine parameters and parent pointers
-        # Sets up initial transform: x[i] = a * x[rcv[i]] + b[i]
-        # For root nodes (rcv[i] == i): A[i] = 1, B[i] = 0, P[i] = i (identity)
-        # For regular nodes: A[i] = a, B[i] = b[i], P[i] = rcv[i]
-        pup.init_upstream_AB_const(
-            self.receivers.field,  # Receiver network (rcv[i] for each node i)
-            A.field,               # Output: coefficient array A[i]
-            B.field,               # Output: offset array B[i]
-            P.field,               # Output: parent pointer array P[i]
-            a,                     # Input: constant transmission coefficient
-            b_field                # Input: local source terms b[i]
-        )
-
-        # Phase 2: Pointer jumping iterations to compose affine transforms
-        # Each iteration doubles the effective path length by composing transforms:
-        # If node i points to j, and j points to k, compose the transforms i->j and j->k
-        # to get direct transform i->k, then update pointer i->k
-        for iteration in range(logn):
-            # Compose affine transforms by path doubling
-            # New transform: x[i] = A[i] * (A[j] * x[k] + B[j]) + B[i]
-            #              = (A[i] * A[j]) * x[k] + (A[i] * B[j] + B[i])
-            # Where j = P[i] and k = P[j]
-            pup.pointer_jump_affine(
-                P.field,   # Input: current parent pointers P[i]
-                A.field,   # Input: current coefficients A[i]
-                B.field,   # Input: current offsets B[i]
-                P_.field,  # Output: updated parent pointers P_[i] = P[P[i]]
-                A_.field,  # Output: updated coefficients A_[i] = A[i] * A[P[i]]
-                B_.field   # Output: updated offsets B_[i] = B[i] + A[i] * B[P[i]]
-            )
-
-            # Swap buffers: current <- next for ping-pong computation
-            # This avoids race conditions during parallel updates
-            P.field.copy_from(P_.field)   # Update parent pointers
-            A.field.copy_from(A_.field)   # Update coefficients
-            B.field.copy_from(B_.field)   # Update offsets
-
-        # Phase 3: Finalize by applying transforms with boundary conditions
-        # After pointer jumping, each node i has direct transform to its root:
-        # x[i] = A[i] * x_root[P[i]] + B[i]
-        # where P[i] now points directly to the root of i's subtree
-        pup.finalize_upstream_x(
-            P.field,        # Input: final parent pointers (point to roots)
-            A.field,        # Input: final cumulative coefficients
-            B.field,        # Input: final cumulative offsets
-            x_boundary.field,  # Input: boundary values at root nodes (snapshot)
-            result_field    # Output: computed values x[i]
-        )
-
-        # Phase 4: Release temporary fields back to pool
-        # Ensures efficient memory management and prevents leaks
-        A.release()      # Release coefficient arrays
-        B.release()
-        P.release()      # Release pointer arrays
-        A_.release()
-        B_.release()
-        P_.release()
-        x_boundary.release()
-
-    def propagate_upstream_affine_var(self, a_tpfield, b_tpfield, x_tpfield):
+    def propagate_upstream_affine_var(self, a_tpfield, b_tpfield):
         """Propagate x upstream using spatially varying affine transforms.
 
         Solves ``x[i] = a[i] * x[rcv[i]] + b[i]`` with pointer jumping. The field
@@ -1188,8 +935,6 @@ class FlowRouter:
         Args:
             a_tpfield (TPField): Spatially varying transmission coefficients ``a[i]``.
             b_tpfield (TPField): Local source terms ``b[i]``.
-            x_tpfield (TPField): Field storing ``x``. Root entries supply boundary
-                conditions and the result overwrites the field in place.
 
         Returns:
             None. Results are written in place into ``x_tpfield``.
@@ -1201,51 +946,22 @@ class FlowRouter:
         logn = math.ceil(math.log2(N)) + 1  # Number of pointer jumping iterations needed
 
         # Allocate temporary fields from pool for affine transform parameters
-        # A[i]: Cumulative coefficient product from node i to its final ancestor
-        # B[i]: Cumulative offset sum from node i to its final ancestor
-        # P[i]: Parent pointer - points to upstream node in current iteration
-        A = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))      # Current coefficients
-        B = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))      # Current offsets
         P = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(N,))      # Current parent pointers
         P.copy_from(self.receivers)
         A_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))     # Next iteration coefficients
         B_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))     # Next iteration offsets
         P_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(N,))     # Next iteration pointers
-        P.copy_from(self.receivers)
 
         # Extract taichi fields from tpfield wrappers for kernel calls
         a = a_tpfield.field           # Spatially varying transmission coefficients
         b = b_tpfield.field           # Local source terms field
-        x_field = x_tpfield.field           # Field containing boundary values at roots
-        x_boundary = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))
-        x_boundary.field.copy_from(x_field)
 
-        # Phase 1: Initialize affine parameters and parent pointers with variable coefficients
-        # Sets up initial transform: x[i] = a[i] * x[rcv[i]] + b[i]
-        # For root nodes (rcv[i] == i): A[i] = 1, B[i] = 0, P[i] = i (identity)
-        # For regular nodes: A[i] = a[i], B[i] = b[i], P[i] = rcv[i]
-        # This initialization preserves spatial heterogeneity in transmission properties
-        # pup.init_upstream_AB_var(
-        #     self.receivers.field,  # Receiver network (rcv[i] for each node i)
-        #     A.field,               # Output: coefficient array A[i] = a[i]
-        #     B.field,               # Output: offset array B[i] = b[i]
-        #     P.field,               # Output: parent pointer array P[i] = rcv[i]
-        #     a_field,               # Input: spatially varying transmission coefficients a[i]
-        #     b_field                # Input: local source terms b[i]
-        # )
+        A_.copy_from(a)
+        B_.copy_from(b)
+        P_.copy_from(P)
 
-        # Phase 2: Pointer jumping iterations to compose variable affine transforms
-        # Each iteration doubles the effective path length by composing heterogeneous transforms:
-        # If node i points to j with coefficient a[i], and j points to k with coefficient a[j],
-        # compose to get direct transform i->k with coefficient a[i]*a[j]
-        # This maintains the product of all transmission coefficients along the path
+
         for iteration in range(logn):
-            # Compose spatially varying affine transforms by path doubling
-            # For variable coefficients, the composition becomes:
-            # New transform: x[i] = A[i] * (A[j] * x[k] + B[j]) + B[i]
-            #              = (A[i] * A[j]) * x[k] + (A[i] * B[j] + B[i])
-            # Where A[i] and A[j] contain products of variable a[k] values along paths
-            # This preserves the heterogeneous nature of transmission through the network
             pup.pointer_jump_affine(
                 P.field,   # Input: current parent pointers P[i]
                 a,   # Input: current cumulative coefficients A[i]
@@ -1262,30 +978,14 @@ class FlowRouter:
             a.copy_from(A_.field)   # Update cumulative coefficients
             b.copy_from(B_.field)   # Update cumulative offsets
 
-        x_field.copy_from(b)
 
-        # Phase 3: Finalize by applying variable transforms with boundary conditions
-        # After pointer jumping, each node i has direct transform to its root incorporating
-        # all variable coefficients along the path: x[i] = A[i] * x[P[i]] + B[i]
-        # where A[i] contains the product of all a[k] values from i to its root
-        # and B[i] contains the sum of all weighted source terms along the path
-        # pup.finalize_upstream_x(
-        #     P.field,        # Input: final parent pointers (point to roots)
-        #     A.field,        # Input: final cumulative coefficients (products of a[k])
-        #     B.field,        # Input: final cumulative offsets (weighted sums of b[k])
-        #     x_boundary.field,  # Input: boundary values at root nodes (snapshot)
-        #     x_field         # Output: computed values x[i] (updated in place)
-        # )
 
         # Phase 4: Release temporary fields back to pool
         # Ensures efficient memory management and prevents GPU memory leaks
-        A.release()      # Release coefficient arrays
-        B.release()
         P.release()      # Release pointer arrays
         A_.release()
         B_.release()
         P_.release()
-        x_boundary.release()
 
     def get_Z(self):
         """

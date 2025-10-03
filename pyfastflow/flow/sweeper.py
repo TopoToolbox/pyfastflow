@@ -19,6 +19,11 @@ def slope_pos(a, b):
 def build_S(S: ti.template()):
     for i in S:
         S[i] = cte.PREC * cte.DX * cte.DX   # stationary source
+@ti.kernel
+def build_S_var(S: ti.template(), var:ti.template()):
+    for i in S:
+        S[i] = var[i]   # stationary source
+
 
 @ti.kernel
 def sweep_color(Q: ti.template(), zh: ti.template(), S: ti.template(),
@@ -52,8 +57,8 @@ def sweep_color(Q: ti.template(), zh: ti.template(), S: ti.template(),
             if sums_j > 0.0:
                 acc += slope_pos(zj, zh[i]) / sums_j * Q[j]
 
-        if has_hz == False:
-        	zh[i] += 1e-3 + ti.random() * 1e-3
+        # if has_hz == False:
+        # 	zh[i] += 1e-3 + ti.random() * 1e-3
 
         # Optional SOR to converge faster (omega in (1,2))
         # omega = 0.2
@@ -130,9 +135,11 @@ def sweep_Qapp_tiled_iter(Q: ti.template(), Qapp: ti.template(), Qtemp: ti.templ
 
                 if(tyler[j] == tyler[i] and ts > 0):
                     ti.atomic_add(Qtemp[j], Q[i]*ts/sums)
+                else:
+                    ti.atomic_add(Qtemp[i], -Q[i]*ts/sums)
         else:
             h[i] += 1e-3 + ti.random()*5e-3
-
+            ti.atomic_add(Qtemp[i], -Q[i])
 
     for i in Qtemp:
         Q[i] = Qtemp[i]
@@ -140,3 +147,35 @@ def sweep_Qapp_tiled_iter(Q: ti.template(), Qapp: ti.template(), Qtemp: ti.templ
 
 #NEXT STEP: SWEEP PER TILE
 # 
+
+
+@ti.kernel
+def sweep_sweep(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.template(), omega:ti.f32):
+
+    for i in zh:
+        Q_[i] = S[i]
+
+    for i in zh:
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+        sums_j = 0.
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j == -1 or flow.neighbourer_flat.nodata(j): 
+                continue
+            sums_j += slope_pos(zh[i],zh[j])
+        if sums_j > 0.0:
+            for k in range(4):
+                j = flow.neighbourer_flat.neighbour(i, k)
+                if j == -1 or flow.neighbourer_flat.nodata(j): 
+                    continue
+                ti.atomic_add(Q_[j], slope_pos(zh[i],zh[j]) / sums_j * Q[i])
+
+        # if has_hz == False:
+        #   zh[i] += 1e-3 + ti.random() * 1e-3
+
+        # Optional SOR to converge faster (omega in (1,2))
+        # omega = 0.2
+        
+    for i in zh:
+        Q[i] = (1.0 - omega) * Q[i] + omega * Q_[i]
