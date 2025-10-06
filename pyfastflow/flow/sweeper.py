@@ -172,7 +172,8 @@ def sweep_sweep(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.te
                 ti.atomic_add(Q_[j], slope_pos(zh[i],zh[j]) / sums_j * Q[i])
 
         # if has_hz == False:
-        #   zh[i] += 1e-3 + ti.random() * 1e-3
+        else:
+            zh[i] += 1e-3 + ti.random() * 1e-4
 
         # Optional SOR to converge faster (omega in (1,2))
         # omega = 0.2
