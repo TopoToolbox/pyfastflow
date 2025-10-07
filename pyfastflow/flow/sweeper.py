@@ -158,12 +158,14 @@ def sweep_sweep(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.te
     for i in zh:
         if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
             continue
+            
         sums_j = 0.
         for k in range(4):
             j = flow.neighbourer_flat.neighbour(i, k)
             if j == -1 or flow.neighbourer_flat.nodata(j): 
                 continue
             sums_j += slope_pos(zh[i],zh[j])
+
         if sums_j > 0.0:
             for k in range(4):
                 j = flow.neighbourer_flat.neighbour(i, k)
@@ -173,10 +175,69 @@ def sweep_sweep(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.te
 
         # if has_hz == False:
         else:
-            zh[i] += 1e-3 + ti.random() * 1e-4
+            zh[i] += 1e-3 + ti.random() * 1e-3
 
         # Optional SOR to converge faster (omega in (1,2))
         # omega = 0.2
         
     for i in zh:
         Q[i] = (1.0 - omega) * Q[i] + omega * Q_[i]
+
+@ti.kernel
+def sweep_sweep_tiled_iter(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.template(), tyler:ti.template(), omega:ti.f32):
+
+    for i in zh:
+        Q_[i] = S[i]
+
+    for i in zh:
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+            
+        sums_j = 0.
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j == -1 or flow.neighbourer_flat.nodata(j): 
+                continue
+            sums_j += slope_pos(zh[i],zh[j])
+
+        if sums_j > 0.0:
+            for k in range(4):
+                j = flow.neighbourer_flat.neighbour(i, k)
+                if j == -1 or flow.neighbourer_flat.nodata(j): 
+                    continue
+                if tyler[j] == tyler[i]:
+                    ti.atomic_add(Q_[j], slope_pos(zh[i],zh[j]) / sums_j * Q[i])
+
+
+        # if has_hz == False:
+        else:
+            zh[i] += 1e-3 + ti.random() * 1e-3
+
+        # Optional SOR to converge faster (omega in (1,2))
+        # omega = 0.2
+        
+    for i in zh:
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+            
+        sums_j = 0.
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j == -1 or flow.neighbourer_flat.nodata(j): 
+                continue
+            sums_j += slope_pos(zh[i],zh[j])
+
+        if sums_j > 0.0:
+            for k in range(4):
+                j = flow.neighbourer_flat.neighbour(i, k)
+                if j == -1 or flow.neighbourer_flat.nodata(j): 
+                    continue
+                if tyler[j] != tyler[i]:
+                    Q[i]-= slope_pos(zh[i],zh[j]) / sums_j * Q[i]
+
+
+        
+
+    for i in zh:
+        Q[i] = (1.0 - omega) * Q[i] + omega * Q_[i]
+

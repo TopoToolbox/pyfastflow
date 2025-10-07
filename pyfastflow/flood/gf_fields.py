@@ -356,7 +356,7 @@ class Flooder:
         dh.release()
 
 
-    def run_N_tiled_sweep(self, N = 10, tiles = 200 ):
+    def run_N_tiled_sweep(self, N = 10, tiles = 200, omega = 1., shift=(0,0) ):
 
         release_tiles = False
         if isinstance(tiles, pf.pool.TPField):
@@ -368,7 +368,7 @@ class Flooder:
             if(isinstance(tiles, np.ndarray)):
                 ttiles.from_numpy(tiles)
             else:
-                tttiles = pf.grid.tiled_generator.create_tiled_array((self.ny,self.nx), tiles, shift=(0, 0))
+                tttiles = pf.grid.tiled_generator.create_tiled_array((self.ny,self.nx), tiles, shift=shift)
                 ttiles.from_numpy(tttiles.ravel())
 
             tiles_field = ttiles.field
@@ -381,7 +381,7 @@ class Flooder:
         pf.flow.sweeper.build_S(S.field) 
         pf.flow.sweeper.sweep_Qapp_tiled_init(self.router.Q.field, Qapp.field, self.grid.z.field, self.h.field, S.field, tiles_field)
         for i in range(N):
-            pf.flow.sweeper.sweep_Qapp_tiled_iter(self.router.Q.field, Qapp.field, Qtemp.field, self.grid.z.field, self.h.field, tiles_field)
+            pf.flow.sweeper.sweep_sweep_tiled_iter(self.router.Q.field, Qapp.field, self.grid.z.field, self.h.field, tiles_field, omega)
 
         Qapp.release()
         Qtemp.release()
