@@ -183,6 +183,50 @@ def sweep_sweep(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.te
     for i in zh:
         Q[i] = (1.0 - omega) * Q[i] + omega * Q_[i]
 
+
+@ti.kernel
+def sweep_sweep_mask(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.template(), mask:ti.template(), omega:ti.f32, propag_mask:ti.u1):
+
+    for i in zh:
+        Q_[i] = S[i]
+
+    for i in zh:
+        # if mask[i] == False:
+        #     continue
+
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+            
+        sums_j = 0.
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j == -1 or flow.neighbourer_flat.nodata(j): 
+                continue
+            sums_j += slope_pos(zh[i],zh[j])
+
+        if sums_j > 0.0:
+            for k in range(4):
+                j = flow.neighbourer_flat.neighbour(i, k)
+                if j == -1 or flow.neighbourer_flat.nodata(j): 
+                    continue
+                ts = slope_pos(zh[i],zh[j])
+                
+                if ts>0 and mask[i] and propag_mask:
+                    mask[j] = True
+                
+                ti.atomic_add(Q_[j], ts / sums_j * Q[i])
+
+        # if has_hz == False:
+        else:
+            zh[i] += 1e-3 + ti.random() * 1e-3
+
+        # Optional SOR to converge faster (omega in (1,2))
+        # omega = 0.2
+        
+    for i in zh:
+        if(mask[i]):
+            Q[i] = (1.0 - omega) * Q[i] + omega * Q_[i]
+
 @ti.kernel
 def sweep_sweep_tiled_iter(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.template(), tyler:ti.template(), omega:ti.f32):
 

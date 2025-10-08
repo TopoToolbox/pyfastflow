@@ -345,50 +345,111 @@ class Flooder:
         dh.release()
         LM.release()
 
-    def run_graphflood_diffuse_nopropag(self, N=10, dt = None):
+
+
+    def run_N_sweep(self, NSW = 5, omega = 1., custom_Qin = None, mask = None, propag_mask = False):
+        S = pf.pool.taipool.get_tpfield(
+            dtype=ti.f32, shape=(self.nx * self.ny)
+        )
+
+        zh = pf.pool.taipool.get_tpfield(
+            dtype=ti.f32, shape=(self.nx * self.ny)
+        )
+        Q_ = pf.pool.taipool.get_tpfield(
+            dtype=ti.f32, shape=(self.nx * self.ny)
+        )
+
+        if (mask is None) == False:
+            tmask = pf.pool.taipool.get_tpfield(
+                dtype=ti.u1, shape=(self.nx * self.ny)
+            )
+            if isinstance(mask, np.ndarray):
+                tmask.field.from_numpy(mask)
+            else:
+                tmask.copy_from(mask)
+
+        zh.copy_from(self.grid.z.field)
+
+        pf.general_algorithms.util_taichi.add_B_to_A(zh.field, self.h.field)
+        cField = None
+        
+        if(custom_Qin is None):
+            pf.flow.sweeper.build_S(S.field)             # temp = S (precip * DX^2), if S changes each step
+        elif isinstance(custom_Qin, np.ndarray):
+            cField = pf.pool.taipool.get_tpfield(
+                dtype=ti.f32, shape=(self.nx * self.ny)
+            )
+            cField.from_numpy(custom_Qin.ravel())
+            pf.flow.sweeper.build_S_var(S.field,cField.field)
+        else:
+            raise ValueError('run_N_sweep custom_Qin has to be numpy so far')
+
+
+        for it in range(NSW):         # e.g., N_rb = 5–10
+            if(mask is None):
+                pf.flow.sweeper.sweep_sweep(self.router.Q.field, Q_.field, zh.field, S.field, omega)
+            else:
+                pf.flow.sweeper.sweep_sweep_mask(self.router.Q.field, Q_.field, zh.field, S.field, tmask.field, omega, propag_mask)
+
+        pf.flow.locarve.zh_to_z_h(zh.field, self.grid.z.field, self.h.field)
+
+        S.release()
+        zh.release()
+        Q_.release()
+        if not cField is None:
+            cField.release()
+        if not mask is None:
+            tmask.release()
+
+    def run_N_analytical(self, N=2, temporal_filtering = 0.2, mask = None):
+
+        if (mask is None) == False:
+            tmask = pf.pool.taipool.get_tpfield(
+                dtype=ti.u1, shape=(self.nx * self.ny)
+            )
+            if isinstance(mask, np.ndarray):
+                tmask.field.from_numpy(mask)
+            else:
+                tmask.copy_from(mask)
+
+        for _ in range(N):
+            if mask is None:
+                pf.flood.gf_hydrodynamics.graphflood_cte_man_analytical(self.grid.z.field, self.h.field, self.router.Q.field, temporal_filtering)
+            else:
+                pf.flood.gf_hydrodynamics.graphflood_cte_man_analytical_mask(self.grid.z.field, self.h.field, self.router.Q.field, tmask.field, temporal_filtering)
+
+
+        if not mask is None:
+            tmask.release()
+
+
+    def run_graphflood_diffuse_nopropag(self, N=10, dt = None, mask = None):
 
         dh = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
 
+        if (mask is None) == False:
+            tmask = pf.pool.taipool.get_tpfield(
+                dtype=ti.u1, shape=(self.nx * self.ny)
+            )
+            if isinstance(mask, np.ndarray):
+                tmask.field.from_numpy(mask)
+            else:
+                tmask.copy_from(mask)
+
         for _ in range(N):
-            pf.flood.gf_hydrodynamics.graphflood_cte_man_dt_nopropag(self.grid.z.field, self.h.field, 
-                self.router.Q.field, dh.field, cte.DT_HYDRO if dt is None else dt)
+            if mask is None:
+                pf.flood.gf_hydrodynamics.graphflood_cte_man_dt_nopropag(self.grid.z.field, self.h.field, 
+                    self.router.Q.field, dh.field, cte.DT_HYDRO if dt is None else dt)
+            else:
+                pf.flood.gf_hydrodynamics.graphflood_cte_man_dt_nopropag_mask(self.grid.z.field, self.h.field, 
+                    self.router.Q.field, dh.field, tmask.field, cte.DT_HYDRO if dt is None else dt)
 
         dh.release()
+        if not mask is None:
+            tmask.release()
 
 
-    def run_N_tiled_sweep(self, N = 10, tiles = 200, omega = 1., shift=(0,0) ):
-
-        release_tiles = False
-        if isinstance(tiles, pf.pool.TPField):
-            tiles_field = tiles.field
-        else:
-            release_tiles = True
-            ttiles = pf.pool.taipool.get_tpfield(dtype=ti.u32, shape=(self.nx * self.ny))
-
-            if(isinstance(tiles, np.ndarray)):
-                ttiles.from_numpy(tiles)
-            else:
-                tttiles = pf.grid.tiled_generator.create_tiled_array((self.ny,self.nx), tiles, shift=shift)
-                ttiles.from_numpy(tttiles.ravel())
-
-            tiles_field = ttiles.field
-
-
-        Qapp  = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        Qtemp = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        S     = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-
-        pf.flow.sweeper.build_S(S.field) 
-        pf.flow.sweeper.sweep_Qapp_tiled_init(self.router.Q.field, Qapp.field, self.grid.z.field, self.h.field, S.field, tiles_field)
-        for i in range(N):
-            pf.flow.sweeper.sweep_sweep_tiled_iter(self.router.Q.field, Qapp.field, self.grid.z.field, self.h.field, tiles_field, omega)
-
-        Qapp.release()
-        Qtemp.release()
-        S.release()
-
-        if(release_tiles):
-            ttiles.release()
+   
 
     def run_LS(self, N=1000, input_mode="constant_prec", mode=None):
         """
@@ -508,6 +569,40 @@ class Flooder:
         receivers_.release()
         receivers__.release()
 
+    def run_N_tiled_sweep(self, N = 10, tiles = 200, omega = 1., shift=(0,0) ):
+
+        release_tiles = False
+        if isinstance(tiles, pf.pool.TPField):
+            tiles_field = tiles.field
+        else:
+            release_tiles = True
+            ttiles = pf.pool.taipool.get_tpfield(dtype=ti.u32, shape=(self.nx * self.ny))
+
+            if(isinstance(tiles, np.ndarray)):
+                ttiles.from_numpy(tiles)
+            else:
+                tttiles = pf.grid.tiled_generator.create_tiled_array((self.ny,self.nx), tiles, shift=shift)
+                ttiles.from_numpy(tttiles.ravel())
+
+            tiles_field = ttiles.field
+
+
+        Qapp  = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        Qtemp = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        S     = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+
+        pf.flow.sweeper.build_S(S.field) 
+        pf.flow.sweeper.sweep_Qapp_tiled_init(self.router.Q.field, Qapp.field, self.grid.z.field, self.h.field, S.field, tiles_field)
+        for i in range(N):
+            pf.flow.sweeper.sweep_sweep_tiled_iter(self.router.Q.field, Qapp.field, self.grid.z.field, self.h.field, tiles_field, omega)
+
+        Qapp.release()
+        Qtemp.release()
+        S.release()
+
+        if(release_tiles):
+            ttiles.release()
+
 
     def fill_lakes(self, epsilon=2e-3):
 
@@ -546,59 +641,6 @@ class Flooder:
         receivers__.release()
 
 
-
-    def run_N_sweep(self, NSW = 5, omega = 1., custom_Qin = None):
-        S = pf.pool.taipool.get_tpfield(
-            dtype=ti.f32, shape=(self.nx * self.ny)
-        )
-
-        zh = pf.pool.taipool.get_tpfield(
-            dtype=ti.f32, shape=(self.nx * self.ny)
-        )
-        Q_ = pf.pool.taipool.get_tpfield(
-            dtype=ti.f32, shape=(self.nx * self.ny)
-        )
-
-        zh.copy_from(self.grid.z.field)
-
-        pf.general_algorithms.util_taichi.add_B_to_A(zh.field, self.h.field)
-        cField = None
-        
-        if(custom_Qin is None):
-            pf.flow.sweeper.build_S(S.field)             # temp = S (precip * DX^2), if S changes each step
-        elif isinstance(custom_Qin, np.ndarray):
-            cField = pf.pool.taipool.get_tpfield(
-                dtype=ti.f32, shape=(self.nx * self.ny)
-            )
-            cField.from_numpy(custom_Qin.ravel())
-            pf.flow.sweeper.build_S_var(S.field,cField.field)
-        else:
-            raise ValueError('run_N_sweep custom_Qin has to be numpy so far')
-
-
-        for it in range(NSW):         # e.g., N_rb = 5–10
-            pf.flow.sweeper.sweep_sweep(self.router.Q.field, Q_.field, zh.field, S.field, omega)
-            # pf.flow.sweeper.sweep_color(self.router.Q.field, zh.field, S.field, 0, omega)  # red
-            # pf.flow.sweeper.sweep_color(self.router.Q.field, zh.field, S.field, 1, omega)  # black
-        # then do your dh/h update using the converged-ish Q
-        # pf.general_algorithms.util_taichi.add_B_to_weighted_A(
-        #     zh.field, self.grid.z.field, -1.0
-        # )
-
-        pf.flow.locarve.zh_to_z_h(zh.field, self.grid.z.field, self.h.field)
-
-        # self.h.field.copy_from(zh.field)
-
-        S.release()
-        zh.release()
-        Q_.release()
-        if not cField is None:
-            cField.release()
-
-    def run_N_analytical(self, N=2, temporal_filtering = 0.2):
-
-        for _ in range(N):
-            pf.flood.gf_hydrodynamics.graphflood_cte_man_analytical(self.grid.z.field, self.h.field, self.router.Q.field, temporal_filtering)
 
 
     def set_h(self, val):

@@ -162,3 +162,87 @@ def rake_compress_accum(
             gena.updateSrc(src, tid, iteration, flip)
 
 
+@ti.kernel
+def rake_compress_accum_loss(
+    dnr: ti.template(),
+    ndnr: ti.template(),
+    p: ti.template(),          # primary transferable mass buffer
+    a: ti.template(),          # per-cell loss coefficient in [0,1]
+    s: ti.template(),          # per-cell accumulated loss (persistent, in-place)
+    src: ti.template(),        # ping-pong state
+    dnr_: ti.template(),
+    ndnr_: ti.template(),
+    p_: ti.template(),         # alternate transferable mass buffer
+    iteration: int,
+):
+    """
+    Rake+compress with per-receiver loss.
+    Incoming pin from donor 'did' to receiver 'tid' is split at 'tid':
+        transmit = (1 - a[tid]) * pin  -> adds to receiver's transferable mass
+        loss     = a[tid]      * pin   -> atomically accumulates in s[tid]
+    Donor's transferable mass is zeroed in the destination buffer (ping-pong).
+    """
+    for tid in p:
+        flip = gena.getSrc(src, tid, iteration)
+
+        worked = False
+        donors = ti.Vector([-1, -1, -1, -1])
+        todo = ndnr[tid] if not flip else ndnr_[tid]
+        base = tid * 4
+        p_added = 0.0
+
+        i = 0
+        while i < todo and i < 4:
+            if donors[i] == -1:
+                donors[i] = dnr[base + i] if not flip else dnr_[base + i]
+            did = donors[i]
+
+            flip_donor = gena.getSrc(src, did, iteration)
+            ndnr_val = ndnr[did] if not flip_donor else ndnr_[did]
+
+            if ndnr_val <= 1:
+                if not worked:
+                    # start from receiver's current transferable mass
+                    p_added = p[tid] if not flip else p_[tid]
+                worked = True
+
+                # amount at donor available to move this sweep
+                p_val = p[did] if not flip_donor else p_[did]
+
+                # split at receiver: loss stored locally, remainder forwarded
+                ai = a[tid]
+                loss = ai * p_val
+                transmit = p_val - loss
+
+                ti.atomic_add(s[tid], loss)
+                p_added += transmit
+
+                # donor is consumed this iteration: zero on destination side
+                if flip_donor:
+                    p[did] = 0.0
+                else:
+                    p_[did] = 0.0
+
+                # compress step
+                if ndnr_val == 0:
+                    todo -= 1
+                    if todo > i and base + todo < cte.NX * cte.NY * 4:
+                        donors[i] = dnr[base + todo] if not flip else dnr_[base + todo]
+                    i -= 1
+                else:
+                    donors[i] = dnr[did * 4] if not flip_donor else dnr_[did * 4]
+            i += 1
+
+        # write receiver to destination side and update ping-pong state
+        if worked:
+            if flip:
+                ndnr[tid] = todo
+                p[tid] = p_added
+                for j in range(min(todo, 4)):
+                    dnr[base + j] = donors[j]
+            else:
+                ndnr_[tid] = todo
+                p_[tid] = p_added
+                for j in range(min(todo, 4)):
+                    dnr_[base + j] = donors[j]
+            gena.updateSrc(src, tid, iteration, flip)
