@@ -449,6 +449,31 @@ class Flooder:
             tmask.release()
 
 
+    def run_N_diffuse(self, N=100,dt = 1e-3, precip = None, vscale = 1):
+
+        ux = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        uy = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        S = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        if precip is None:
+            S.field.fill(cte.PREC)
+        elif isinstance(precip,np.ndarray):
+            S.field.from_numpy(precip)
+        else:
+            S.field.copy_from(precip)
+
+        dh = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+
+        for i in range(N):
+            # pf.flood.gf_hydrodynamics.compute_velocity_flat(self.grid.z.field, self.h.field, ux.field, uy.field, vscale)
+            # pf.flood.gf_hydrodynamics.diffuse_step_flat(self.h.field, ux.field, uy.field, S.field, k.field, kn.field, dt)
+            pf.flood.gf_hydrodynamics.run_vdb23_step5(self.grid.z.field, self.h.field, dh.field, S.field, ux.field, uy.field, dt)
+
+        ux.release()
+        uy.release()
+        S.release()
+        dh.release()
+
+
    
 
     def run_LS(self, N=1000, input_mode="constant_prec", mode=None):

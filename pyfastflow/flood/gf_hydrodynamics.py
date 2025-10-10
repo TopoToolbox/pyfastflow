@@ -862,17 +862,10 @@ def graphflood_cte_man_analytical(z: ti.template(), h:ti.template(), Q: ti.templ
             msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
 
         if(msx == 0 and msy == 0):
-            for k in range(4):  # Check all 4 neighbors
-                j = flow.neighbourer_flat.neighbour(i, k)
-                if(j == -1 or flow.neighbourer_flat.nodata(j)):
-                    continue
+            msx = 1e-2
+            msy = 1e-2
 
-                ts = ti.max(0.0, ((z[i] - z[j]) / cte.DX) if j != -1 else 0.0)
-                msx = ti.max(ts, msx) if k == 1 or k == 2 else msx
-                msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
-
-        norms = 1e-4
-        norms = ti.math.max(ti.math.sqrt(msx**2 + msy**2), norms) # if (sums > 0.) else ti.max((z[i]+h[i] - z[srecs[i]] - h[srecs[i]])/cte.DX,1e-3)
+        norms = ti.math.sqrt(msx**2 + msy**2)
             
         # Qo = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(norms)
         h[i] = (1- temporal_filtering) * h[i] + temporal_filtering * (Q[i] * cte.MANNING / ti.math.sqrt(norms) / cte.DX)**(3./5.)
@@ -915,8 +908,11 @@ def graphflood_cte_man_analytical_mask(z: ti.template(), h:ti.template(), Q: ti.
                 msx = ti.max(ts, msx) if k == 1 or k == 2 else msx
                 msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
 
-        norms = 1e-6
-        norms = ti.math.max(ti.math.sqrt(msx**2 + msy**2), norms) # if (sums > 0.) else ti.max((z[i]+h[i] - z[srecs[i]] - h[srecs[i]])/cte.DX,1e-3)
+        if(msx == 0 and msy == 0):
+            msx = 1e-3
+            msy = 1e-3
+
+        norms = ti.math.sqrt(msx**2 + msy**2)
             
         # Qo = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(norms)
         h[i] = (1- temporal_filtering) * h[i] + temporal_filtering * (Q[i] * cte.MANNING / ti.math.sqrt(norms) / cte.DX)**(3./5.)
@@ -956,3 +952,156 @@ def graphflood_get_Qo(z: ti.template(), h:ti.template(), Qo: ti.template()):
         Qo[i] = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(norms)
         
 
+@ti.func
+def nbor(i, k: ti.template()):
+    return flow.neighbourer_flat.neighbour(i, k)
+
+@ti.func
+def val_at(f: ti.template(), idx: ti.i32, self_idx: ti.i32):
+    return f[self_idx] if idx < 0 else f[idx]
+
+@ti.func
+def signf(x):
+    return ti.cast(1.0, ti.f32) if x >= 0 else ti.cast(-1.0, ti.f32)
+
+# # ----------------- velocity from -∇(z + 1/2 h^2) -----------------
+# @ti.kernel
+# def compute_velocity_flat(z: ti.template(), h: ti.template(),
+#                           ux: ti.template(), uy: ti.template(),
+#                           vscale: ti.f32):
+#     inv2dx = 0.5 / cte.DX  # dx = dy = cte.DX
+#     inv2dy = 0.5 / cte.DX
+#     nman = ti.max(cte.MANNING, 1e-6)
+
+#     for i in z:
+#         # neighbors
+#         iT = nbor(i, 0)  # top
+#         iL = nbor(i, 1)  # left
+#         iR = nbor(i, 2)  # right
+#         iB = nbor(i, 3)  # bottom
+
+#         ux[i] = vscale * 
+
+# # ----------------- conservative update of h^(5/3) -----------------
+# @ti.kernel
+# def diffuse_step_flat(h: ti.template(), ux: ti.template(), uy: ti.template(),
+#                       S: ti.template(), k: ti.template(), kn: ti.template(),
+#                       dt: ti.f32):
+#     dx = cte.DX
+#     dy = cte.DX
+
+#     # k = h^(5/3)
+#     for i in h:
+#         k[i] = ti.pow(ti.max(0.0,h[i]), 5.0 / 3.0)
+
+#     # flux divergence on faces using neighbor averages
+#     for i in h:
+#         iT = nbor(i, 0)
+#         iL = nbor(i, 1)
+#         iR = nbor(i, 2)
+#         iB = nbor(i, 3)
+
+#         # face-averaged k
+#         kR = 0.5 * (k[i] + val_at(k, iR, i))
+#         kL = 0.5 * (k[i] + val_at(k, iL, i))
+#         kB = 0.5 * (k[i] + val_at(k, iB, i))
+#         kT = 0.5 * (k[i] + val_at(k, iT, i))
+
+#         # face-averaged velocities
+#         uXR = 0.5 * (ux[i] + val_at(ux, iR, i))
+#         uXL = 0.5 * (ux[i] + val_at(ux, iL, i))
+#         uYB = 0.5 * (uy[i] + val_at(uy, iB, i))
+#         uYT = 0.5 * (uy[i] + val_at(uy, iT, i))
+
+#         # fluxes
+#         FxR = kR * uXR
+#         FxL = kL * uXL
+#         FyB = kB * uYB
+#         FyT = kT * uYT
+
+#         div = (FxR - FxL) / dx + (FyB - FyT) / dy
+#         source = ti.max(0.0, S[i])
+
+#         kn[i] = k[i] + dt * (div + source)
+
+#     # back to h, enforce non-negativity
+#     for i in h:
+#         h[i] = ti.pow(ti.max(0.0, kn[i]), 3.0 / 5.0)
+
+
+
+@ti.kernel
+def run_vdb23_step5(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.template(), ux:ti.template(), uy:ti.template(), dt:ti.f32):
+
+    for i in z:
+
+        if flow.neighbourer_flat.nodata(i):
+            continue 
+
+        for tk in range(2):
+            k = tk + 2
+            j = flow.neighbourer_flat.neighbour(i,k)
+            if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                continue
+            if(h[i] == 0 and h[j] == 0):
+                continue
+            
+            # topo gradient
+            dzdx = z[i]-z[j]
+            dzdx /= cte.DX
+            
+            # pressure head
+            dhdx = h[i]**2 - h[j]**2
+            dhdx /= 2*cte.DX
+
+            # Upwind
+            th = ti.max(h[i],h[j])
+            th = ti.max(th,0.)
+
+            if tk == 0:
+                ux[i] = ti.sqrt(ti.max(th**(1.5)/cte.MANNING * (-dzdx - dhdx),0.) )
+            else:
+                uy[i] = ti.sqrt(ti.max(th**(1.5)/cte.MANNING * (-dzdx - dhdx),0.) )
+
+    for i in h:
+        h[i] = (h[i]**(5./3.)) if h[i]> 0 else 0
+
+    for i in h:
+
+        if flow.neighbourer_flat.nodata(i):
+            continue 
+
+        divu = 0.
+
+        for tk in range(2):
+            k = tk
+            j = flow.neighbourer_flat.neighbour(i,k)
+            if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                continue
+            if(h[i] == 0 and h[j] == 0):
+                continue
+
+            tu = (ux[j] if tk==1 else uy[j])
+            th = h[i] if tu<0 else h[j]
+            divu +=  tu*th
+
+        for tk in range(2):
+            j = flow.neighbourer_flat.neighbour(i,tk+2)
+            if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                continue
+            if(h[i] == 0 and h[j] == 0):
+                continue
+
+            tu = (ux[i] if tk==0 else uy[i])
+            th = h[i] if tu>0 else h[j]
+            divu -=  tu*th
+
+        dh[i] = dt * (divu + S[i])
+
+    for i in h:
+        h[i] += dh[i]
+        
+        if(h[i]<0):
+            h[i] = 0.
+
+        h[i] = h[i]**(3./5.)
