@@ -25,6 +25,13 @@ class Heightfield3D(Layer):
         self._sphere_radius = 1.5
         self._local_arr: Optional[np.ndarray] = None
 
+        # Water visualization parameters
+        self._water_hub_name: Optional[str] = None
+        self._water_enabled = False
+        self._water_threshold = 0.01
+        self._water_vmin = 0.0
+        self._water_vmax = 1.0
+
         # GL handles / state
         self._ctx = None
         self._program = None
@@ -33,6 +40,8 @@ class Heightfield3D(Layer):
         self._ibo = None
         self._tex = None
         self._cpu = None
+        self._water_tex = None
+        self._water_cpu = None
         self.hm_nx = 512
         self.hm_ny = 512
         self.mesh_size = 4.0
@@ -64,6 +73,27 @@ class Heightfield3D(Layer):
         if self._ctx is not None and self._program is not None:
             self._generate_mesh()
 
+    # Water controls -------------------------------------------------------
+    def use_water_hub(self, tex_name: str) -> None:
+        """Bind water height texture from DataHub."""
+        self._water_hub_name = tex_name
+
+    def set_water_enabled(self, flag: bool) -> None:
+        """Enable/disable water visualization."""
+        self._water_enabled = bool(flag)
+
+    def set_water_threshold(self, v: float) -> None:
+        """Set minimum water height to display."""
+        self._water_threshold = float(v)
+
+    def set_water_vmin(self, v: float) -> None:
+        """Set minimum value for water color gradient."""
+        self._water_vmin = float(v)
+
+    def set_water_vmax(self, v: float) -> None:
+        """Set maximum value for water color gradient."""
+        self._water_vmax = float(v)
+
     # Layer interface ------------------------------------------------------
     def setup(self, ctx, hub) -> None:
         self._ctx = ctx
@@ -75,7 +105,7 @@ class Heightfield3D(Layer):
         except Exception:
             pass
         self._create_program()
-        # Bind texture source
+        # Bind terrain texture source
         if self._hub_name is not None:
             ent = hub._tex2d.get(self._hub_name)
             if ent and ent.get("tex") is not None:
@@ -92,10 +122,16 @@ class Heightfield3D(Layer):
                 self.hm_nx = int(ent["shape"][1])
                 self.hm_ny = int(ent["shape"][0])
                 self._cpu = ent.get("cpu")
+        # Bind water texture source if available
+        if self._water_hub_name is not None:
+            ent = hub._tex2d.get(self._water_hub_name)
+            if ent and ent.get("tex") is not None:
+                self._water_tex = ent["tex"]
+                self._water_cpu = ent.get("cpu")
         self._generate_mesh()
 
     def draw(self, ctx, camera) -> None:
-        # Refresh from hub and handle shape change
+        # Refresh terrain texture from hub and handle shape change
         if self._hub_name is not None and self._hub is not None:
             ent = self._hub._tex2d.get(self._hub_name)
             if ent and ent.get("tex") is not None:
@@ -106,6 +142,13 @@ class Heightfield3D(Layer):
                     self.hm_nx = int(w)
                     self.hm_ny = int(h)
                     self._generate_mesh()
+
+        # Refresh water texture from hub if enabled
+        if self._water_hub_name is not None and self._hub is not None:
+            ent = self._hub._tex2d.get(self._water_hub_name)
+            if ent and ent.get("tex") is not None:
+                self._water_tex = ent["tex"]
+                self._water_cpu = ent.get("cpu")
 
         if self._tex is None or self._vao is None or self._program is None:
             return
@@ -126,8 +169,10 @@ class Heightfield3D(Layer):
         proj[3, 2] = -1.0
         view = camera.get_view_matrix()
 
-        # Bind and set uniforms
+        # Bind textures and set uniforms
         self._tex.use(0)
+        if self._water_tex is not None and self._water_enabled:
+            self._water_tex.use(1)
         try:
             self._program['u_model'].write(np.eye(4, dtype=np.float32).T.tobytes())
             self._program['u_view'].write(view.T.astype('f4').tobytes())
@@ -141,6 +186,12 @@ class Heightfield3D(Layer):
             self._program['u_light_direction'].write(self._light.astype('f4').tobytes())
             self._program['u_min_height'] = 0.0
             self._program['u_max_height'] = float(self._height_scale)
+            # Water uniforms
+            self._program['u_water_heightmap'] = 1
+            self._program['u_water_enabled'] = 1.0 if self._water_enabled else 0.0
+            self._program['u_water_threshold'] = float(self._water_threshold)
+            self._program['u_water_vmin'] = float(self._water_vmin)
+            self._program['u_water_vmax'] = float(self._water_vmax)
             try:
                 self._program['u_hide_underside'] = 1.0
             except Exception:
@@ -238,22 +289,45 @@ class Heightfield3D(Layer):
     def _create_program(self) -> None:
         vs = """
         #version 330 core
+        // ===== VERTEX SHADER: Terrain + Water Height Displacement =====
+
+        // Vertex attributes
         in vec2 in_texcoord;
+
+        // Transform matrices
         uniform mat4 u_model;
         uniform mat4 u_view;
         uniform mat4 u_projection;
+
+        // Terrain height parameters
         uniform sampler2D u_heightmap;
         uniform float u_height_scale;
         uniform float u_sphere_mode; // >0.5 => sphere mapping
         uniform float u_sphere_radius;
         uniform float u_mesh_size_x;
         uniform float u_mesh_size_z;
+
+        // Water height parameters
+        uniform sampler2D u_water_heightmap;
+        uniform float u_water_enabled;  // >0.5 => water is active
+        uniform float u_water_threshold;
+
+        // Outputs to fragment shader
         out vec3 v_world_pos;
         out vec3 v_normal;
-        out float v_height;
+        out float v_height;      // Combined terrain + water height
+        out float v_water_depth; // Raw water depth for coloring
+
         const float PI = 3.14159265358979323846;
+
+        // Compute 3D position from UV coordinates
+        // Height texture already contains combined terrain+water (normalized on CPU)
         vec3 pos_from_uv(vec2 uv) {
+            // Sample height (already contains terrain+water if water was loaded)
             float h = texture(u_heightmap, uv).r * u_height_scale;
+
+            // SPHERE MODE: TODO - implement spherical water projection
+            // For now, sphere mode uses height on sphere surface
             if (u_sphere_mode > 0.5) {
                 float lon = (uv.x - 0.5) * 2.0 * PI;
                 float lat = (uv.y - 0.5) * PI;
@@ -262,59 +336,127 @@ class Heightfield3D(Layer):
                 float r = u_sphere_radius + h;
                 return dir * r;
             } else {
+                // FLAT MODE: standard planar terrain
                 float x = (uv.x - 0.5) * u_mesh_size_x;
                 float z = (uv.y - 0.5) * u_mesh_size_z;
                 return vec3(x, h, z);
             }
         }
+
         void main() {
             vec2 texel_size = 1.0 / textureSize(u_heightmap, 0);
+
+            // Compute positions at current vertex and neighbors for normal calculation
             vec3 p_c = pos_from_uv(in_texcoord);
             vec3 p_r = pos_from_uv(in_texcoord + vec2(texel_size.x, 0.0));
             vec3 p_l = pos_from_uv(in_texcoord - vec2(texel_size.x, 0.0));
             vec3 p_u = pos_from_uv(in_texcoord + vec2(0.0, texel_size.y));
             vec3 p_d = pos_from_uv(in_texcoord - vec2(0.0, texel_size.y));
+
+            // Compute normal from surface (already includes water if loaded)
             vec3 n = normalize(cross(p_u - p_d, p_r - p_l));
+
+            // Transform to world space
             v_world_pos = (u_model * vec4(p_c, 1.0)).xyz;
             v_normal = normalize((u_model * vec4(n, 0.0)).xyz);
+
+            // Pass height (already combined) and raw water depth for coloring
             v_height = texture(u_heightmap, in_texcoord).r * u_height_scale;
+
+            // Sample raw water depth for fragment shader coloring decisions
+            v_water_depth = 0.0;
+            if (u_water_enabled > 0.5) {
+                v_water_depth = texture(u_water_heightmap, in_texcoord).r;
+            }
+
+            // Final screen position
             gl_Position = u_projection * u_view * vec4(v_world_pos, 1.0);
         }
         """
         fs = """
         #version 330 core
+        // ===== FRAGMENT SHADER: Terrain + Water Coloring =====
+
+        // Inputs from vertex shader
         in vec3 v_world_pos;
         in vec3 v_normal;
-        in float v_height;
+        in float v_height;       // Combined terrain + water height
+        in float v_water_depth;  // Raw water depth
+
+        // Lighting and height range
         uniform vec3 u_light_direction;
         uniform float u_min_height;
         uniform float u_max_height;
         uniform float u_hide_underside;
+
+        // Water parameters
+        uniform float u_water_enabled;
+        uniform float u_water_threshold;
+        uniform float u_water_vmin;
+        uniform float u_water_vmax;
+
         out vec4 frag_color;
+
+        // Terrain elevation color gradient (green-brown-white)
         vec3 height_to_color(float normalized_height) {
-            vec3 low_color = vec3(0.2, 0.4, 0.1);
-            vec3 mid_color = vec3(0.6, 0.5, 0.3);
-            vec3 high_color = vec3(0.9, 0.9, 0.8);
+            vec3 low_color = vec3(0.2, 0.4, 0.1);   // Dark green for valleys
+            vec3 mid_color = vec3(0.6, 0.5, 0.3);   // Brown for mid-elevation
+            vec3 high_color = vec3(0.9, 0.9, 0.8);  // White for peaks
             if (normalized_height < 0.5) {
                 return mix(low_color, mid_color, normalized_height * 2.0);
             } else {
                 return mix(mid_color, high_color, (normalized_height - 0.5) * 2.0);
             }
         }
+
+        // Water depth color gradient (light blue to dark blue)
+        vec3 water_to_color(float normalized_depth) {
+            // Light blue for shallow water, dark blue for deep water
+            vec3 shallow_water = vec3(0.4, 0.7, 0.9);  // Light blue
+            vec3 deep_water = vec3(0.05, 0.2, 0.5);    // Dark blue
+            return mix(shallow_water, deep_water, normalized_depth);
+        }
+
         void main() {
             // Discard masked fragments (negative sentinel from CPU preprocessing)
             if (v_height < 0.0) {
                 discard;
             }
+
+            // Discard back faces if configured
             if (u_hide_underside > 0.5 && !gl_FrontFacing) {
                 discard;
             }
-            float normalized_height = (v_height - u_min_height) / (u_max_height - u_min_height);
-            normalized_height = clamp(normalized_height, 0.0, 1.0);
-            vec3 base_color = height_to_color(normalized_height);
+
+            // Determine base color: water or terrain
+            vec3 base_color;
+            bool is_water = false;
+
+            if (u_water_enabled > 0.5 && v_water_depth > u_water_threshold) {
+                // Water surface: use blue gradient based on water depth
+                is_water = true;
+                float depth_range = max(0.001, u_water_vmax - u_water_vmin);
+                float normalized_depth = clamp((v_water_depth - u_water_vmin) / depth_range, 0.0, 1.0);
+                base_color = water_to_color(normalized_depth);
+            } else {
+                // Terrain surface: use terrain elevation gradient
+                float normalized_height = (v_height - u_min_height) / (u_max_height - u_min_height);
+                normalized_height = clamp(normalized_height, 0.0, 1.0);
+                base_color = height_to_color(normalized_height);
+            }
+
+            // Apply directional lighting
             float n_dot_l = max(0.0, dot(normalize(v_normal), u_light_direction));
             float ambient = 0.3;
-            float lighting = ambient + (1.0 - ambient) * n_dot_l;
+            float diffuse = (1.0 - ambient) * n_dot_l;
+
+            // Water gets slightly different lighting (more reflective appearance)
+            if (is_water) {
+                ambient = 0.4;  // Brighter ambient for water
+                diffuse *= 0.8;  // Slightly reduced diffuse for smoother look
+            }
+
+            float lighting = ambient + diffuse;
             frag_color = vec4(base_color * lighting, 1.0);
         }
         """

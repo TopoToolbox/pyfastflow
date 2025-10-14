@@ -449,7 +449,7 @@ class Flooder:
             tmask.release()
 
 
-    def run_N_diffuse(self, N=100,dt = 1e-3, precip = None, vscale = 1):
+    def run_N_diffuse(self, N=100, precip = None, dt = 0.01, omega = 0.5):
 
         ux = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
         uy = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
@@ -466,12 +466,17 @@ class Flooder:
         for i in range(N):
             # pf.flood.gf_hydrodynamics.compute_velocity_flat(self.grid.z.field, self.h.field, ux.field, uy.field, vscale)
             # pf.flood.gf_hydrodynamics.diffuse_step_flat(self.h.field, ux.field, uy.field, S.field, k.field, kn.field, dt)
-            pf.flood.gf_hydrodynamics.run_vdb23_step5(self.grid.z.field, self.h.field, dh.field, S.field, ux.field, uy.field, dt)
-
+            # pf.flood.gf_hydrodynamics.run_vdb23_step5(self.grid.z.field, self.h.field, dh.field, S.field, ux.field, uy.field, dt, omega)
+            pf.flood.gf_hydrodynamics.run_BG24_dyn(self.grid.z.field, self.h.field, dh.field, S.field, ux.field, uy.field, dt, omega)
         ux.release()
         uy.release()
         S.release()
         dh.release()
+
+    def run_N_warmup(self, N=100, dt = 0.01, omega = 0.5):
+
+        for i in range(N):
+            pf.flood.gf_hydrodynamics.run_BG24_add(self.h.field, self.router.Q.field, dt, omega)
 
 
    
@@ -665,6 +670,27 @@ class Flooder:
         receivers_.release()
         receivers__.release()
 
+
+    def spread_h(self):
+        zh = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        zh_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        acc_vol = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=())
+        acc_max = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=())
+
+
+        pf.flood.gf_hydrodynamics.projected_diffuse_iter(
+            self.grid.z.field, self.h.field, zh.field, zh_.field, acc_vol.field, acc_max.field,
+            cte.DX**2,          # e.g. float(cte.DX*cte.DX)
+            tau=0.20,           # <=0.25 safe for 4-neigh
+            max_outer=200,
+            tol=1e-4,
+            use_aniso=False,
+            sigma=0.5
+        )
+        zh.release()
+        zh_.release()
+        acc_vol.release()
+        acc_max.release()
 
 
 

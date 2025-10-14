@@ -28,21 +28,40 @@ class ValueRef:
 
 
 class Panel:
-    def __init__(self, title: str, dock: str = "right"):
+    def __init__(self, title: str, dock: str = "right", collapsed: bool = False):
         self.title = title
         self.dock = dock
+        self.collapsed = collapsed
+        self._first_draw = True
         self._items: List[Tuple[str, tuple]] = []
 
+    # Section management ---------------------------------------------------
+    def begin_collapsing_header(self, label: str, default_open: bool = False) -> None:
+        """Start a collapsible section within the panel."""
+        self._items.append(("collapsing_header_begin", (label, default_open)))
+
+    def end_collapsing_header(self) -> None:
+        """End a collapsible section."""
+        self._items.append(("collapsing_header_end", ()))
+
     # Primitives -----------------------------------------------------------
-    def slider(self, label: str, value: float, vmin: float, vmax: float, log: bool = False) -> ValueRef:
+    def slider(self, label: str, value: float, vmin: float, vmax: float, log: bool = False, input_field: bool = False) -> ValueRef:
         ref = ValueRef(float(value))
-        self._items.append(("slider", (label, ref, float(vmin), float(vmax), bool(log))))
+        self._items.append(("slider", (label, ref, float(vmin), float(vmax), bool(log), bool(input_field))))
         return ref
 
-    def int_slider(self, label: str, value: int, vmin: int, vmax: int) -> ValueRef:
+    def int_slider(self, label: str, value: int, vmin: int, vmax: int, input_field: bool = False) -> ValueRef:
         ref = ValueRef(int(value))
-        self._items.append(("int_slider", (label, ref, int(vmin), int(vmax))))
+        self._items.append(("int_slider", (label, ref, int(vmin), int(vmax), bool(input_field))))
         return ref
+
+    def input_float(self, label: str, ref: ValueRef) -> None:
+        """Add a float input field linked to an existing ValueRef."""
+        self._items.append(("input_float", (label, ref)))
+
+    def input_int(self, label: str, ref: ValueRef) -> None:
+        """Add an integer input field linked to an existing ValueRef."""
+        self._items.append(("input_int", (label, ref)))
 
     def checkbox(self, label: str, value: bool = False) -> ValueRef:
         ref = ValueRef(bool(value))
@@ -56,18 +75,81 @@ class Panel:
     def _draw(self, imgui, dock_id=None):
         # Simpler: rely on ImGui's saved docking data; avoid forcing dock id
         # This mirrors the working example's behavior
+        # Set collapsed state on first draw if requested
+        if self._first_draw and self.collapsed:
+            try:
+                imgui.set_next_window_collapsed(True)
+            except Exception:
+                pass
+            self._first_draw = False
         imgui.begin(self.title)
+
+        # Track collapsing header nesting
+        header_stack = []
+
         for kind, args in list(self._items):
-            if kind == "slider":
-                label, ref, vmin, vmax, log = args
+            # Check if we're inside a collapsed header
+            if header_stack and not header_stack[-1]:
+                # Skip items inside collapsed sections
+                if kind == "collapsing_header_end":
+                    header_stack.pop()
+                continue
+
+            if kind == "collapsing_header_begin":
+                label, default_open = args
+                # Set default state on first draw
+                if self._first_draw:
+                    try:
+                        imgui.set_next_item_open(default_open)
+                    except Exception:
+                        pass
+                is_open = imgui.collapsing_header(label)[0]
+                header_stack.append(is_open)
+            elif kind == "collapsing_header_end":
+                if header_stack:
+                    header_stack.pop()
+            elif kind == "slider":
+                label, ref, vmin, vmax, log, input_field = args
                 val = float(ref.value)
                 changed, new_val = imgui.slider_float(label, val, vmin, vmax, '%.3f', 1.0 if not log else 0.0)
                 if changed:
                     ref.value = float(new_val)
+                # Add input field on same line if requested
+                if input_field:
+                    imgui.same_line()
+                    imgui.push_item_width(100)  # Fixed width for input field
+                    # Use current ref.value (which might have just been updated by slider)
+                    changed_input, new_input = imgui.input_float(f"##{label}_input", float(ref.value), 0.0, 0.0, '%.3f')
+                    imgui.pop_item_width()
+                    if changed_input:
+                        # Clamp to slider range
+                        ref.value = float(max(vmin, min(vmax, new_input)))
             elif kind == "int_slider":
-                label, ref, vmin, vmax = args
+                label, ref, vmin, vmax, input_field = args
                 val = int(ref.value)
                 changed, new_val = imgui.slider_int(label, val, vmin, vmax)
+                if changed:
+                    ref.value = int(new_val)
+                # Add input field on same line if requested
+                if input_field:
+                    imgui.same_line()
+                    imgui.push_item_width(100)  # Fixed width for input field
+                    # Use current ref.value (which might have just been updated by slider)
+                    changed_input, new_input = imgui.input_int(f"##{label}_input", int(ref.value))
+                    imgui.pop_item_width()
+                    if changed_input:
+                        # Clamp to slider range
+                        ref.value = int(max(vmin, min(vmax, new_input)))
+            elif kind == "input_float":
+                label, ref = args
+                val = float(ref.value)
+                changed, new_val = imgui.input_float(label, val, 0.0, 0.0, '%.3f')
+                if changed:
+                    ref.value = float(new_val)
+            elif kind == "input_int":
+                label, ref = args
+                val = int(ref.value)
+                changed, new_val = imgui.input_int(label, val)
                 if changed:
                     ref.value = int(new_val)
             elif kind == "checkbox":
@@ -93,8 +175,8 @@ class UI:
     def enable_docking(self, flag: bool) -> None:
         self._docking = bool(flag)
 
-    def add_panel(self, title: str, dock: str = "right") -> Panel:
-        p = Panel(title, dock)
+    def add_panel(self, title: str, dock: str = "right", collapsed: bool = False) -> Panel:
+        p = Panel(title, dock, collapsed)
         self._panels.append(p)
         return p
 

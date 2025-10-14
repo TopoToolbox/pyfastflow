@@ -160,22 +160,23 @@ def sweep_sweep(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.te
             continue
             
         sums_j = 0.
-        for k in range(4):
-            j = flow.neighbourer_flat.neighbour(i, k)
-            if j == -1 or flow.neighbourer_flat.nodata(j): 
-                continue
-            sums_j += slope_pos(zh[i],zh[j])
-
-        if sums_j > 0.0:
+        while sums_j == 0:
             for k in range(4):
                 j = flow.neighbourer_flat.neighbour(i, k)
                 if j == -1 or flow.neighbourer_flat.nodata(j): 
                     continue
-                ti.atomic_add(Q_[j], slope_pos(zh[i],zh[j]) / sums_j * Q[i])
+                sums_j += slope_pos(zh[i],zh[j])
 
-        # if has_hz == False:
-        else:
-            zh[i] += 1e-3 + ti.random() * 1e-3
+            if sums_j > 0.0:
+                for k in range(4):
+                    j = flow.neighbourer_flat.neighbour(i, k)
+                    if j == -1 or flow.neighbourer_flat.nodata(j): 
+                        continue
+                    ti.atomic_add(Q_[j], slope_pos(zh[i],zh[j]) / sums_j * Q[i])
+
+            # if has_hz == False:
+            else:
+                zh[i] += 1e-3
 
         # Optional SOR to converge faster (omega in (1,2))
         # omega = 0.2

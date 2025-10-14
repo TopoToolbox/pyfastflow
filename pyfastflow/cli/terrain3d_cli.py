@@ -37,14 +37,22 @@ def _read_array(path: str) -> np.ndarray:
     return arr
 
 
-def _make_height_from_raw(raw: np.ndarray, threshold: float) -> np.ndarray:
+def _make_height_from_raw(raw: np.ndarray, threshold: float, water: Optional[np.ndarray] = None) -> np.ndarray:
     """Build a normalized height map from raw values, masking values < threshold.
 
+    - If water is provided, it's added to terrain BEFORE normalization
     - Values < threshold are tagged as masked and mapped to a small negative sentinel
       so they can be discarded in the fragment shader (keeps mesh intact).
     - Normalization [0,1] is computed from finite, unmasked values only.
     """
     a = np.asarray(raw, dtype=np.float32)
+
+    # Add water to terrain if provided (BEFORE normalization)
+    if water is not None:
+        water_arr = np.asarray(water, dtype=np.float32)
+        if water_arr.shape == a.shape:
+            a = a + water_arr
+
     finite = np.isfinite(a)
     mask_valid = finite & (a >= float(threshold))
     if not np.any(mask_valid):
@@ -97,6 +105,7 @@ def cli(path: Optional[str], perlin: bool, mesh: int) -> None:
 
     # Resolve data (keep raw array)
     arr_raw: Optional[np.ndarray] = None
+    water_raw: Optional[np.ndarray] = None  # Water height data
     if perlin:
         import pyfastflow as pff
         arr = pff.noise.perlin_noise(512, 512, frequency=1.0, octaves=6, persistence=0.6, seed=42).astype(np.float32, copy=False)
@@ -142,12 +151,15 @@ def cli(path: Optional[str], perlin: bool, mesh: int) -> None:
     def init(app_inst):
         app_inst.data.tex2d("height", height_img if height_img is not None else np.zeros((2, 2), dtype=np.float32), fmt="R32F")
         layer.use_hub("height")
+        # Initialize empty water texture (will be populated when user loads water data)
+        app_inst.data.tex2d("water", np.zeros_like(height_img if height_img is not None else np.zeros((2, 2), dtype=np.float32)), fmt="R32F")
+        layer.use_water_hub("water")
 
     app.on_init(init)
 
     # UI
     p = app.ui.add_panel("Display", dock="right")
-    z = p.slider("Z exaggeration", 0.5, 0.01, 5.0)
+    z = p.slider("Z exaggeration", 0.5, 0.01, 5.0, input_field=True)
     z.subscribe(layer.set_height_scale)
     p.checkbox("Sphere mode", False).subscribe(layer.set_sphere_mode)
     # Reset camera to default
@@ -160,7 +172,7 @@ def cli(path: Optional[str], perlin: bool, mesh: int) -> None:
     p.button("Reset camera", _reset_camera)
 
     # Mesh resolution control
-    mesh_ref = p.int_slider("Mesh max dim", int(mesh), 16, 8192)
+    mesh_ref = p.int_slider("Mesh max dim", int(mesh), 16, 8192, input_field=True)
     def _rebuild():
         layer.set_mesh_max_dim(int(mesh_ref.value))
     p.button("Rebuild mesh", _rebuild)
@@ -169,25 +181,26 @@ def cli(path: Optional[str], perlin: bool, mesh: int) -> None:
     # Slider goes from safe finite raw min to max
     tmin = float(r_min)
     tmax = float(r_max if r_max > r_min else (r_min + 1.0))
-    thr_ref = p.slider("Mask below (raw)", float(default_thresh), tmin, tmax)
+    thr_ref = p.slider("Mask below (raw)", float(default_thresh), tmin, tmax, input_field=True)
 
     def _apply_mask():
         if arr_raw is None:
             return
-        new_h = _make_height_from_raw(arr_raw, float(thr_ref.value))
+        # Recompute height with current water if present
+        new_h = _make_height_from_raw(arr_raw, float(thr_ref.value), water=water_raw)
         app.data.update_tex("height", new_h)
 
     p.button("Update mask", _apply_mask)
 
     if perlin:
         # Perlin noise parameters
-        fx = p.slider("Frequency", 1.0, 0.05, 8.0)
-        oc = p.int_slider("Octaves", 6, 1, 12)
-        pe = p.slider("Persistence", 0.6, 0.1, 0.99)
-        sd = p.int_slider("Seed", 42, 0, 99999)
+        fx = p.slider("Frequency", 1.0, 0.05, 8.0, input_field=True)
+        oc = p.int_slider("Octaves", 6, 1, 12, input_field=True)
+        pe = p.slider("Persistence", 0.6, 0.1, 0.99, input_field=True)
+        sd = p.int_slider("Seed", 42, 0, 99999, input_field=True)
         # Dimensions controls (texture size)
-        w_ref = p.int_slider("Noise width", int(arr_raw.shape[1]), 32, 8192)
-        h_ref = p.int_slider("Noise height", int(arr_raw.shape[0]), 32, 8192)
+        w_ref = p.int_slider("Noise width", int(arr_raw.shape[1]), 32, 8192, input_field=True)
+        h_ref = p.int_slider("Noise height", int(arr_raw.shape[0]), 32, 8192, input_field=True)
 
         import pyfastflow as pff
 
@@ -203,9 +216,9 @@ def cli(path: Optional[str], perlin: bool, mesh: int) -> None:
             vmin = float(np.min(new))
             vmax = float(np.max(new))
             new_raw = (new - vmin) / max(1e-6, (vmax - vmin))
-            # Update arr_raw reference and reapply mask
+            # Update arr_raw reference and reapply mask with water if present
             arr_raw = new_raw
-            masked = _make_height_from_raw(arr_raw, float(thr_ref.value))
+            masked = _make_height_from_raw(arr_raw, float(thr_ref.value), water=water_raw)
             app.data.update_tex("height", masked)
 
         p.button("Regenerate Perlin", _regen)
@@ -235,6 +248,90 @@ def cli(path: Optional[str], perlin: bool, mesh: int) -> None:
                 pass
 
         p.button("Save .npy", _save_npy)
+
+    # ===== Water Visualization Section (collapsible within Display panel) =====
+    p.begin_collapsing_header("Water", default_open=False)
+
+    # Water enable/disable toggle (disabled by default)
+    water_enabled_ref = p.checkbox("Enable water", False)
+
+    def _on_water_enabled_changed(enabled):
+        layer.set_water_enabled(enabled)
+        # Recompute height texture with or without water
+        if arr_raw is not None:
+            if enabled and water_raw is not None:
+                # Combine terrain + water
+                combined_height = _make_height_from_raw(arr_raw, float(thr_ref.value), water=water_raw)
+            else:
+                # Terrain only
+                combined_height = _make_height_from_raw(arr_raw, float(thr_ref.value), water=None)
+            app.data.update_tex("height", combined_height)
+
+    water_enabled_ref.subscribe(_on_water_enabled_changed)
+
+    # Load water data button
+    def _load_water():
+        nonlocal water_raw
+        water_path = _file_dialog()
+        if not water_path:
+            return
+        try:
+            # Load water data
+            water_candidate = _read_array(water_path)
+
+            # Validate dimensions match terrain
+            if arr_raw is None:
+                return
+            if water_candidate.shape != arr_raw.shape:
+                print(f"Error: Water dimensions {water_candidate.shape} don't match terrain {arr_raw.shape}")
+                return
+
+            # Store water data
+            water_raw = water_candidate
+
+            # Recompute height texture with terrain + water combined BEFORE normalization
+            combined_height = _make_height_from_raw(arr_raw, float(thr_ref.value), water=water_raw)
+            app.data.update_tex("height", combined_height)
+
+            # Upload raw water separately for coloring
+            app.data.update_tex("water", water_raw)
+
+            # Enable water visualization by default after loading
+            water_enabled_ref.value = True
+            layer.set_water_enabled(True)
+
+            # Update vmin/vmax sliders with reasonable defaults based on water data
+            finite = np.isfinite(water_raw)
+            if np.any(finite):
+                w_min = float(np.min(water_raw[finite]))
+                w_max = float(np.max(water_raw[finite]))
+                if w_max > w_min:
+                    water_vmin_ref.value = w_min
+                    water_vmax_ref.value = w_max
+                    layer.set_water_vmin(w_min)
+                    layer.set_water_vmax(w_max)
+                    # Set threshold to something small but visible
+                    water_thresh_ref.value = max(w_min, 0.01)
+                    layer.set_water_threshold(water_thresh_ref.value)
+
+            print(f"Water data loaded: {water_raw.shape}, range [{w_min:.3f}, {w_max:.3f}]")
+        except Exception as e:
+            print(f"Failed to load water data: {e}")
+
+    p.button("Load water file", _load_water)
+
+    # Water threshold control
+    water_thresh_ref = p.slider("Water threshold", 0.01, 0.0, 1.0, input_field=True)
+    water_thresh_ref.subscribe(layer.set_water_threshold)
+
+    # Color mapping range controls
+    water_vmin_ref = p.slider("Water vmin", 0.0, 0.0, 10.0, input_field=True)
+    water_vmin_ref.subscribe(layer.set_water_vmin)
+
+    water_vmax_ref = p.slider("Water vmax", 1.0, 0.0, 10.0, input_field=True)
+    water_vmax_ref.subscribe(layer.set_water_vmax)
+
+    p.end_collapsing_header()
 
     app.run()
 

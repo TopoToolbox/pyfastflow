@@ -1031,7 +1031,7 @@ def signf(x):
 
 
 @ti.kernel
-def run_vdb23_step5(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.template(), ux:ti.template(), uy:ti.template(), dt:ti.f32):
+def run_vdb23_step5(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.template(), ux:ti.template(), uy:ti.template(), dt:ti.f32, omega:ti.f32):
 
     for i in z:
 
@@ -1055,16 +1055,111 @@ def run_vdb23_step5(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.tem
             dhdx /= 2*cte.DX
 
             # Upwind
-            th = ti.max(h[i],h[j])
+            # th = ti.max(h[i],h[j])
+            th = ti.math.max(z[i] + h[i], z[j] + h[j]) - ti.math.max(
+                    z[j], z[i]
+                )
             th = ti.max(th,0.)
 
             if tk == 0:
-                ux[i] = ti.sqrt(ti.max(th**(1.5)/cte.MANNING * (-dzdx - dhdx),0.) )
+                tu = th**(1.5)/cte.MANNING * (dzdx + dhdx)
+                ux[i] = (1-omega) * ux[i] + omega * ti.math.sign(tu)*ti.sqrt(ti.abs(tu) )
             else:
-                uy[i] = ti.sqrt(ti.max(th**(1.5)/cte.MANNING * (-dzdx - dhdx),0.) )
+                tu = th**(1.5)/cte.MANNING * (dzdx + dhdx)
+                uy[i] = (1-omega) * uy[i] + omega * ti.math.sign(tu)*ti.sqrt(ti.abs(tu) )
 
     for i in h:
         h[i] = (h[i]**(5./3.)) if h[i]> 0 else 0
+
+    for i in h:
+
+        if flow.neighbourer_flat.nodata(i):
+            continue 
+
+        divu = 0.
+
+        maxu = 0.
+
+        for tk in range(2):
+            k = tk
+            j = flow.neighbourer_flat.neighbour(i,k)
+            if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                continue
+            if(h[i] == 0 and h[j] == 0):
+                continue
+
+            tu = (ux[j] if tk==1 else uy[j])
+            th = h[i] if tu<0 else h[j]
+            # th = ti.math.max(z[i] + h[i], z[j] + h[j]) - ti.math.max(
+            #         z[j], z[i]
+            #     )
+            th = ti.max(0., th)
+            divu +=  tu*th
+            maxu = ti.max(maxu, ti.abs(tu))
+
+        for tk in range(2):
+            j = flow.neighbourer_flat.neighbour(i,tk+2)
+            if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                continue
+            if(h[i] == 0 and h[j] == 0):
+                continue
+
+            tu = (ux[i] if tk==0 else uy[i])
+            th = h[i] if tu>0 else h[j]
+            # th = ti.math.max(z[i] + h[i], z[j] + h[j]) - ti.math.max(
+            #         z[j], z[i]
+                # )
+            th = ti.max(0., th)
+            divu -=  tu*th
+            maxu = ti.max(maxu, ti.abs(tu))
+
+        # dt = cfl * cte.DX/(maxu + 1e-3)
+        dh[i] = dt * (divu + S[i])
+
+    for i in h:
+        h[i] += dh[i]
+        
+        if(h[i]<0):
+            h[i] = 0.
+
+        h[i] = h[i]**(3./5.)
+
+
+@ti.kernel
+def run_BG24_dyn(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.template(), qx:ti.template(), qy:ti.template(), dt:ti.f32, omega:ti.f32):
+
+    for i in z:
+
+        if flow.neighbourer_flat.nodata(i):
+            continue 
+
+        for tk in range(2):
+            k = tk + 2
+            j = flow.neighbourer_flat.neighbour(i,k)
+            if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                continue
+            if(h[i] == 0 and h[j] == 0):
+                continue
+            
+            # topo gradient
+            dzdx = (z[i]+h[i])-(z[j]+h[j])
+            dzdx /= cte.DX
+            
+
+            # Upwind
+            th = ti.max(h[i],h[j])
+            # th = ti.math.max(z[i] + h[i], z[j] + h[j]) - ti.math.max(
+            #         z[j], z[i]
+            #     )
+            th = ti.max(th,0.)
+
+            if tk == 0:
+                tq = th**(5./3.)/cte.MANNING * ti.math.sqrt(ti.abs(dzdx))
+                qx[i] = ti.math.sign(dzdx)*ti.abs(tq)
+            else:
+                tq = th**(5./3.)/cte.MANNING * ti.math.sqrt(ti.abs(dzdx))
+                qy[i] = ti.math.sign(dzdx)*ti.abs(tq)
+
 
     for i in h:
 
@@ -1081,9 +1176,8 @@ def run_vdb23_step5(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.tem
             if(h[i] == 0 and h[j] == 0):
                 continue
 
-            tu = (ux[j] if tk==1 else uy[j])
-            th = h[i] if tu<0 else h[j]
-            divu +=  tu*th
+            tq = (qx[j] if tk==1 else qy[j])
+            divu +=  tq
 
         for tk in range(2):
             j = flow.neighbourer_flat.neighbour(i,tk+2)
@@ -1092,16 +1186,236 @@ def run_vdb23_step5(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.tem
             if(h[i] == 0 and h[j] == 0):
                 continue
 
-            tu = (ux[i] if tk==0 else uy[i])
-            th = h[i] if tu>0 else h[j]
-            divu -=  tu*th
+            tq = (qx[i] if tk==0 else qy[i])
+            divu -=  tq
 
-        dh[i] = dt * (divu + S[i])
+        dh[i] = dt * (divu/cte.DX + S[i])
 
     for i in h:
-        h[i] += dh[i]
+        h[i] = (1-omega) * h[i] + omega * (h[i] + dh[i])
         
         if(h[i]<0):
             h[i] = 0.
 
-        h[i] = h[i]**(3./5.)
+
+@ti.kernel
+def run_BG24_add(h:ti.template(), Qin:ti.template(), dt:ti.f32, omega:ti.f32):
+
+    for i in h:
+
+        if flow.neighbourer_flat.nodata(i):
+            continue 
+
+        h[i] = (1-omega) * h[i] + omega* dt * Qin[i]/(cte.DX**2)
+        
+
+
+
+
+
+
+
+        
+
+
+
+
+
+
+
+
+
+
+
+# ---------------- Projection-diffusion ----------------
+
+@ti.kernel
+def init_eta(eta: ti.template(), z: ti.template(), h: ti.template()):
+    for i in z:
+        eta[i] = z[i] + h[i]
+
+@ti.kernel
+def copy_field(dst: ti.template(), src: ti.template()):
+    for i in src:
+        dst[i] = src[i]
+
+@ti.kernel
+def project_floor(eta: ti.template(), z: ti.template()):
+    for i in z:
+        if flow.neighbourer_flat.nodata(i):
+            continue
+        eta[i] = ti.max(eta[i], z[i])
+
+@ti.kernel
+def compute_h_from_eta(h: ti.template(), eta: ti.template(), z: ti.template()):
+    for i in z:
+        if flow.neighbourer_flat.nodata(i):
+            h[i] = 0.0
+        else:
+            h[i] = ti.max(0.0, eta[i] - z[i])
+
+@ti.kernel
+def max_abs_diff(a: ti.template(), b: ti.template(), acc_max: ti.template()):
+    acc_max[None] = 0.0
+    for i in a:
+        if flow.neighbourer_flat.nodata(i):
+            continue
+        acc_max[None] = ti.max(acc_max[None], ti.abs(a[i] - b[i]))
+
+@ti.kernel
+def volume_shifted(eta: ti.template(), z: ti.template(),
+                   c: ti.f32, acc_vol: ti.template(), cell_area: ti.f64):
+    acc_vol[None] = 0.0
+    for i in z:
+        if flow.neighbourer_flat.nodata(i):
+            continue
+        acc_vol[None] += cell_area * ti.max(0.0, eta[i] + c - z[i])
+
+@ti.kernel
+def apply_shift_and_project(eta: ti.template(), z: ti.template(), c: ti.f32):
+    for i in z:
+        if flow.neighbourer_flat.nodata(i):
+            continue
+        eta[i] = ti.max(z[i], eta[i] + c)
+
+@ti.kernel
+def diffuse_rb_step(eta: ti.template(), z: ti.template(),
+                    parity: ti.i32, tau: ti.f32):
+    for i in z:
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+        iy, ix = flow.neighbourer_flat.rc_from_i(i)
+        if ((ix + iy) & 1) != parity:
+            continue
+        lap = 0.0
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j == -1 or flow.neighbourer_flat.nodata(j):
+                continue
+            lap += (eta[j] - eta[i])
+        eta[i] = eta[i] + tau * lap  # explicit on this color
+
+@ti.kernel
+def diffuse_rb_step_aniso(eta: ti.template(), z: ti.template(),
+                          parity: ti.i32, tau: ti.f32, sigma: ti.f32):
+    for i in z:
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+        iy, ix = flow.neighbourer_flat.rc_from_i(i)
+        if ((ix + iy) & 1) != parity:
+            continue
+        num = 0.0
+        den = 0.0
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j == -1 or flow.neighbourer_flat.nodata(j):
+                continue
+            s = ti.abs((z[j] - z[i]) / cte.DX)  # slope proxy
+            w = ti.exp(-s / ti.max(1e-6, sigma))
+            num += w * (eta[j] - eta[i])
+            den += w
+        if den > 0:
+            eta[i] = eta[i] + tau * num  # den absorbed by tau choice
+
+# ---------------- host helpers (no new fields) ----------------
+
+def _match_volume_inplace(eta, z, acc_vol, cell_area, V_target, iters=24):
+    """Find c s.t. sum max(eta+c - z,0)*area == V_target. Bisection on c."""
+    volume_shifted(eta, z, 0.0, acc_vol, cell_area)
+    V0 = float(acc_vol[None])
+    if abs(V0 - V_target) < 1e-12:
+        return
+
+    # bracket
+    c_lo, c_hi = 0.0, 0.0
+    if V0 > V_target:  # need to lower
+        step = -max(1.0, 0.5 * (V0 - V_target) / cell_area)
+        while True:
+            c_lo += step
+            volume_shifted(eta, z, c_lo, acc_vol, cell_area)
+            if acc_vol[None] <= V_target or abs(c_lo) > 1e6:
+                break
+    else:  # raise
+        step = max(1.0, 0.5 * (V_target - V0) / cell_area)
+        while True:
+            c_hi += step
+            volume_shifted(eta, z, c_hi, acc_vol, cell_area)
+            if acc_vol[None] >= V_target or abs(c_hi) > 1e6:
+                break
+
+    if c_lo > c_hi:
+        c_lo, c_hi = c_hi, c_lo
+
+    # bisection
+    for _ in range(iters):
+        c_mid = 0.5 * (c_lo + c_hi)
+        volume_shifted(eta, z, c_mid, acc_vol, cell_area)
+        if acc_vol[None] < V_target:
+            c_lo = c_mid
+        else:
+            c_hi = c_mid
+
+    c_final = 0.5 * (c_lo + c_hi)
+    apply_shift_and_project(eta, z, c_final)
+
+# ---------------- main APIs (all fields passed in) ----------------
+
+def projected_diffuse_iter(
+    z, h, eta, eta_prev, acc_vol, acc_max,
+    cell_area,          # e.g. float(cte.DX*cte.DX)
+    tau=0.20,           # <=0.25 safe for 4-neigh
+    max_outer=200,
+    tol=1e-4,
+    use_aniso=False,
+    sigma=0.5
+):
+    """Iterative projected diffusion with exact mass every outer step."""
+    init_eta(eta, z, h)
+    volume_shifted(eta, z, 0.0, acc_vol, cell_area)
+    V_target = float(acc_vol[None])
+
+    copy_field(eta_prev, eta)
+
+    for _ in range(max_outer):
+        if use_aniso:
+            diffuse_rb_step_aniso(eta, z, 0, tau, sigma)
+            diffuse_rb_step_aniso(eta, z, 1, tau, sigma)
+        else:
+            diffuse_rb_step(eta, z, 0, tau)
+            diffuse_rb_step(eta, z, 1, tau)
+
+        project_floor(eta, z)
+        _match_volume_inplace(eta, z, acc_vol, cell_area, V_target)
+
+        max_abs_diff(eta, eta_prev, acc_max)
+        if float(acc_max[None]) < tol:
+            break
+        copy_field(eta_prev, eta)
+
+    compute_h_from_eta(h, eta, z)
+
+def one_shot_smooth(
+    z, h, eta, acc_vol, acc_max,
+    *,
+    cell_area,          # e.g. float(cte.DX*cte.DX)
+    k_smooth=6,
+    tau=0.20,
+    use_aniso=False,
+    sigma=0.5
+):
+    """K diffusion sweeps, one projection, exact mass match."""
+    init_eta(eta, z, h)
+    volume_shifted(eta, z, 0.0, acc_vol, cell_area)
+    V_target = float(acc_vol[None])
+
+    for _ in range(k_smooth):
+        if use_aniso:
+            diffuse_rb_step_aniso(eta, z, 0, tau, sigma)
+            diffuse_rb_step_aniso(eta, z, 1, tau, sigma)
+        else:
+            diffuse_rb_step(eta, z, 0, tau)
+            diffuse_rb_step(eta, z, 1, tau)
+
+    project_floor(eta, z)
+    _match_volume_inplace(eta, z, acc_vol, cell_area, V_target)
+    compute_h_from_eta(h, eta, z)
