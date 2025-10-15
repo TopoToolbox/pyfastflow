@@ -64,7 +64,7 @@ class FlowRouter:
         self.lakeflow = lakeflow  # Enable depression handling
 
         # Flow accumulation fields (primary and ping-pong buffer)
-        self.Q = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        self.Q = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
 
         # Receiver field - downstream flow direction for each node
         self.receivers = pf.pool.taipool.get_tpfield(
@@ -160,7 +160,7 @@ class FlowRouter:
         receivers__ = pf.pool.taipool.get_tpfield(
             dtype=ti.i32, shape=(self.nx * self.ny)
         )
-        z_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        z_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
         is_border = pf.pool.taipool.get_tpfield(dtype=ti.u1, shape=(self.nx * self.ny))
         outlet = pf.pool.taipool.get_tpfield(dtype=ti.i64, shape=(self.nx * self.ny))
         basin_saddle = pf.pool.taipool.get_tpfield(
@@ -247,7 +247,7 @@ class FlowRouter:
             dtype=ti.i32, shape=(self.nx * self.ny * 4)
         )
         ndonors_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx * self.ny))
-        Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        Q_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
 
         # Initialize arrays for rake-compress algorithm
         ndonors.field.fill(0)  # Reset donor counts
@@ -304,7 +304,7 @@ class FlowRouter:
             dtype=ti.i32, shape=(self.nx * self.ny * 4)
         )
         ndonors_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx * self.ny))
-        Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        Q_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
 
         # Initialize arrays for rake-compress algorithm
         ndonors.field.fill(0)  # Reset donor counts
@@ -366,7 +366,7 @@ class FlowRouter:
         Author: B.G.
         """
         # Get temporary accumulation field
-        fullQ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        fullQ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
         fullQ.field.fill(0.0)
 
         # Calculate number of iterations needed (log₂ of grid size)
@@ -382,7 +382,7 @@ class FlowRouter:
             dtype=ti.i32, shape=(self.nx * self.ny * 4)
         )
         ndonors_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx * self.ny))
-        Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        Q_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
 
         for __ in range(N):
             self.compute_stochastic_receivers()
@@ -434,7 +434,7 @@ class FlowRouter:
         Author: B.G.
         """
         # Get temporary accumulation field
-        fullQ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        fullQ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
         fullQ.field.fill(0.0)
         done_once = False
 
@@ -451,7 +451,7 @@ class FlowRouter:
             dtype=ti.i32, shape=(self.nx * self.ny * 4)
         )
         ndonors_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx * self.ny))
-        Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        Q_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
     
         for __ in range(N):
             self.compute_stochastic_receivers()
@@ -543,8 +543,8 @@ class FlowRouter:
         # Allocate temporary fields from pool for affine transform parameters
         P = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(N,))      # Current parent pointers
         P.copy_from(self.receivers)
-        A_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))     # Next iteration coefficients
-        B_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(N,))     # Next iteration offsets
+        A_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(N,))     # Next iteration coefficients
+        B_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(N,))     # Next iteration offsets
         P_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(N,))     # Next iteration pointers
 
         # Extract taichi fields from tpfield wrappers for kernel calls

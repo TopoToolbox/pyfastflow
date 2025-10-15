@@ -16,6 +16,7 @@ import math
 import numpy as np
 
 import pyfastflow as pf
+from pyfastflow import constants as cte
 
 
 def compute_hillshade(
@@ -76,7 +77,7 @@ def _compute_single_direction(grid, altitude_deg, azimuth_deg, z_factor):
     azimuth_rad = math.radians(azimuth_deg)
 
     # Get temporary hillshade field from pool
-    with pf.pool.temp_field(ti.f32, (grid.nx * grid.ny,)) as hillshade_field:
+    with pf.pool.temp_field(cte.FLOAT_TYPE_TI, (grid.nx * grid.ny,)) as hillshade_field:
         # Compute hillshading using vectorized kernel
         hs.hillshade_vectorized(
             grid.z.field, hillshade_field.field, zenith_rad, azimuth_rad, z_factor
@@ -116,10 +117,10 @@ def _compute_multidirectional(grid, altitude_deg, z_factor, azimuths_deg, weight
     zenith_rad = math.radians(90.0 - altitude_deg)
 
     # Initialize result array
-    result = np.zeros(grid.rshp, dtype=np.float32)
+    result = np.zeros(grid.rshp, dtype=cte.FLOAT_TYPE_NP)
 
     # Get temporary hillshade field from pool for each direction
-    with pf.pool.temp_field(ti.f32, (grid.nx * grid.ny,)) as hillshade_field:
+    with pf.pool.temp_field(cte.FLOAT_TYPE_TI, (grid.nx * grid.ny,)) as hillshade_field:
         # Compute hillshading for each azimuth direction
         for azimuth_deg, weight in zip(azimuths_deg, weights):
             azimuth_rad = math.radians(azimuth_deg)

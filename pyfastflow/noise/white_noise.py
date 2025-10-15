@@ -10,10 +10,11 @@ Author: B.G.
 import taichi as ti
 import numpy as np
 from .. import pool
+from .. import constants as cte
 
 
 @ti.kernel
-def white_noise_kernel(noise_field: ti.template(), amplitude: ti.f32, seed: ti.i32):
+def white_noise_kernel(noise_field: ti.template(), amplitude: cte.FLOAT_TYPE_TI, seed: ti.i32):
     """
     Generate white noise in a Taichi field.
     
@@ -28,7 +29,7 @@ def white_noise_kernel(noise_field: ti.template(), amplitude: ti.f32, seed: ti.i
     # Note: Taichi seeds the random generator globally, per-element seeding not supported in struct for
     for j, i in noise_field:
         # Generate uniform random value in [-amplitude, amplitude]
-        noise_field[j, i] = (ti.random(ti.f32) - 0.5) * 2.0 * amplitude
+        noise_field[j, i] = (ti.random(cte.FLOAT_TYPE_TI) - 0.5) * 2.0 * amplitude
 
 
 def white_noise(nx: int, ny: int, amplitude: float = 1.0, seed: int = 42, return_field: bool = False):
@@ -57,7 +58,7 @@ def white_noise(nx: int, ny: int, amplitude: float = 1.0, seed: int = 42, return
         # Get Taichi field instead of numpy array
         noise_field = white_noise(100, 100, return_field=True)
     """
-    noise_field = pool.get_temp_field(ti.f32, (ny, nx))
+    noise_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (ny, nx))
     
     # Note: Taichi random state is global, seeding happens at ti.init() level
     white_noise_kernel(noise_field.field, amplitude, seed)

@@ -16,6 +16,7 @@ import numpy as np
 import taichi as ti
 
 from .. import pool
+from .. import constants as cte
 
 
 # Boundary handling modes
@@ -54,14 +55,14 @@ def _resolve_index(i: ti.i32, n: ti.i32, mode: ti.i32) -> ti.i32:
 
 
 @ti.func
-def _rand01(seed: ti.i32, idx: ti.i32) -> ti.f32:
+def _rand01(seed: ti.i32, idx: ti.i32) -> cte.FLOAT_TYPE_TI:
     x = ti.u32(idx) + ti.u32(seed)
     x = (x ^ 61) ^ (x >> 16)
     x = x + (x << 3)
     x = x ^ (x >> 4)
     x = x * 0x27D4EB2D
     x = x ^ (x >> 15)
-    return ti.cast(x, ti.f32) / 4294967295.0
+    return ti.cast(x, cte.FLOAT_TYPE_TI) / 4294967295.0
 
 
 @ti.func
@@ -139,7 +140,7 @@ def double_resolution_kernel(
     target_field: ti.template(),
     nx: ti.i32,
     ny: ti.i32,
-    noise_amplitude: ti.f32,
+    noise_amplitude: cte.FLOAT_TYPE_TI,
     boundary_mode: ti.i32,
     seed: ti.i32,
 ):
@@ -271,12 +272,12 @@ def double_resolution(
     boundary_mode = boundary_map[boundary]
 
     # Create source field and copy data
-    source_field = pool.get_temp_field(ti.f32, (ny * nx,))
+    source_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (ny * nx,))
     source_field.field.from_numpy(data_np)
 
     # Create target field for upscaled result
     target_size = (2 * ny) * (2 * nx)
-    target_field = pool.get_temp_field(ti.f32, (target_size,))
+    target_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (target_size,))
 
     # Execute upscaling kernel
     seed_val = 0 if seed is None else seed

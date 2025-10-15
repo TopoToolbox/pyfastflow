@@ -43,7 +43,7 @@ def rcv2donor(rcv: ti.template(), dnr: ti.template(), ndnr: ti.template()):
 
 @ti.kernel
 def init_affine_weights(
-    dnr: ti.template(), ndnr: ti.template(), w: ti.template(), a: ti.f32
+    dnr: ti.template(), ndnr: ti.template(), w: ti.template(), a: cte.FLOAT_TYPE_TI
 ):
     """
     Initialize per-edge weights for affine downstream accumulation.

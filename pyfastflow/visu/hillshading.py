@@ -42,9 +42,9 @@ from ..grid import neighbourer_flat as nei
 def hillshade_vectorized(
     z: ti.template(),
     hillshade: ti.template(),
-    zenith_rad: ti.f32,
-    azimuth_rad: ti.f32,
-    z_factor: ti.f32,
+    zenith_rad: cte.FLOAT_TYPE_TI,
+    azimuth_rad: cte.FLOAT_TYPE_TI,
+    z_factor: cte.FLOAT_TYPE_TI,
 ):
     """
     Compute hillshading for vectorized elevation data using neighboring system.
@@ -141,12 +141,12 @@ def hillshade_vectorized(
 
 @ti.kernel
 def hillshade_2d(
-    z: ti.types.ndarray(dtype=ti.f32, ndim=2),
-    hillshade: ti.types.ndarray(dtype=ti.f32, ndim=2),
-    zenith_rad: ti.f32,
-    azimuth_rad: ti.f32,
-    z_factor: ti.f32,
-    dx: ti.f32,
+    z: ti.types.ndarray(dtype=cte.FLOAT_TYPE_TI, ndim=2),
+    hillshade: ti.types.ndarray(dtype=cte.FLOAT_TYPE_TI, ndim=2),
+    zenith_rad: cte.FLOAT_TYPE_TI,
+    azimuth_rad: cte.FLOAT_TYPE_TI,
+    z_factor: cte.FLOAT_TYPE_TI,
+    dx: cte.FLOAT_TYPE_TI,
 ):
     """
     Compute hillshading for 2D numpy arrays using generic neighboring.
@@ -275,7 +275,7 @@ def hillshade_grid(grid, altitude_deg=45.0, azimuth_deg=315.0, z_factor=1.0):
     azimuth_rad = math.radians(azimuth_deg)
 
     # Get temporary field from pool for hillshade results
-    z_temp = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(grid.nx * grid.ny))
+    z_temp = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(grid.nx * grid.ny))
 
     # Compute hillshade using temporary field
     hillshade_vectorized(grid.z.field, z_temp.field, zenith_rad, azimuth_rad, z_factor)
@@ -340,7 +340,7 @@ def hillshade_multidirectional_grid(
     multidirectional_hs = np.zeros(result_shape, dtype=np.float32)
 
     # Get temporary field from pool for hillshade computations
-    z_temp = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(grid.nx * grid.ny))
+    z_temp = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(grid.nx * grid.ny))
 
     # Compute and accumulate hillshade for each azimuth
     for azimuth_deg in azimuths_deg:

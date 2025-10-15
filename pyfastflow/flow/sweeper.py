@@ -27,7 +27,7 @@ def build_S_var(S: ti.template(), var:ti.template()):
 
 @ti.kernel
 def sweep_color(Q: ti.template(), zh: ti.template(), S: ti.template(),
-                parity: ti.i32, omega:ti.f32):
+                parity: ti.i32, omega:cte.FLOAT_TYPE_TI):
     for i in zh:
         if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
             continue
@@ -150,7 +150,7 @@ def sweep_Qapp_tiled_iter(Q: ti.template(), Qapp: ti.template(), Qtemp: ti.templ
 
 
 @ti.kernel
-def sweep_sweep(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.template(), omega:ti.f32):
+def sweep_sweep(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.template(), omega:cte.FLOAT_TYPE_TI):
 
     for i in zh:
         Q_[i] = S[i]
@@ -186,7 +186,7 @@ def sweep_sweep(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.te
 
 
 @ti.kernel
-def sweep_sweep_mask(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.template(), mask:ti.template(), omega:ti.f32, propag_mask:ti.u1):
+def sweep_sweep_mask(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.template(), mask:ti.template(), omega:cte.FLOAT_TYPE_TI, propag_mask:ti.u1):
 
     for i in zh:
         Q_[i] = S[i]
@@ -229,7 +229,7 @@ def sweep_sweep_mask(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: 
             Q[i] = (1.0 - omega) * Q[i] + omega * Q_[i]
 
 @ti.kernel
-def sweep_sweep_tiled_iter(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.template(), tyler:ti.template(), omega:ti.f32):
+def sweep_sweep_tiled_iter(Q: ti.template(), Q_: ti.template(), zh: ti.template(), S: ti.template(), tyler:ti.template(), omega:cte.FLOAT_TYPE_TI):
 
     for i in zh:
         Q_[i] = S[i]

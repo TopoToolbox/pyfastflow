@@ -11,6 +11,7 @@ Author: B.G.
 import taichi as ti
 import numpy as np
 from .. import pool
+from .. import constants as cte
 
 
 def fisher_yates_permutation(seed: int) -> np.ndarray:
@@ -43,23 +44,23 @@ def fisher_yates_permutation(seed: int) -> np.ndarray:
 GRADIENTS_2D = np.array([
     [1, 1], [-1, 1], [1, -1], [-1, -1],  # Diagonal gradients
     [1, 0], [-1, 0], [0, 1], [0, -1]      # Axis-aligned gradients
-], dtype=np.float32)
+], dtype=cte.FLOAT_TYPE_NP)
 
 
 @ti.func
-def fade(t: ti.f32) -> ti.f32:
+def fade(t: cte.FLOAT_TYPE_TI) -> cte.FLOAT_TYPE_TI:
     """Perlin fade function: 6t^5 - 15t^4 + 10t^3"""
     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 
 
 @ti.func
-def lerp(t: ti.f32, a: ti.f32, b: ti.f32) -> ti.f32:
+def lerp(t: cte.FLOAT_TYPE_TI, a: cte.FLOAT_TYPE_TI, b: cte.FLOAT_TYPE_TI) -> cte.FLOAT_TYPE_TI:
     """Linear interpolation between a and b by factor t"""
     return a + t * (b - a)
 
 
 @ti.func
-def grad(hash_val: ti.i32, dx: ti.f32, dy: ti.f32, gradients: ti.template()) -> ti.f32:
+def grad(hash_val: ti.i32, dx: cte.FLOAT_TYPE_TI, dy: cte.FLOAT_TYPE_TI, gradients: ti.template()) -> cte.FLOAT_TYPE_TI:
     """Compute dot product of gradient vector and distance vector"""
     idx = hash_val & 7  # Use lower 3 bits to select from 8 gradients
     gx = gradients[idx, 0]
@@ -68,7 +69,7 @@ def grad(hash_val: ti.i32, dx: ti.f32, dy: ti.f32, gradients: ti.template()) -> 
 
 
 @ti.func
-def perlin_noise_at(x: ti.f32, y: ti.f32, perm: ti.template(), gradients: ti.template()) -> ti.f32:
+def perlin_noise_at(x: cte.FLOAT_TYPE_TI, y: cte.FLOAT_TYPE_TI, perm: ti.template(), gradients: ti.template()) -> cte.FLOAT_TYPE_TI:
     """
     Generate Perlin noise value at specific coordinates using proper permutation table.
     
@@ -107,8 +108,8 @@ def perlin_noise_at(x: ti.f32, y: ti.f32, perm: ti.template(), gradients: ti.tem
 
 
 @ti.kernel
-def perlin_noise_kernel(noise_field: ti.template(), frequency_x: ti.f32, frequency_y: ti.f32, octaves: ti.i32,
-                       persistence: ti.f32, amplitude: ti.f32, perm: ti.template(),
+def perlin_noise_kernel(noise_field: ti.template(), frequency_x: cte.FLOAT_TYPE_TI, frequency_y: cte.FLOAT_TYPE_TI, octaves: ti.i32,
+                       persistence: cte.FLOAT_TYPE_TI, amplitude: cte.FLOAT_TYPE_TI, perm: ti.template(),
                        gradients: ti.template()):
     """
     Generate Perlin noise with multiple octaves in a Taichi field.
@@ -193,14 +194,14 @@ def perlin_noise(nx: int, ny: int, frequency: float = 8.0, octaves: int = 4,
     
     # Create Taichi fields for permutation table and gradients
     perm_field = ti.field(ti.i32, shape=(512,))
-    gradients_field = ti.field(ti.f32, shape=(8, 2))
+    gradients_field = ti.field(cte.FLOAT_TYPE_TI, shape=(8, 2))
     
     # Copy data to Taichi fields
     perm_field.from_numpy(perm_array)
     gradients_field.from_numpy(GRADIENTS_2D)
     
     # Get noise field from pool
-    noise_field = pool.get_temp_field(ti.f32, (ny, nx))
+    noise_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (ny, nx))
     
     # Note: Taichi random state is global, seeding happens at permutation generation level
     # Allow anisotropic frequency for world-isotropic noise when mapping non-square textures

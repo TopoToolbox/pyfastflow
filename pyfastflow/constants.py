@@ -58,6 +58,45 @@ import numpy as np
 import taichi as ti
 
 #########################################
+###### FLOAT PRECISION CONSTANTS ########
+#########################################
+
+# Default floating-point precision for Taichi fields and NumPy arrays
+# By default, use 32-bit floats for performance and memory efficiency
+# Call default_f64() BEFORE any field initialization to switch to 64-bit precision
+FLOAT_TYPE_TI = ti.f32   # Taichi float type (ti.f32 or ti.f64)
+FLOAT_TYPE_NP = np.float32   # NumPy float type (np.float32 or np.float64)
+
+
+def default_f64():
+    """
+    Switch to 64-bit floating-point precision globally.
+
+    IMPORTANT: Must be called BEFORE initializing Taichi or creating any fields/grids.
+    All existing fields will remain at their original precision.
+    Only new fields created after this call will use 64-bit precision.
+
+    Usage:
+        import pyfastflow as pff
+        import pyfastflow.constants as cte
+
+        # Switch to f64 BEFORE ti.init()
+        cte.default_f64()
+
+        # Now initialize Taichi
+        ti.init(ti.gpu)
+
+        # All subsequent field allocations will use f64
+        grid = pff.grid.Grid(nx, ny, dx, elevation)
+
+    Author: B.G.
+    """
+    global FLOAT_TYPE_TI, FLOAT_TYPE_NP
+    FLOAT_TYPE_TI = ti.f64
+    FLOAT_TYPE_NP = np.float64
+
+
+#########################################
 ###### UTILS CONSTANTS ##################
 #########################################
 

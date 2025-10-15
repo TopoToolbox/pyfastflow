@@ -12,10 +12,11 @@ Author: B. Gailleton
 """
 
 import taichi as ti
+from .. import constants as cte
 
 
 @ti.func
-def atan(x: ti.f32) -> ti.f32:
+def atan(x: cte.FLOAT_TYPE_TI) -> cte.FLOAT_TYPE_TI:
     """
     Compute arctangent of x using atan2 for Taichi compatibility.
 
@@ -25,10 +26,10 @@ def atan(x: ti.f32) -> ti.f32:
     The mathematical relationship is: atan(x) = atan2(x, 1)
 
     Args:
-        x (ti.f32): The input value for which to compute arctangent
+        x (cte.FLOAT_TYPE_TI): The input value for which to compute arctangent
 
     Returns:
-        ti.f32: The arctangent of x in radians, in the range [-π/2, π/2]
+        cte.FLOAT_TYPE_TI: The arctangent of x in radians, in the range [-π/2, π/2]
 
     Note:
         This implementation handles all cases including:

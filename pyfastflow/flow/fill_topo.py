@@ -76,10 +76,10 @@ def topofill(flow_field, epsilon=1e-3, custom_z=None):
         dtype=ti.i32, shape=(flow_field.nx * flow_field.ny)
     )
     z_ = pf.pool.taipool.get_tpfield(
-        dtype=ti.f32, shape=(flow_field.nx * flow_field.ny)
+        dtype=cte.FLOAT_TYPE_TI, shape=(flow_field.nx * flow_field.ny)
     )
     z__ = pf.pool.taipool.get_tpfield(
-        dtype=ti.f32, shape=(flow_field.nx * flow_field.ny)
+        dtype=cte.FLOAT_TYPE_TI, shape=(flow_field.nx * flow_field.ny)
     )
     receivers_.copy_from(flow_field.receivers)
     receivers__.copy_from(flow_field.receivers)
@@ -178,10 +178,10 @@ def topobehead(flow_field, S_c=0.56, custom_z=None):
         dtype=ti.i32, shape=(flow_field.nx * flow_field.ny)
     )
     z_ = pf.pool.taipool.get_tpfield(
-        dtype=ti.f32, shape=(flow_field.nx * flow_field.ny)
+        dtype=cte.FLOAT_TYPE_TI, shape=(flow_field.nx * flow_field.ny)
     )
     z__ = pf.pool.taipool.get_tpfield(
-        dtype=ti.f32, shape=(flow_field.nx * flow_field.ny)
+        dtype=cte.FLOAT_TYPE_TI, shape=(flow_field.nx * flow_field.ny)
     )
     receivers_.copy_from(flow_field.receivers)
     receivers__.copy_from(flow_field.receivers)

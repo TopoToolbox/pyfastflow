@@ -74,7 +74,8 @@ Combined Workflow Example:
     router = pf.flow.FlowRouter(grid)
 
     # High-performance landscape evolution
-    alpha_ = ti.field(ti.f32, shape=(grid.nx*grid.ny,))
+    from .. import constants as cte
+    alpha_ = ti.field(cte.FLOAT_TYPE_TI, shape=(grid.nx*grid.ny,))
     alpha_.fill(1e-5)
 
     for timestep in range(1000):

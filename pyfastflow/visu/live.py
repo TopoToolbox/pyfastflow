@@ -16,6 +16,7 @@ Author: B.G.
 """
 
 import taichi as ti
+from .. import constants as cte
 
 
 @ti.data_oriented
@@ -134,7 +135,7 @@ class SurfaceViewer:
         num_faces = (self.height - 1) * (self.width - 1) * 2  # 2 triangles per quad
 
         # 3D vertex positions (x, y, z)
-        self.vertices = ti.Vector.field(3, dtype=ti.f32, shape=num_vertices)
+        self.vertices = ti.Vector.field(3, dtype=cte.FLOAT_TYPE_TI, shape=num_vertices)
 
         # Triangle indices (3 vertices per triangle)
         self.indices = ti.field(dtype=ti.i32, shape=num_faces * 3)
@@ -145,9 +146,9 @@ class SurfaceViewer:
         surface: ti.types.ndarray(),
         w: ti.i32,
         h: ti.i32,
-        x_scale: ti.f32,
-        y_scale: ti.f32,
-        z_scale: ti.f32,
+        x_scale: cte.FLOAT_TYPE_TI,
+        y_scale: cte.FLOAT_TYPE_TI,
+        z_scale: cte.FLOAT_TYPE_TI,
     ):
         """
         GPU kernel for generating 3D mesh from 2D surface data.

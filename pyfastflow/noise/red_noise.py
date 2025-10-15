@@ -11,6 +11,7 @@ Author: B.G.
 import taichi as ti
 import numpy as np
 from .. import pool
+from .. import constants as cte
 
 try:
     import cupy as cp
@@ -41,7 +42,7 @@ def generate_red_noise_spectral(ny: int, nx: int, seed: int, amplitude: float, e
     np.random.seed(seed)
     
     # Generate white noise W ∈ R^(ny×nx)
-    W = np.random.randn(ny, nx).astype(np.float32)
+    W = np.random.randn(ny, nx).astype(cte.FLOAT_TYPE_NP)
     
     # Compute 2D FFT of white noise
     F = np.fft.fft2(W)
@@ -63,7 +64,7 @@ def generate_red_noise_spectral(ny: int, nx: int, seed: int, amplitude: float, e
     F *= A
     
     # Inverse FFT to get red noise in spatial domain
-    R = np.fft.ifft2(F).real.astype(np.float32)
+    R = np.fft.ifft2(F).real.astype(cte.FLOAT_TYPE_NP)
     
     # Zero-mean the result (should already be close to zero due to DC=0)
     R -= np.mean(R)
@@ -126,10 +127,10 @@ def red_noise(nx: int, ny: int, amplitude: float = 1.0, decay_factor: float = 0.
     
     if return_field:
         # Create Taichi field and copy data
-        noise_field = pool.get_temp_field(ti.f32, (ny, nx))
-        
+        noise_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (ny, nx))
+
         # Convert numpy array to Taichi ndarray for efficient copying
-        red_ndarray = ti.ndarray(ti.f32, shape=(ny, nx))
+        red_ndarray = ti.ndarray(cte.FLOAT_TYPE_TI, shape=(ny, nx))
         red_ndarray.from_numpy(red_array)
         
         # Copy to field using kernel
@@ -142,7 +143,7 @@ def red_noise(nx: int, ny: int, amplitude: float = 1.0, decay_factor: float = 0.
 
 # Legacy kernel for backwards compatibility (not used in spectral implementation)
 @ti.kernel
-def red_noise_kernel(noise_field: ti.template(), amplitude: ti.f32, decay_factor: ti.f32, seed: ti.i32):
+def red_noise_kernel(noise_field: ti.template(), amplitude: cte.FLOAT_TYPE_TI, decay_factor: cte.FLOAT_TYPE_TI, seed: ti.i32):
     """
     Legacy red noise kernel using AR(1) filtering (deprecated).
     
@@ -163,7 +164,7 @@ def red_noise_kernel(noise_field: ti.template(), amplitude: ti.f32, decay_factor
         prev_value = 0.0
         for i in range(nx):
             # Note: Using global random state (seeded before kernel call)
-            white_sample = (ti.random(ti.f32) - 0.5) * 2.0
+            white_sample = (ti.random(cte.FLOAT_TYPE_TI) - 0.5) * 2.0
             
             # Apply recursive filter for correlation
             filtered_value = decay_factor * prev_value + (1.0 - decay_factor) * white_sample

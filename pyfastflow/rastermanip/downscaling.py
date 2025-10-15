@@ -14,6 +14,7 @@ import numpy as np
 import taichi as ti
 
 from .. import pool
+from .. import constants as cte
 
 # Boundary handling modes
 _BOUNDARY_CLAMP = 0
@@ -191,8 +192,8 @@ def halve_resolution_kernel_mean(
 
 @ti.func
 def cubic_interpolate(
-    v0: ti.f32, v1: ti.f32, v2: ti.f32, v3: ti.f32, t: ti.f32
-) -> ti.f32:
+    v0: cte.FLOAT_TYPE_TI, v1: cte.FLOAT_TYPE_TI, v2: cte.FLOAT_TYPE_TI, v3: cte.FLOAT_TYPE_TI, t: cte.FLOAT_TYPE_TI
+) -> cte.FLOAT_TYPE_TI:
     """
     Cubic interpolation between 4 points.
 
@@ -362,14 +363,14 @@ def halve_resolution(
     boundary_mode = boundary_map[boundary]
 
     # Create source field and copy data
-    source_field = pool.get_temp_field(ti.f32, (ny * nx,))
+    source_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (ny * nx,))
     source_field.field.from_numpy(data_np)
 
     # Create target field for downscaled result
     target_nx = nx // 2
     target_ny = ny // 2
     target_size = target_ny * target_nx
-    target_field = pool.get_temp_field(ti.f32, (target_size,))
+    target_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (target_size,))
 
     if kernel is not None:
         kernel(source_field.field, target_field.field, nx, ny)

@@ -7,10 +7,11 @@ B.G.
 import taichi as ti
 
 import pyfastflow as pf
+from .. import constants as cte
 
 
 @ti.kernel
-def block_uplift(z: ti.template(), rate: ti.f32):
+def block_uplift(z: ti.template(), rate: cte.FLOAT_TYPE_TI):
     """
     Apply uniform block uplift to the topography.
 

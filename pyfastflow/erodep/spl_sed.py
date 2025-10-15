@@ -32,6 +32,7 @@ import math
 import taichi as ti
 
 import pyfastflow as pf
+from .. import constants as cte
 
 
 @ti.kernel
@@ -176,8 +177,8 @@ def SPL(router, alpha_, alpha__):
     """
 
     # Get temporary fields from pool for SPL computation
-    z_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(router.nx * router.ny))
-    z__ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(router.nx * router.ny))
+    z_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(router.nx * router.ny))
+    z__ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(router.nx * router.ny))
     receivers_ = pf.pool.taipool.get_tpfield(
         dtype=ti.i32, shape=(router.nx * router.ny)
     )

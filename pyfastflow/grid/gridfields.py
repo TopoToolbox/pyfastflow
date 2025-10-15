@@ -95,7 +95,7 @@ class Grid:
         cte.DX = dx  # Grid spacing
 
         # Fetching from pool
-        self.z = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(nx * ny))
+        self.z = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(nx * ny))
         self.z.field.from_numpy(z.ravel())
 
         # ====== GLOBAL CONFIGURATION SETUP ======

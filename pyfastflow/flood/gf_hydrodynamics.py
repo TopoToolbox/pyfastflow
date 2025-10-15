@@ -142,7 +142,7 @@ def graphflood_core_cte_mannings(
 
 
 # @ti.kernel
-# def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:ti.f32):
+# def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:cte.FLOAT_TYPE_TI):
 #     """
 #     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
 
@@ -209,7 +209,7 @@ def graphflood_core_cte_mannings(
 
 
 # @ti.kernel
-# def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:ti.f32):
+# def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:cte.FLOAT_TYPE_TI):
 #     """
 #     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
 
@@ -282,7 +282,7 @@ def graphflood_core_cte_mannings(
 #         h[i] += dh[i]
 
 # @ti.kernel
-# def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:ti.f32):
+# def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:cte.FLOAT_TYPE_TI):
 #     """
 #     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
 
@@ -357,7 +357,7 @@ def graphflood_core_cte_mannings(
 
 # This test is with a damier like pattern to only fill some of the local minimas.
 # @ti.kernel
-# def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:ti.f32):
+# def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:cte.FLOAT_TYPE_TI):
 #     """
 #     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
 
@@ -516,7 +516,7 @@ def graphflood_core_cte_mannings(
 
 
 @ti.kernel
-def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:ti.f32):
+def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:cte.FLOAT_TYPE_TI):
     """
     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
 
@@ -614,7 +614,7 @@ def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.te
 
 @ti.kernel
 def graphflood_diffuse_cte_P_cte_man_dt(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), 
-    dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:ti.f32, dt_local :ti.f32):
+    dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:ti.f32, dt_local :cte.FLOAT_TYPE_TI):
     """
     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
 
@@ -714,7 +714,7 @@ def graphflood_diffuse_cte_P_cte_man_dt(z: ti.template(), h:ti.template(), Q: ti
 
 @ti.kernel
 def graphflood_cte_man_dt_nopropag(z: ti.template(), h:ti.template(), Q: ti.template(),
-    dh: ti.template(), dt_local :ti.f32):
+    dh: ti.template(), dt_local :cte.FLOAT_TYPE_TI):
     """
     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
 
@@ -773,7 +773,7 @@ def graphflood_cte_man_dt_nopropag(z: ti.template(), h:ti.template(), Q: ti.temp
 
 @ti.kernel
 def graphflood_cte_man_dt_nopropag_mask(z: ti.template(), h:ti.template(), Q: ti.template(),
-    dh: ti.template(), mask:ti.template(), dt_local :ti.f32):
+    dh: ti.template(), mask:ti.template(), dt_local :cte.FLOAT_TYPE_TI):
     """
     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
 
@@ -835,7 +835,7 @@ def graphflood_cte_man_dt_nopropag_mask(z: ti.template(), h:ti.template(), Q: ti
             h[i] = 0
 
 @ti.kernel
-def graphflood_cte_man_analytical(z: ti.template(), h:ti.template(), Q: ti.template(), temporal_filtering:ti.f32):
+def graphflood_cte_man_analytical(z: ti.template(), h:ti.template(), Q: ti.template(), temporal_filtering:cte.FLOAT_TYPE_TI):
     """
     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
 
@@ -871,7 +871,7 @@ def graphflood_cte_man_analytical(z: ti.template(), h:ti.template(), Q: ti.templ
         h[i] = (1- temporal_filtering) * h[i] + temporal_filtering * (Q[i] * cte.MANNING / ti.math.sqrt(norms) / cte.DX)**(3./5.)
 
 @ti.kernel
-def graphflood_cte_man_analytical_mask(z: ti.template(), h:ti.template(), Q: ti.template(), mask:ti.template(), temporal_filtering:ti.f32):
+def graphflood_cte_man_analytical_mask(z: ti.template(), h:ti.template(), Q: ti.template(), mask:ti.template(), temporal_filtering:cte.FLOAT_TYPE_TI):
     """
 
     Author: B.G.
@@ -962,7 +962,7 @@ def val_at(f: ti.template(), idx: ti.i32, self_idx: ti.i32):
 
 @ti.func
 def signf(x):
-    return ti.cast(1.0, ti.f32) if x >= 0 else ti.cast(-1.0, ti.f32)
+    return ti.cast(1.0, cte.FLOAT_TYPE_TI) if x >= 0 else ti.cast(-1.0, cte.FLOAT_TYPE_TI)
 
 # # ----------------- velocity from -∇(z + 1/2 h^2) -----------------
 # @ti.kernel
@@ -1031,7 +1031,7 @@ def signf(x):
 
 
 @ti.kernel
-def run_vdb23_step5(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.template(), ux:ti.template(), uy:ti.template(), dt:ti.f32, omega:ti.f32):
+def run_vdb23_step5(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.template(), ux:ti.template(), uy:ti.template(), dt:ti.f32, omega:cte.FLOAT_TYPE_TI):
 
     for i in z:
 
@@ -1126,7 +1126,7 @@ def run_vdb23_step5(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.tem
 
 
 @ti.kernel
-def run_BG24_dyn(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.template(), qx:ti.template(), qy:ti.template(), dt:ti.f32, omega:ti.f32):
+def run_BG24_dyn(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.template(), qx:ti.template(), qy:ti.template(), dt:ti.f32, omega:cte.FLOAT_TYPE_TI):
 
     for i in z:
 
@@ -1199,7 +1199,7 @@ def run_BG24_dyn(z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.templa
 
 
 @ti.kernel
-def run_BG24_add(h:ti.template(), Qin:ti.template(), dt:ti.f32, omega:ti.f32):
+def run_BG24_add(h:ti.template(), Qin:ti.template(), dt:ti.f32, omega:cte.FLOAT_TYPE_TI):
 
     for i in h:
 

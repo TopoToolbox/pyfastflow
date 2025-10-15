@@ -34,7 +34,7 @@ def compute_receivers(z: ti.template(), receivers: ti.template()):
     for i in z:
         # Initialize with self-receiver (pit condition)
         r: ti.i32 = i  # Current node receives to itself by default
-        sr: ti.f32 = 0.0  # Steepest descent gradient found so far
+        sr: cte.FLOAT_TYPE_TI = 0.0  # Steepest descent gradient found so far
 
         # Check all 4 cardinal neighbors
         for k in ti.static(range(4)):
@@ -73,7 +73,7 @@ def compute_receivers_stochastic(z: ti.template(), receivers: ti.template()):
     for i in z:
         # Initialize with self-receiver (pit condition)
         r: ti.i32 = i  # Current node receives to itself by default
-        sr: ti.f32 = 0.0  # Steepest descent gradient found so far
+        sr: cte.FLOAT_TYPE_TI = 0.0  # Steepest descent gradient found so far
 
         # Check all 4 cardinal neighbors
         for k in ti.static(range(4)):

@@ -8,6 +8,7 @@ Author: B.G.
 """
 
 import taichi as ti
+from .. import constants as cte
 
 #########################################
 ###### SWAP, COPY AND STUFF #############
@@ -41,13 +42,13 @@ def add_B_to_A(array1: ti.template(), array2: ti.template()):
 
 
 @ti.kernel
-def add_B_to_weighted_A(array1: ti.template(), array2: ti.template(), weight: ti.f32):
+def add_B_to_weighted_A(array1: ti.template(), array2: ti.template(), weight: cte.FLOAT_TYPE_TI):
     for i in array1:
         array1[i] += array2[i] * weight
 
 
 @ti.kernel
-def weighted_mean_B_in_A(array1: ti.template(), array2: ti.template(), weight: ti.f32):
+def weighted_mean_B_in_A(array1: ti.template(), array2: ti.template(), weight: cte.FLOAT_TYPE_TI):
     for i in array1:
         array1[i] = array2[i] * weight + array1[i] * (1 - weight)
 

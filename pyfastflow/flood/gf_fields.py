@@ -109,9 +109,9 @@ class Flooder:
         # ====== CORE FLOW COMPUTATION FIELDS ======
         # These fields are required for all flow routing operations
 
-        self.h = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        self.dh = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        self.nQ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        self.h = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        self.dh = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        self.nQ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
         self.qx = None
         self.qy = None
 
@@ -189,8 +189,8 @@ class Flooder:
 
         st = time.time()
 
-        z_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        z_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        Q_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
         receivers_ = pf.pool.taipool.get_tpfield(
             dtype=ti.i32, shape=(self.nx * self.ny)
         )
@@ -326,8 +326,8 @@ class Flooder:
 
     def run_graphflood_diffuse(self, N=100, temporal_filtering = 0.5, force_dt = None):
 
-        Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        dh = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        Q_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        dh = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
         LM = pf.pool.taipool.get_tpfield(dtype=ti.u1, shape=(self.nx * self.ny))
         LM.field.fill(False)
 
@@ -349,14 +349,14 @@ class Flooder:
 
     def run_N_sweep(self, NSW = 5, omega = 1., custom_Qin = None, mask = None, propag_mask = False):
         S = pf.pool.taipool.get_tpfield(
-            dtype=ti.f32, shape=(self.nx * self.ny)
+            dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny)
         )
 
         zh = pf.pool.taipool.get_tpfield(
-            dtype=ti.f32, shape=(self.nx * self.ny)
+            dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny)
         )
         Q_ = pf.pool.taipool.get_tpfield(
-            dtype=ti.f32, shape=(self.nx * self.ny)
+            dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny)
         )
 
         if (mask is None) == False:
@@ -377,7 +377,7 @@ class Flooder:
             pf.flow.sweeper.build_S(S.field)             # temp = S (precip * DX^2), if S changes each step
         elif isinstance(custom_Qin, np.ndarray):
             cField = pf.pool.taipool.get_tpfield(
-                dtype=ti.f32, shape=(self.nx * self.ny)
+                dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny)
             )
             cField.from_numpy(custom_Qin.ravel())
             pf.flow.sweeper.build_S_var(S.field,cField.field)
@@ -425,7 +425,7 @@ class Flooder:
 
     def run_graphflood_diffuse_nopropag(self, N=10, dt = None, mask = None):
 
-        dh = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        dh = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
 
         if (mask is None) == False:
             tmask = pf.pool.taipool.get_tpfield(
@@ -451,9 +451,9 @@ class Flooder:
 
     def run_N_diffuse(self, N=100, precip = None, dt = 0.01, omega = 0.5):
 
-        ux = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        uy = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        S = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        ux = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        uy = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        S = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
         if precip is None:
             S.field.fill(cte.PREC)
         elif isinstance(precip,np.ndarray):
@@ -461,7 +461,7 @@ class Flooder:
         else:
             S.field.copy_from(precip)
 
-        dh = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        dh = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
 
         for i in range(N):
             # pf.flood.gf_hydrodynamics.compute_velocity_flat(self.grid.z.field, self.h.field, ux.field, uy.field, vscale)
@@ -525,10 +525,10 @@ class Flooder:
         if self.qx is None:
             # Create x-direction discharge field
             self.qx = pf.pool.taipool.get_tpfield(
-                dtype=ti.f32, shape=(self.nx * self.ny)
+                dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny)
             )
             self.qy = pf.pool.taipool.get_tpfield(
-                dtype=ti.f32, shape=(self.nx * self.ny)
+                dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny)
             )
 
             self.qx.field.fill(0.0)
@@ -554,7 +554,7 @@ class Flooder:
 
     def fill_lakes_full(self, compute_Qsfd = False, epsilon=2e-3):
 
-        z_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        z_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
 
         receivers_ = pf.pool.taipool.get_tpfield(
             dtype=ti.i32, shape=(self.nx * self.ny)
@@ -617,9 +617,9 @@ class Flooder:
             tiles_field = ttiles.field
 
 
-        Qapp  = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        Qtemp = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        S     = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        Qapp  = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        Qtemp = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        S     = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
 
         pf.flow.sweeper.build_S(S.field) 
         pf.flow.sweeper.sweep_Qapp_tiled_init(self.router.Q.field, Qapp.field, self.grid.z.field, self.h.field, S.field, tiles_field)
@@ -636,7 +636,7 @@ class Flooder:
 
     def fill_lakes(self, epsilon=2e-3):
 
-        z_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        z_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
 
         receivers_ = pf.pool.taipool.get_tpfield(
             dtype=ti.i32, shape=(self.nx * self.ny)
@@ -672,10 +672,10 @@ class Flooder:
 
 
     def spread_h(self):
-        zh = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        zh_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
-        acc_vol = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=())
-        acc_max = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=())
+        zh = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        zh_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        acc_vol = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=())
+        acc_max = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=())
 
 
         pf.flood.gf_hydrodynamics.projected_diffuse_iter(
@@ -757,7 +757,7 @@ class Flooder:
         Returns:
                 numpy.ndarray: Discharge values (m³/s) reshaped to 2D grid
         """
-        Q_ = pf.pool.taipool.get_tpfield(dtype=ti.f32, shape=(self.nx * self.ny))
+        Q_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
         pf.flood.gf_hydrodynamics.graphflood_get_Qo(self.grid.z.field, self.h.field, Q_.field)
         Qo = Q_.field.to_numpy().reshape(self.rshp)
         Q_.release()
