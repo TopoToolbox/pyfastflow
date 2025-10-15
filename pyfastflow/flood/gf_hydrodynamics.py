@@ -633,8 +633,6 @@ def graphflood_diffuse_cte_P_cte_man_dt(z: ti.template(), h:ti.template(), Q: ti
     # Diffuse discharge based on slope gradients
     for i in z:
 
-        if i%2 ==0 :
-            continue
 
         # Skip boundary cells
         if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
@@ -699,8 +697,6 @@ def graphflood_diffuse_cte_P_cte_man_dt(z: ti.template(), h:ti.template(), Q: ti
         norms = ti.max(norms, 1e-4)
         Qo = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(norms)
         dh[i] -= dt_local * Qo/cte.DX**2
-
-    #TODO NEXT:: TRY TOTALLY DIFFERENT: MFD AVEC RAKE AND COMPRESS + TEMPORAL FILTERING, BRUTE FORCE ON FIELD TO EQUILLIBRATE WITHOUT RE DISTRIBUTING
 
 
     # Update discharge field with diffused values
