@@ -328,8 +328,8 @@ class Flooder:
 
         Q_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
         dh = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
-        LM = pf.pool.taipool.get_tpfield(dtype=ti.u1, shape=(self.nx * self.ny))
-        LM.field.fill(False)
+        # LM = pf.pool.taipool.get_tpfield(dtype=ti.u1, shape=(self.nx * self.ny))
+        # LM.field.fill(False)
 
         if force_dt is None:
             for _ in range(N):
@@ -339,11 +339,11 @@ class Flooder:
         else:
             for _ in range(N):
                 pf.flood.gf_hydrodynamics.graphflood_diffuse_cte_P_cte_man_dt(self.grid.z.field, self.h.field, self.router.Q.field, Q_.field, dh.field, 
-                    self.router.receivers.field, LM.field, temporal_filtering, force_dt)
+                    self.router.receivers.field, temporal_filtering, force_dt)
 
         Q_.release()
         dh.release()
-        LM.release()
+        # LM.release()
 
 
 
@@ -401,7 +401,7 @@ class Flooder:
         if not mask is None:
             tmask.release()
 
-    def run_N_analytical(self, N=2, temporal_filtering = 0.2, mask = None):
+    def run_N_analytical(self, N=2, temporal_filtering = 0.2, Q_filtering = 0., mask = None):
 
         if (mask is None) == False:
             tmask = pf.pool.taipool.get_tpfield(
@@ -414,7 +414,7 @@ class Flooder:
 
         for _ in range(N):
             if mask is None:
-                pf.flood.gf_hydrodynamics.graphflood_cte_man_analytical(self.grid.z.field, self.h.field, self.router.Q.field, temporal_filtering)
+                pf.flood.gf_hydrodynamics.graphflood_cte_man_analytical(self.grid.z.field, self.h.field, self.router.Q.field, temporal_filtering, Q_filtering)
             else:
                 pf.flood.gf_hydrodynamics.graphflood_cte_man_analytical_mask(self.grid.z.field, self.h.field, self.router.Q.field, tmask.field, temporal_filtering)
 

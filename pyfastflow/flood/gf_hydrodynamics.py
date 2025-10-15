@@ -614,6 +614,78 @@ def graphflood_diffuse_cte_P_cte_man(z: ti.template(), h:ti.template(), Q: ti.te
 
 @ti.kernel
 def graphflood_diffuse_cte_P_cte_man_dt(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), 
+    dh: ti.template(), srecs: ti.template(), temporal_filtering:ti.f32, dt_local :cte.FLOAT_TYPE_TI):
+    """
+    NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
+
+    Author: B.G.
+    """
+
+    # Initialize precipitation input and handle boundary conditions
+    for i in Q:
+        temp[i] = cte.PREC * cte.DX * cte.DX  # Add precipitation as volume input
+        dh[i] = 0.
+
+    # DOES NOT WORK IN TAICHI -> outter loop always the main parallel one
+    # ti.loop_config(serialize=True)
+    # for damier in range(2):
+
+    # Diffuse discharge based on slope gradients
+    for i in z:
+
+        # Skip boundary cells
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+
+            # Calculate total slope gradient sum for normalization
+        sums = 0.0
+        msx  = 0.0
+        msy  = 0.0
+        mz   = (z[i]+h[i])
+
+        for k in range(4):  # Check all 4 neighbors
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                continue
+
+            ts = ti.max(0.0, (((z[i]+h[i]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
+            sums += ts
+            msx = ti.max(ts, msx) if k == 1 or k == 2 else msx
+            msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
+
+        
+
+
+        if(sums == 0.):
+            ti.atomic_add(temp[srecs[i]], Q[i])
+            dh[i] += 5e-3
+        else:
+            # Distribute discharge proportionally to slope gradients
+            for k in range(4):
+                j = flow.neighbourer_flat.neighbour(i, k)
+
+                if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                    continue
+
+                tS = ti.max(0.0, (((z[i]+h[i]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
+                ti.atomic_add(temp[j], tS / sums * Q[i])  # Add proportional discharge
+
+        norms = ti.math.sqrt(msx**2 + msy**2) # if (sums > 0.) else ti.max((z[i]+h[i] - z[srecs[i]] - h[srecs[i]])/cte.DX,1e-3)
+        norms = ti.max(norms, 1e-6)
+        Qo = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(norms)
+        dh[i] -= dt_local * Qo/cte.DX**2
+
+
+    # Update discharge field with diffused values
+    for i in Q:
+        Q[i] = (1 - temporal_filtering ) * Q[i] + temp[i] * temporal_filtering
+        dh[i] += dt_local * Q[i]/cte.DX**2
+        h[i] += dh[i]
+        if(h[i] < 0):
+            h[i] = 0
+
+@ti.kernel
+def _legacy_graphflood_diffuse_cte_P_cte_man_dt(z: ti.template(), h:ti.template(), Q: ti.template(), temp: ti.template(), 
     dh: ti.template(), srecs: ti.template(), LM: ti.template(), temporal_filtering:ti.f32, dt_local :cte.FLOAT_TYPE_TI):
     """
     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
@@ -639,41 +711,41 @@ def graphflood_diffuse_cte_P_cte_man_dt(z: ti.template(), h:ti.template(), Q: ti
             continue
 
             # Calculate total slope gradient sum for normalization
-        sums = 0.0
-        msx  = 0.0
-        msy  = 0.0
-        mz   = (z[i]+h[i])
-        tlm = True
+            sums = 0.0
+            msx  = 0.0
+            msy  = 0.0
+            mz   = (z[i]+h[i])
+            tlm = True
 
-        for k in range(4):  # Check all 4 neighbors
-            j = flow.neighbourer_flat.neighbour(i, k)
-            if(j == -1 or flow.neighbourer_flat.nodata(j)):
-                continue
-            
-            mz  = ti.max(mz, (z[j]+h[j]))
+            for k in range(4):  # Check all 4 neighbors
+                j = flow.neighbourer_flat.neighbour(i, k)
+                if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                    continue
+                
+                mz  = ti.max(mz, (z[j]+h[j]))
 
-            if z[j]+h[j]<z[i]+h[i]:
-                tlm = False
-                break
+                if z[j]+h[j]<z[i]+h[i]:
+                    tlm = False
+                    break
 
-        # Skip cells with no downslope neighbors
-        if tlm:
-            LM[i] = True
-            dh[i] += 5e-3 # mz - z[i] + 5e-3
-            # continue
+            # Skip cells with no downslope neighbors
+            if tlm:
+                LM[i] = True
+                dh[i] += 5e-3 # mz - z[i] + 5e-3
+                # continue
 
-        for k in range(4):  # Check all 4 neighbors
-            j = flow.neighbourer_flat.neighbour(i, k)
-            if(j == -1 or flow.neighbourer_flat.nodata(j)):
-                continue
+            for k in range(4):  # Check all 4 neighbors
+                j = flow.neighbourer_flat.neighbour(i, k)
+                if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                    continue
 
-            if ( LM[i] and srecs[j] == i):
-                continue
+                if ( LM[i] and srecs[j] == i):
+                    continue
 
-            ts = ti.max(0.0, (((z[i]+h[i]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
-            sums += ts
-            msx = ti.max(ts, msx) if k == 1 or k == 2 else msx
-            msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
+                ts = ti.max(0.0, (((z[i]+h[i]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
+                sums += ts
+                msx = ti.max(ts, msx) if k == 1 or k == 2 else msx
+                msy = ti.max(ts, msy) if k == 0 or k == 3 else msy
 
         
    
@@ -831,7 +903,7 @@ def graphflood_cte_man_dt_nopropag_mask(z: ti.template(), h:ti.template(), Q: ti
             h[i] = 0
 
 @ti.kernel
-def graphflood_cte_man_analytical(z: ti.template(), h:ti.template(), Q: ti.template(), temporal_filtering:cte.FLOAT_TYPE_TI):
+def graphflood_cte_man_analytical(z: ti.template(), h:ti.template(), Q: ti.template(), temporal_filtering:cte.FLOAT_TYPE_TI, Q_filtering:cte.FLOAT_TYPE_TI):
     """
     NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
 
@@ -862,9 +934,13 @@ def graphflood_cte_man_analytical(z: ti.template(), h:ti.template(), Q: ti.templ
             msy = 1e-2
 
         norms = ti.math.sqrt(msx**2 + msy**2)
-            
-        # Qo = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(norms)
-        h[i] = (1- temporal_filtering) * h[i] + temporal_filtering * (Q[i] * cte.MANNING / ti.math.sqrt(norms) / cte.DX)**(3./5.)
+        tQ = Q[i]  
+        if(Q_filtering > 0):
+
+            Qo = cte.DX * h[i] ** (5.0 / 3.0) / cte.MANNING * ti.math.sqrt(norms)
+            tQ = (1- Q_filtering) * tQ + Q_filtering * Qo
+
+        h[i] = (1- temporal_filtering) * h[i] + temporal_filtering * (tQ * cte.MANNING / ti.math.sqrt(norms) / cte.DX)**(3./5.)
 
 @ti.kernel
 def graphflood_cte_man_analytical_mask(z: ti.template(), h:ti.template(), Q: ti.template(), mask:ti.template(), temporal_filtering:cte.FLOAT_TYPE_TI):
@@ -1223,6 +1299,390 @@ def run_BG24_add(h:ti.template(), Qin:ti.template(), dt:ti.f32, omega:cte.FLOAT_
 
 
 
+
+
+@ti.kernel
+def pgraph_v0(particles:ti.template(), z:ti.template(), h:ti.template(), dh:ti.template(), S:ti.template(), Q:ti.template(), Q_:ti.template(), manning:ti.f32, dt:ti.f32, omega:ti.f32):
+
+
+    for pi in particles:
+        i = particles[pi].pos
+        Q_[i] = S[i] * cte.DX**2
+        dh[i] = 0.
+
+    for pi in particles:
+
+        i = particles[pi].pos
+
+        
+        msx  = 0.0
+        msy  = 0.0
+
+        for tk in range(4):  # Check all 4 neighbors
+            tj = flow.neighbourer_flat.neighbour(i, tk)
+            if(tj == -1 or flow.neighbourer_flat.nodata(tj)):
+                continue
+
+            if(z[tj]+h[tj]>z[i]+h[i]):
+                sums = 0.0
+                tss = 0.0
+                for k in range(4):  # Check all 4 neighbors
+
+                    j = flow.neighbourer_flat.neighbour(tj, k)
+                    
+                    if(j == -1 or flow.neighbourer_flat.nodata(j)):
+                        continue
+
+                    ts = ti.max(0.0, (((z[tj]+h[tj]) - (z[j]+h[j])) / cte.DX) if j != -1 else 0.0)
+                    if j == i:
+                        tss = ts
+                    sums += ts
+                if tss>0.:
+                    Q_[i] += Q[tj]*tss/sums
+            else:
+                ts = ti.max(0.0, (((z[i]+h[i]) - (z[tj]+h[tj])) / cte.DX) if tj != -1 else 0.0)
+                msx = ti.max(ts, msx) if tk == 1 or tk == 2 else msx
+                msy = ti.max(ts, msy) if tk == 0 or tk == 3 else msy
+
+
+        if(msx >0 and msy > 0 and h[i]>0):
+            norm = ti.math.sqrt(msx**2 + msy**2)
+            norm = ti.max(norm,1e-4)
+            tQo = cte.DX/manning * h[i]**(5./3.)*ti.math.sqrt(norm)
+            dh[i] -= dt*tQo
+
+
+
+
+    for pi in particles:
+        i = particles[pi].pos
+
+        Q[i] = Q_[i]
+        dh[i] += Q[i] * dt
+        dh[i] /= (cte.DX**2)
+        h[i] += dh[i]
+
+        if(h[i]<0):
+            h[i]=0
+
+
+
+# TODO for CLAUDE:
+
+# A bunch of helpers for my next hydrodynamics. be concise and straightfowrad. Respect the conventions of the rest of this file for neighbouring and all
+# for k in range(4) iterates through row major neihgbours in that order: top, left, right, bottom. the neighbour functions automatically manage boundary condition that is why we use it
+# In the following framework, the helper functions and kernels will use different type of data:
+# Q is the total volumatric flux per cell
+# wx and wy are the weights of transfer, the laters are representing the right wx, nd bottom wy link of each node. positive from node to right (for x and simlar for wy toward bottom)
+# for a node i the sum of weights going toward lower surface are equal to 1 (so the for directions)
+# The surface of splitting is z+h
+# help me write the different funcions
+
+@ti.func
+def update_wxy(index, wx, wy, z, h):
+    '''
+    this function updates wx and wy for a given node. Loop thorugh neighbours' z and h, calculate the sum of the slope in z+h and weights are locals/sums for node i
+    '''
+    sums = 0.0
+    process = ti.Vector([False,False,False,False])
+    slopes = ti.Vector([0.,0.,0.,0.])
+    neigh = ti.Vector(
+        [flow.neighbourer_flat.neighbour(index, 0),
+         flow.neighbourer_flat.neighbour(index, 1),
+         flow.neighbourer_flat.neighbour(index, 2),
+         flow.neighbourer_flat.neighbour(index, 3)]
+    )
+
+
+    for k in range(4):
+        j = neigh[k]
+        if j == -1 or flow.neighbourer_flat.nodata(j):
+            continue
+
+        slope = ((z[index] + h[index]) - (z[j] + h[j])) / cte.DX
+
+        process[k] = True
+        slopes[k] = slope
+
+        # Only sum positive slopes (downhill/outflow directions)
+        if slope > 0:
+            sums += slope
+    if sums > 0:
+        if(process[0]):
+            wy[neigh[0]] = -slopes[0] / sums
+        if(process[1]):
+            wx[neigh[1]] = -slopes[1] / sums
+        if(process[2]):
+            wx[index] = slopes[2] / sums
+        if(process[3]):
+            wy[index] = slopes[3] / sums
+
+
+
+@ti.func
+def update_Q(index, Q, Q_, wx, wy):
+    '''
+    This function updates  Q for a given index: check the 4 weights, and use the ones going toward index i from whichever j (remember conventions)
+    so Q_[i] += -wx[i] * Q[j] in the case wx[i] is <0 (flux goes from right to left) see what I mean?
+
+    '''
+    j_left = flow.neighbourer_flat.neighbour(index, 1)
+    if j_left != -1 and not flow.neighbourer_flat.nodata(j_left):
+        if wx[j_left] > 0:
+            Q_[index] += wx[j_left] * Q[j_left]
+
+    j_top = flow.neighbourer_flat.neighbour(index, 0)
+    if j_top != -1 and not flow.neighbourer_flat.nodata(j_top):
+        if wy[j_top] > 0:
+            Q_[index] += wy[j_top] * Q[j_top]
+
+    j_right = flow.neighbourer_flat.neighbour(index, 2)
+    if j_right != -1 and not flow.neighbourer_flat.nodata(j_right):
+        if wx[index] < 0:
+            Q_[index] += (-wx[index]) * Q[j_right]
+
+    j_bottom = flow.neighbourer_flat.neighbour(index, 3)
+    if j_bottom != -1 and not flow.neighbourer_flat.nodata(j_bottom):
+        if wy[index] < 0:
+            Q_[index] += (-wy[index]) * Q[j_bottom]
+
+
+@ti.kernel
+def compute_weights_wxy(wx: ti.template(), wy: ti.template(), z: ti.template(), h: ti.template()):
+    """
+    Compute flow weights for all nodes based on z+h surface slopes.
+
+    Updates wx (right) and wy (bottom) weights for each node by computing
+    slope-weighted distributions toward lower neighbors.
+
+    Args:
+        wx: Weight field for rightward flow
+        wy: Weight field for downward flow
+        z: Elevation field
+        h: Water depth field
+    """
+    for i in z:
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+        update_wxy(i, wx, wy, z, h)
+
+
+@ti.kernel
+def diffuse_Q_with_weights(Q: ti.template(), Q_: ti.template(), wx: ti.template(), wy: ti.template(), S: ti.template()):
+    """
+    Diffuse discharge Q using pre-computed weights wx, wy.
+
+    Three-step process:
+    1. Initialize Q_ with source term S
+    2. Accumulate weighted contributions from neighbors
+    3. Copy result back to Q
+
+    Args:
+        Q: Discharge field (input/output)
+        Q_: Temporary discharge field
+        wx: Weight field for rightward flow
+        wy: Weight field for downward flow
+        S: Source term field
+    """
+    # First loop: init Q_ from source
+    for i in Q:
+        Q_[i] = S[i]
+
+    # Second loop: accumulate weighted Q contributions
+    for i in Q:
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+        update_Q(i, Q, Q_, wx, wy)
+
+    # Third loop: copy back
+    for i in Q:
+        Q[i] = Q_[i]
+
+
+@ti.kernel
+def pgraph_Q(particles: ti.template(), wx: ti.template(), wy: ti.template(), z: ti.template(),
+             h: ti.template(), Q: ti.template(), Q_: ti.template(), S: ti.template(), mask_Q: ti.template()):
+    """
+    Sparse discharge diffusion for particle-occupied nodes and their neighbors.
+
+    Efficiently processes only nodes that contain particles or are neighbors to
+    particle-occupied nodes, using a mask to avoid duplicate processing.
+
+    Loops through particles (not full field) for sparsity. Mask values:
+    - 0: not active
+    - 1: marked for processing
+    - 2: processed in current phase
+
+    Args:
+        particles: Particle field with .pos attribute
+        wx: Weight field for rightward flow
+        wy: Weight field for downward flow
+        z: Elevation field
+        h: Water depth field
+        Q: Discharge field (input/output)
+        Q_: Temporary discharge field
+        S: Source term field
+        mask_Q: ti.u8 mask field for tracking processed nodes
+    """
+    # Reset mask to 0
+    for i in mask_Q:
+        mask_Q[i] = ti.u8(0)
+
+    # Mark all particle positions and their neighbors as 1
+    for pi in particles:
+        i = particles[pi].pos
+        mask_Q[i] = ti.u8(1)
+
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j != -1 and not flow.neighbourer_flat.nodata(j):
+                mask_Q[j] = ti.u8(1)
+
+    # Phase 1: Initialize Q_ from S (atomically check-and-set mask)
+    for pi in particles:
+        i = particles[pi].pos
+        old_val = ti.atomic_max(mask_Q[i], ti.u8(2))
+        if old_val == ti.u8(1):
+            Q_[i] = S[i]
+
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j != -1:
+                old_val = ti.atomic_max(mask_Q[j], ti.u8(2))
+                if old_val == ti.u8(1):
+                    Q_[j] = S[j]
+
+    # Reset mask 2→1 for next phase
+    for pi in particles:
+        i = particles[pi].pos
+        if mask_Q[i] == ti.u8(2):
+            mask_Q[i] = ti.u8(1)
+
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j != -1 and mask_Q[j] == ti.u8(2):
+                mask_Q[j] = ti.u8(1)
+
+    # Phase 2: Update weights (atomically check-and-set)
+    for pi in particles:
+        i = particles[pi].pos
+        old_val = ti.atomic_max(mask_Q[i], ti.u8(2))
+        if old_val == ti.u8(1):
+            update_wxy(i, wx, wy, z, h)
+
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j != -1:
+                old_val = ti.atomic_max(mask_Q[j], ti.u8(2))
+                if old_val == ti.u8(1):
+                    update_wxy(j, wx, wy, z, h)
+
+    # Reset mask 2→1
+    for pi in particles:
+        i = particles[pi].pos
+        if mask_Q[i] == ti.u8(2):
+            mask_Q[i] = ti.u8(1)
+
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j != -1 and mask_Q[j] == ti.u8(2):
+                mask_Q[j] = ti.u8(1)
+
+    # Phase 3: Accumulate Q contributions (atomically check-and-set)
+    for pi in particles:
+        i = particles[pi].pos
+        old_val = ti.atomic_max(mask_Q[i], ti.u8(2))
+        if old_val == ti.u8(1):
+            update_Q(i, Q, Q_, wx, wy)
+
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j != -1:
+                old_val = ti.atomic_max(mask_Q[j], ti.u8(2))
+                if old_val == ti.u8(1):
+                    update_Q(j, Q, Q_, wx, wy)
+
+    # Reset mask 2→1
+    for pi in particles:
+        i = particles[pi].pos
+        if mask_Q[i] == ti.u8(2):
+            mask_Q[i] = ti.u8(1)
+
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j != -1 and mask_Q[j] == ti.u8(2):
+                mask_Q[j] = ti.u8(1)
+
+    # Phase 4: Copy Q_ back to Q (atomically check-and-set)
+    for pi in particles:
+        i = particles[pi].pos
+        old_val = ti.atomic_max(mask_Q[i], ti.u8(2))
+        if old_val == ti.u8(1):
+            Q[i] = Q_[i]
+
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j != -1:
+                old_val = ti.atomic_max(mask_Q[j], ti.u8(2))
+                if old_val == ti.u8(1):
+                    Q[j] = Q_[j]
+
+
+
+
+
+
+
+
+
+# pgraph_v0(particles, z, h, dh, S, Q, Q_, manning, dt, omega)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ---------------- Projection-diffusion ----------------
 
 @ti.kernel
@@ -1415,3 +1875,7 @@ def one_shot_smooth(
     project_floor(eta, z)
     _match_volume_inplace(eta, z, acc_vol, cell_area, V_target)
     compute_h_from_eta(h, eta, z)
+
+
+
+#######

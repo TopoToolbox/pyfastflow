@@ -10,6 +10,7 @@ Core Modules:
 - gf_fields: Flooder class with pool-based field management for flood variables
 - gf_hydrodynamics: Core hydrodynamic computation kernels with Manning's friction
 - gf_ls: LisFlood explicit finite difference implementation (Bates et al. 2010)
+- gf_part: Particle tracking on flood surfaces with collision detection
 
 Key Features:
 - LisFlood: Explicit 2D shallow water equations with inertial simplification
@@ -68,6 +69,23 @@ Usage:
     discharge_y = flooder.get_qy()    # y-direction unit discharge (m²/s)
     velocity_x = discharge_x / (water_depth + 1e-6)  # x-velocity (m/s)
 
+    # Particle tracking on flood surface
+    particles = pf.flood.Particle.field(shape=1000)
+    occupancy = ti.field(ti.u8, shape=(nx * ny,))
+
+    # Initialize particles at random valid locations
+    pf.flood.init_particles(particles)
+
+    # Move particles with collision detection
+    pf.flood.move_particles_with_collision(
+        particles,
+        flooder.z,
+        flooder.h,
+        occupancy,
+        stoch_exp=0.5,  # Stochasticity
+        use_d8=True     # D8 connectivity
+    )
+
 Scientific Background:
 LisFlood follows the local inertial approximation of Bates et al. (2010) for explicit
 2D shallow water flow. GraphFlood implements the implicit flow routing approach of
@@ -78,7 +96,7 @@ Author: B.G.
 
 # Import specific classes and functions from each module
 # Import modules themselves for module-level access
-from . import gf_fields, gf_hydrodynamics, gf_ls
+from . import gf_fields, gf_hydrodynamics, gf_ls, gf_part
 from .precipitation_gui import precipitation_gui
 from .gf_fields import Flooder
 from .gf_hydrodynamics import diffuse_Q_constant_prec, graphflood_core_cte_mannings
@@ -87,6 +105,14 @@ from .gf_ls import (
     flow_route,
     init_LS_on_hw_from_constant_effective_prec,
     init_LS_on_hw_from_variable_effective_prec,
+)
+from .gf_part import (
+    Particle,
+    spawn,
+    move_on_z,
+    move_on_zh,
+    init_particles,
+    move_particles_with_collision,
 )
 
 # Export all modules
@@ -101,9 +127,17 @@ __all__ = [
     # GraphFlood kernels
     "diffuse_Q_constant_prec",
     "graphflood_core_cte_mannings",
+    # Particle tracking
+    "Particle",
+    "spawn",
+    "move_on_z",
+    "move_on_zh",
+    "init_particles",
+    "move_particles_with_collision",
     # Module names
     "gf_fields",
     "gf_hydrodynamics",
     "gf_ls",
+    "gf_part",
     "precipitation_gui",
 ]
