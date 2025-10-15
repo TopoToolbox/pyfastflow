@@ -1422,25 +1422,32 @@ def update_wxy(index, wx, wy, z, h):
 @ti.func
 def update_Q(index, Q, Q_, wx, wy):
     '''
-    This function updates  Q for a given index: check the 4 weights, and use the ones going toward index i from whichever j (remember conventions)
-    so Q_[i] += -wx[i] * Q[j] in the case wx[i] is <0 (flux goes from right to left) see what I mean?
+    Accumulate Q contributions from all uphill neighbors.
 
+    Convention: wx[i] is weight on link from i to right, wy[i] is weight on link from i to bottom
+    Positive weight = flow in positive direction (right/down)
+    Negative weight = flow in negative direction (left/up)
+    Only uphill nodes set weights, so we collect inflows from all 4 neighbors
     '''
+    # From left: if wx[left] > 0, left distributed flow rightward to index
     j_left = flow.neighbourer_flat.neighbour(index, 1)
     if j_left != -1 and not flow.neighbourer_flat.nodata(j_left):
         if wx[j_left] > 0:
             Q_[index] += wx[j_left] * Q[j_left]
 
+    # From top: if wy[top] > 0, top distributed flow downward to index
     j_top = flow.neighbourer_flat.neighbour(index, 0)
     if j_top != -1 and not flow.neighbourer_flat.nodata(j_top):
         if wy[j_top] > 0:
             Q_[index] += wy[j_top] * Q[j_top]
 
+    # From right: if wx[index] < 0, right distributed flow leftward to index
     j_right = flow.neighbourer_flat.neighbour(index, 2)
     if j_right != -1 and not flow.neighbourer_flat.nodata(j_right):
         if wx[index] < 0:
             Q_[index] += (-wx[index]) * Q[j_right]
 
+    # From bottom: if wy[index] < 0, bottom distributed flow upward to index
     j_bottom = flow.neighbourer_flat.neighbour(index, 3)
     if j_bottom != -1 and not flow.neighbourer_flat.nodata(j_bottom):
         if wy[index] < 0:
