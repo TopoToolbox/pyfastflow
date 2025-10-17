@@ -1401,12 +1401,13 @@ def update_wxy(index, wx, wy, z, h):
 
         slope = ((z[index] + h[index]) - (z[j] + h[j])) / cte.DX
 
-        process[k] = True
+        process[k] = True if slope > 0 else False
         slopes[k] = slope
 
         # Only sum positive slopes (downhill/outflow directions)
         if slope > 0:
             sums += slope
+
     if sums > 0:
         if(process[0]):
             wy[neigh[0]] = -slopes[0] / sums
@@ -1416,6 +1417,8 @@ def update_wxy(index, wx, wy, z, h):
             wx[index] = slopes[2] / sums
         if(process[3]):
             wy[index] = slopes[3] / sums
+    else:
+        h[index] += 1e-2
 
 
 
@@ -1454,6 +1457,59 @@ def update_Q(index, Q, Q_, wx, wy):
             Q_[index] += (-wy[index]) * Q[j_bottom]
 
 
+@ti.func
+def renormalize_outflows(index, wx, wy):
+    '''
+    Renormalize outflow weights at node index to ensure sum of |outflows| = 1.
+    Does not recalculate based on slopes, just ensures artificial mass balance.
+
+    For a node, outflows are:
+    - wx[index] if positive (to right)
+    - wy[index] if positive (to bottom)
+    - wx[left] if negative (to left, stored on left's link)
+    - wy[top] if negative (to top, stored on top's link)
+    '''
+    j_left = flow.neighbourer_flat.neighbour(index, 1)
+    j_top = flow.neighbourer_flat.neighbour(index, 0)
+
+    # Sum absolute values of all outflows
+    sum_abs = 0.0
+
+    # Check right outflow
+    if wx[index] > 0:
+        sum_abs += wx[index]
+
+    # Check bottom outflow
+    if wy[index] > 0:
+        sum_abs += wy[index]
+
+    # Check left outflow
+    if j_left != -1 and not flow.neighbourer_flat.nodata(j_left):
+        if wx[j_left] < 0:
+            sum_abs += -wx[j_left]
+
+    # Check top outflow
+    if j_top != -1 and not flow.neighbourer_flat.nodata(j_top):
+        if wy[j_top] < 0:
+            sum_abs += -wy[j_top]
+
+    # Renormalize if there are outflows
+    if sum_abs > 0:
+        if wx[index] > 0:
+            wx[index] = wx[index] / sum_abs
+
+        if wy[index] > 0:
+            wy[index] = wy[index] / sum_abs
+
+        if j_left != -1 and not flow.neighbourer_flat.nodata(j_left):
+            if wx[j_left] < 0:
+                wx[j_left] = wx[j_left] / sum_abs  # Keep negative sign
+
+        if j_top != -1 and not flow.neighbourer_flat.nodata(j_top):
+            if wy[j_top] < 0:
+                wy[j_top] = wy[j_top] / sum_abs  # Keep negative sign
+
+
 @ti.kernel
 def compute_weights_wxy(wx: ti.template(), wy: ti.template(), z: ti.template(), h: ti.template()):
     """
@@ -1475,7 +1531,7 @@ def compute_weights_wxy(wx: ti.template(), wy: ti.template(), z: ti.template(), 
 
 
 @ti.kernel
-def diffuse_Q_with_weights(Q: ti.template(), Q_: ti.template(), wx: ti.template(), wy: ti.template(), S: ti.template()):
+def diffuse_Q_with_weights(Q: ti.template(), Q_: ti.template(), wx: ti.template(), wy: ti.template(), S: ti.template(), omega:ti.f32):
     """
     Diffuse discharge Q using pre-computed weights wx, wy.
 
@@ -1503,7 +1559,7 @@ def diffuse_Q_with_weights(Q: ti.template(), Q_: ti.template(), wx: ti.template(
 
     # Third loop: copy back
     for i in Q:
-        Q[i] = Q_[i]
+        Q[i] = (1-omega) * Q[i] + omega * Q_[i]
 
 
 @ti.kernel
@@ -1511,14 +1567,6 @@ def pgraph_Q(particles: ti.template(), wx: ti.template(), wy: ti.template(), z: 
              h: ti.template(), Q: ti.template(), Q_: ti.template(), S: ti.template(), mask_Q: ti.template()):
     """
     Sparse discharge diffusion for particle-occupied nodes and their neighbors.
-
-    Efficiently processes only nodes that contain particles or are neighbors to
-    particle-occupied nodes, using a mask to avoid duplicate processing.
-
-    Loops through particles (not full field) for sparsity. Mask values:
-    - 0: not active
-    - 1: marked for processing
-    - 2: processed in current phase
 
     Args:
         particles: Particle field with .pos attribute
@@ -1535,103 +1583,62 @@ def pgraph_Q(particles: ti.template(), wx: ti.template(), wy: ti.template(), z: 
     for i in mask_Q:
         mask_Q[i] = ti.u8(0)
 
-    # Mark all particle positions and their neighbors as 1
+    # For all particle positions: update weights and flag mask
     for pi in particles:
         i = particles[pi].pos
+        update_wxy(i, wx, wy, z, h)
         mask_Q[i] = ti.u8(1)
+
+    # For all particle positions: process neighbors
+    for pi in particles:
+        i = particles[pi].pos
+        for k in range(4):
+            j = flow.neighbourer_flat.neighbour(i, k)
+            if j == -1 or flow.neighbourer_flat.nodata(j):
+                continue
+
+            # Atomically check and flag neighbor
+            old_val = ti.atomic_max(mask_Q[j], ti.u8(1))
+            if old_val == ti.u8(0):
+                # First thread to reach this neighbor - renormalize it
+                renormalize_outflows(j, wx, wy)
+
+    # Initialize Q_ from S for active nodes (mask=1 means needs processing)
+    for pi in particles:
+        i = particles[pi].pos
+        Q_[i] = S[i]
 
         for k in range(4):
             j = flow.neighbourer_flat.neighbour(i, k)
             if j != -1 and not flow.neighbourer_flat.nodata(j):
-                mask_Q[j] = ti.u8(1)
-
-    # Phase 1: Initialize Q_ from S (atomically check-and-set mask)
-    for pi in particles:
-        i = particles[pi].pos
-        old_val = ti.atomic_max(mask_Q[i], ti.u8(2))
-        if old_val == ti.u8(1):
-            Q_[i] = S[i]
-
-        for k in range(4):
-            j = flow.neighbourer_flat.neighbour(i, k)
-            if j != -1:
-                old_val = ti.atomic_max(mask_Q[j], ti.u8(2))
-                if old_val == ti.u8(1):
+                if mask_Q[j] == ti.u8(1):
                     Q_[j] = S[j]
 
-    # Reset mask 2→1 for next phase
+    # Accumulate Q contributions: process particle nodes and atomically check neighbors
     for pi in particles:
         i = particles[pi].pos
-        if mask_Q[i] == ti.u8(2):
-            mask_Q[i] = ti.u8(1)
+        update_Q(i, Q, Q_, wx, wy)
+        mask_Q[i] = ti.u8(2)
 
         for k in range(4):
             j = flow.neighbourer_flat.neighbour(i, k)
-            if j != -1 and mask_Q[j] == ti.u8(2):
-                mask_Q[j] = ti.u8(1)
+            if j == -1 or flow.neighbourer_flat.nodata(j):
+                continue
 
-    # Phase 2: Update weights (atomically check-and-set)
+            # Atomically check and flag neighbor
+            old_val = ti.atomic_max(mask_Q[j], ti.u8(2))
+            if old_val == ti.u8(1):
+                update_Q(j, Q, Q_, wx, wy)
+
+    # Copy back for processed nodes (mask=2)
     for pi in particles:
         i = particles[pi].pos
-        old_val = ti.atomic_max(mask_Q[i], ti.u8(2))
-        if old_val == ti.u8(1):
-            update_wxy(i, wx, wy, z, h)
+        Q[i] = Q_[i]
 
         for k in range(4):
             j = flow.neighbourer_flat.neighbour(i, k)
-            if j != -1:
-                old_val = ti.atomic_max(mask_Q[j], ti.u8(2))
-                if old_val == ti.u8(1):
-                    update_wxy(j, wx, wy, z, h)
-
-    # Reset mask 2→1
-    for pi in particles:
-        i = particles[pi].pos
-        if mask_Q[i] == ti.u8(2):
-            mask_Q[i] = ti.u8(1)
-
-        for k in range(4):
-            j = flow.neighbourer_flat.neighbour(i, k)
-            if j != -1 and mask_Q[j] == ti.u8(2):
-                mask_Q[j] = ti.u8(1)
-
-    # Phase 3: Accumulate Q contributions (atomically check-and-set)
-    for pi in particles:
-        i = particles[pi].pos
-        old_val = ti.atomic_max(mask_Q[i], ti.u8(2))
-        if old_val == ti.u8(1):
-            update_Q(i, Q, Q_, wx, wy)
-
-        for k in range(4):
-            j = flow.neighbourer_flat.neighbour(i, k)
-            if j != -1:
-                old_val = ti.atomic_max(mask_Q[j], ti.u8(2))
-                if old_val == ti.u8(1):
-                    update_Q(j, Q, Q_, wx, wy)
-
-    # Reset mask 2→1
-    for pi in particles:
-        i = particles[pi].pos
-        if mask_Q[i] == ti.u8(2):
-            mask_Q[i] = ti.u8(1)
-
-        for k in range(4):
-            j = flow.neighbourer_flat.neighbour(i, k)
-            if j != -1 and mask_Q[j] == ti.u8(2):
-                mask_Q[j] = ti.u8(1)
-
-    # Phase 4: Copy Q_ back to Q (atomically check-and-set)
-    for pi in particles:
-        i = particles[pi].pos
-        old_val = ti.atomic_max(mask_Q[i], ti.u8(2))
-        if old_val == ti.u8(1):
-            Q[i] = Q_[i]
-
-        for k in range(4):
-            j = flow.neighbourer_flat.neighbour(i, k)
-            if j != -1:
-                old_val = ti.atomic_max(mask_Q[j], ti.u8(2))
-                if old_val == ti.u8(1):
+            if j != -1 and not flow.neighbourer_flat.nodata(j):
+                if mask_Q[j] == ti.u8(2):
                     Q[j] = Q_[j]
 
 
