@@ -1418,7 +1418,9 @@ def update_wxy(index, wx, wy, z, h):
         if(process[3]):
             wy[index] = slopes[3] / sums
     else:
-        h[index] += 1e-2
+        h[index] += 1e-2*ti.random()
+
+
 
 
 
@@ -1562,6 +1564,7 @@ def diffuse_Q_with_weights(Q: ti.template(), Q_: ti.template(), wx: ti.template(
         Q[i] = (1-omega) * Q[i] + omega * Q_[i]
 
 
+
 @ti.kernel
 def pgraph_Q(particles: ti.template(), wx: ti.template(), wy: ti.template(), z: ti.template(),
              h: ti.template(), Q: ti.template(), Q_: ti.template(), S: ti.template(), mask_Q: ti.template()):
@@ -1649,7 +1652,76 @@ def pgraph_Q(particles: ti.template(), wx: ti.template(), wy: ti.template(), z: 
 
 
 
-# pgraph_v0(particles, z, h, dh, S, Q, Q_, manning, dt, omega)
+@ti.func
+def _compute_sw(index, z, h):
+    '''
+    this function updates wx and wy for a given node. Loop thorugh neighbours' z and h, calculate the sum of the slope in z+h and weights are locals/sums for node i
+    '''
+    msx = 0.0
+    msy = 0.0
+    process = ti.Vector([False,False,False,False])
+    slopes = ti.Vector([0.,0.,0.,0.])
+    neigh = ti.Vector(
+        [flow.neighbourer_flat.neighbour(index, 0),
+         flow.neighbourer_flat.neighbour(index, 1),
+         flow.neighbourer_flat.neighbour(index, 2),
+         flow.neighbourer_flat.neighbour(index, 3)]
+    )
+
+
+    if neigh[0]>-1:
+        slope = ((z[index] + h[index]) - (z[neigh[0]] + h[neigh[0]])) / cte.DX
+        if slope > msy:
+            msy = slope
+    if neigh[3]>-1:
+        slope = ((z[index] + h[index]) - (z[neigh[0]] + h[neigh[0]])) / cte.DX
+        if slope > msy:
+            msy = slope
+
+    if neigh[1]>-1:
+        slope = ((z[index] + h[index]) - (z[neigh[0]] + h[neigh[0]])) / cte.DX
+        if slope > msy:
+            msx = slope
+    if neigh[2]>-1:
+        slope = ((z[index] + h[index]) - (z[neigh[0]] + h[neigh[0]])) / cte.DX
+        if slope > msy:
+            msx = slope
+
+    norm = ti.math.sqrt(msx**2 + msy**2)
+
+    return norm
+
+@ti.kernel
+def compute_sw(z:ti.template(),h:ti.template(),sw:ti.template()):
+
+    for i in z:
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            sw[i] = 0.
+            continue
+
+        sw[i] = _compute_sw(i,z,h)
+
+@ti.func
+def _compute_tau(index, z, h,rho):
+    '''
+    this function updates wx and wy for a given node. Loop thorugh neighbours' z and h, calculate the sum of the slope in z+h and weights are locals/sums for node i
+    '''
+    sw = _compute_sw(index,z,h)
+    tau = sw*h[index]*rho*9.81
+
+    return tau
+
+@ti.kernel
+def compute_tau(z:ti.template(),h:ti.template(),tau:ti.template(), rho:ti.f32):
+
+    for i in z:
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            tau[i] = 0.
+            continue
+
+        tau[i] = _compute_tau(i,z,h, rho)
+
+
 
 
 

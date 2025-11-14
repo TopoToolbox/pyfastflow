@@ -763,6 +763,35 @@ class Flooder:
         Q_.release()
         return Qo
 
+    def get_sw(self):
+        """
+        Get current discharge field from router as numpy array.
+
+        Returns:
+                numpy.ndarray: Discharge values (m³/s) reshaped to 2D grid
+        """
+        sw = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        pf.flood.gf_hydrodynamics.compute_sw(self.grid.z.field, self.h.field, sw.field)
+        out = sw.field.to_numpy().reshape(self.rshp)
+        sw.release()
+        return out
+
+    def get_tau(self, rho=1000.):
+        """
+        Get current discharge field from router as numpy array.
+
+        Returns:
+                numpy.ndarray: Discharge values (m³/s) reshaped to 2D grid
+        """
+        tau = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        pf.flood.gf_hydrodynamics.compute_tau(self.grid.z.field, self.h.field, tau.field, rho)
+        out = tau.field.to_numpy().reshape(self.rshp)
+        tau.release()
+        return out
+
+    
+# compute_tau(z:ti:template(),h:ti:template(),tau:ti,template(), rho:ti.f32)
+
     
 
     def destroy(self):

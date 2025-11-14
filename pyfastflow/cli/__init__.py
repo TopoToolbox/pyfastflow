@@ -8,6 +8,7 @@ Available Commands:
 - raster2npy: Convert raster files to numpy arrays
 - raster-upscale: Double raster resolution using rastermanip utilities
 - raster-downscale: Halve raster resolution using rastermanip utilities
+- dem2png: Convert DEM files to PNG format
 - precip-gui: Interactive precipitation map editor
 - terrain3d: 3D terrain visualization using visuGL
 
@@ -18,6 +19,7 @@ _CLI_SUBMODULES = {
     "raster2npy": (".raster_commands", "raster2npy"),
     "raster_upscale": (".rastermanip_commands", "raster_upscale"),
     "raster_downscale": (".rastermanip_commands", "raster_downscale"),
+    "dem2png": (".dem2png_commands", "dem2png"),
     "boundary_gui": (".grid_commands", "boundary_gui"),
     "precipitation_gui": (".precip_commands", "precipitation_gui"),
     "terrain3d": (".terrain3d_cli", "main"),

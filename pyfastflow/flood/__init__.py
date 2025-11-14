@@ -99,6 +99,7 @@ Author: B.G.
 from . import gf_fields, gf_hydrodynamics, gf_ls, gf_part
 from .precipitation_gui import precipitation_gui
 from .gf_fields import Flooder
+from .ggf_object import GGF_Object
 from .gf_hydrodynamics import diffuse_Q_constant_prec, graphflood_core_cte_mannings
 from .gf_ls import (
     depth_update,
@@ -119,6 +120,7 @@ from .gf_part import (
 __all__ = [
     # Core classes
     "Flooder",
+    "GGF_Object",
     # LisFlood kernels
     "flow_route",
     "depth_update",

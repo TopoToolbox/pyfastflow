@@ -31,6 +31,7 @@ setup(
         "numpy>=1.20.0",
         "matplotlib>=3.3.0",
         "click>=7.0",
+        "pillow>=8.0.0",
     ],
     extras_require={
         "dev": [
@@ -67,6 +68,7 @@ setup(
             "pff-raster2npy=pyfastflow.cli.raster_commands:raster2npy",
             "pff-upscale=pyfastflow.cli.rastermanip_commands:raster_upscale",
             "pff-downscale=pyfastflow.cli.rastermanip_commands:raster_downscale",
+            "pff-dem2png=pyfastflow.cli.dem2png_commands:dem2png",
             "pff-boundary-gui=pyfastflow.cli.grid_commands:boundary_gui",
             "pff-precip-gui=pyfastflow.cli.precip_commands:precipitation_gui",
             "pff-terrain3d=pyfastflow.cli.terrain3d_cli:main",

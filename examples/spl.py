@@ -44,7 +44,7 @@ b = pff.pool.get_temp_field(ti.f32, (ny*nx))
 dx = 32.
 dt = 1e2
 K = 1e-5
-hillslope = True
+hillslope = False
 kappa = 1e-2
 Sc = 0.56
 m = 0.45
@@ -115,8 +115,30 @@ im = ax.imshow(grid.get_z(), cmap = 'terrain')
 plt.colorbar(im, label = 'elevation')
 fig.show()
 
+router.compute_receivers()
+# recs = router.receivers.to_numpy()
+# recs[:nx] = np.arange(nx)
+# recs[(nx-1)*ny:nx*ny] = np.arange((nx-1)*ny,nx*ny)
+# router.receivers.field.from_numpy(recs)
+router.reroute_flow()
+router.fill_z()
+uplift(grid.z.field, rate ,dt)
+router.accumulate_constant_Q(1.)
+
+init_k(a.field, b.field, grid.z.field, dt, K, dx, router.Q.field, m, router.receivers.field)
+# b.field.copy_from(grid.z.field)
+
+router.propagate_upstream_affine_var(a, b)
+grid.z.copy_from(b)
+if (hillslope):
+	router.fill_z()
+	init_k_h(a.field, b.field, grid.z.field, dt, kappa, dx, router.receivers.field)
+	router.propagate_upstream_affine_var(a, b)
+	grid.z.copy_from(b)
+	pff.flow.fill_topo.topobehead(router,S_c = Sc)
+
 st = time.perf_counter()
-for i in range (500):
+for i in range (10):
 	for i in range(100):
 		router.compute_receivers()
 		# recs = router.receivers.to_numpy()
