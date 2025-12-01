@@ -24,6 +24,12 @@ from .. import constants as cte
 
 
 @ti.kernel
+def add_P_to_h(prec:ti.template(), h:ti.template(), dt:ti.f32):
+    for i in h:
+        h[i]+=prec[i]*dt
+
+
+@ti.kernel
 def diffuse_Q_constant_prec(z: ti.template(), Q: ti.template(), temp: ti.template()):
     """
     Diffuse discharge field to simulate multiple flow paths.

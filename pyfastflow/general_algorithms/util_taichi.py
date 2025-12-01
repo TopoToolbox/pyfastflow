@@ -58,3 +58,8 @@ def init_arange(array: ti.template()):
     """ """
     for i in array:
         array[i] = i
+
+@ti.kernel
+def multiply_by_scalar(A:ti.template(), scalar:ti.template()):
+    for i in A:
+        A[i] *= scalar

@@ -35,14 +35,20 @@ class GGF_Object:
         dt_hydro: float = 1e-3,
         dt_hydro_ls: Optional[float] = None,
     ):
+        """
+        One line caller: GGF_Object(router, precipitation_rates = 10e-3 / 3600, manning = 0.033, edge_slope = 1e-2, dt_hydro = 1e-3)
+        """
+        # Core references shared with the original Flooder
         self.router = router
         self.grid = router.grid
 
         self.og_z = self.grid.z.field.to_numpy()
 
+        # Persistent hydrodynamic state
         self.h = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
         self.dh = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
         self.nQ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        # LisFlood-specific discharges are created lazily by run_LS
         self.qx_LS = None
         self.qy_LS = None
         self.qx = None
@@ -95,9 +101,11 @@ class GGF_Object:
         dt: float = 5e-3,
         temporal_dumping: float = 0.5,
         prec2D: Optional[Any] = None,
+        full_Qi: int = 0,
     ):
         """
         Execute the GraphFlood loop defined by the reference script.
+        One-liner: run_graphflood(iterations = 1000, diffusion_cycles = 1, weight_recomputations = 1, dt = 5e-3, temporal_dumping = 0.5, prec2D = None,)
 
         Args:
             iterations: Number of outer GraphFlood iterations.
@@ -110,19 +118,17 @@ class GGF_Object:
             prec2D: Optional 2D precipitation map replacing the scalar rate.
         """
 
-        if iterations <= 0:
-            raise ValueError("iterations must be >= 1")
-        if diffusion_cycles <= 0:
-            raise ValueError("diffusion_cycles must be >= 1")
-        if weight_recomputations <= 0:
-            raise ValueError("weight_recomputations must be >= 1")
-
         grid_shape = self.grid.z.field.shape
 
+        # Temporary buffers: weights (wx/wy), diffused discharge (Q_), and precipitation (S)
         wx = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=grid_shape)
         wy = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=grid_shape)
         Q_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=grid_shape)
         S = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=grid_shape)
+        
+        if full_Qi >= 0:
+            S_DA = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=grid_shape)
+
 
         wx.field.fill(0.0)
         wy.field.fill(0.0)
@@ -131,11 +137,43 @@ class GGF_Object:
         try:
             self._fill_precipitation_field(S.field, prec2D)
 
+            if full_Qi >= 0 and full_Qi != 1:
+                self.router.compute_receivers()
+                self.router.reroute_flow()
+                self.fill_lakes_to_z()
+                S_DA.field.copy_from(S.field)
+                pf.general_algorithms.util_taichi.multiply_by_scalar(S_DA.field, pf.constants.DX**2)
+                self.router.accumulate_custom_donwstream(S_DA.field)
+                self.router.Q.field.copy_from(S_DA.field)
+                # Restore original bed elevation by removing the temporarily added depth
+                pf.general_algorithms.util_taichi.add_B_to_weighted_A(
+                    self.grid.z.field, self.h.field, -1.0
+                )
+
+
+
             for _ in range(iterations):
+
+                if full_Qi >= 1 and (_ % full_Qi) == 0:
+                    self.router.compute_receivers()
+                    self.router.reroute_flow()
+                    self.fill_lakes_to_z()
+                    S_DA.field.copy_from(S.field)
+                    pf.general_algorithms.util_taichi.multiply_by_scalar(S_DA.field, pf.constants.DX**2)
+                    self.router.accumulate_custom_donwstream(S_DA.field)
+                    self.router.Q.field.copy_from(S_DA.field)
+                    # Restore original bed elevation by removing the temporarily added depth
+                    pf.general_algorithms.util_taichi.add_B_to_weighted_A(
+                        self.grid.z.field, self.h.field, -1.0
+                    )
+
+
+
                 for _ in range(diffusion_cycles):
                     wx.field.fill(0.0)
                     wy.field.fill(0.0)
 
+                    # Rebuild directional weights between each diffusion pass
                     for _ in range(weight_recomputations):
                         pf.flood.gf_hydrodynamics.compute_weights_wxy(
                             wx.field,
@@ -144,6 +182,7 @@ class GGF_Object:
                             self.h.field,
                         )
 
+                    # Diffuse discharge using the freshly computed weights and precipitation
                     pf.flood.gf_hydrodynamics.diffuse_Q_with_weights(
                         self.router.Q.field,
                         Q_.field,
@@ -155,10 +194,12 @@ class GGF_Object:
 
                 self.run_graphflood_diffuse_nopropag(N=1, dt=dt)
         finally:
+            # Always free pooled fields even if the loop raises
             wx.release()
             wy.release()
             Q_.release()
             S.release()
+            S_DA.release()
 
     def run_graphflood_diffuse_nopropag(self, N: int = 10, dt: Optional[float] = None, mask=None):
         """
@@ -181,6 +222,7 @@ class GGF_Object:
             tmask = None
 
         for _ in range(N):
+            # Dispatch masked vs. full kernels to avoid overhead in the common case
             if tmask is None:
                 pf.flood.gf_hydrodynamics.graphflood_cte_man_dt_nopropag(
                     self.grid.z.field,
@@ -203,10 +245,34 @@ class GGF_Object:
         if tmask is not None:
             tmask.release()
 
+    def fill_lakes_to_z(self):
+        z_ = pf.pool.taipool.get_tpfield(
+            dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny)
+        )
+        receivers_ = pf.pool.taipool.get_tpfield(
+            dtype=ti.i32, shape=(self.nx * self.ny)
+        )
+        receivers__ = pf.pool.taipool.get_tpfield(
+            dtype=ti.i32, shape=(self.nx * self.ny)
+        )
+        pf.flow.fill_z_add_delta(
+                    self.grid.z.field,
+                    self.h.field,
+                    z_.field,
+                    self.router.receivers.field,
+                    receivers_.field,
+                    receivers__.field,
+                    epsilon=1e-3,
+                )
+
+        z_.release()
+        receivers_.release()
+        receivers__.release()
+
     # ------------------------------------------------------------------
     # LisFlood explicit solver
     # ------------------------------------------------------------------
-    def run_LS(self, N: int = 1000, input_mode: str = "constant_prec", mode=None):
+    def run_LS(self, N: int = 1000, input_P = None):
         """
         Run the LisFlood explicit scheme while keeping dedicated discharge fields.
 
@@ -218,6 +284,7 @@ class GGF_Object:
         """
 
         if self.qx_LS is None:
+            # Allocate LisFlood discharge fields only once
             self.qx_LS = pf.pool.taipool.get_tpfield(
                 dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny)
             )
@@ -229,17 +296,12 @@ class GGF_Object:
             self.qx = self.qx_LS
             self.qy = self.qy_LS
 
+        S = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.nx * self.ny))
+        self._fill_precipitation_field(S.field, input_P if input_P is not None else pf.constants.PREC)
+
         for _ in range(N):
-            if input_mode == "constant_prec":
-                ls.init_LS_on_hw_from_constant_effective_prec(
-                    self.h.field, self.grid.z.field
-                )
-            elif input_mode == "custom_func":
-                if mode is None:
-                    raise ValueError("mode callable must be provided when input_mode='custom_func'")
-                mode()
-            else:
-                raise ValueError(f"Unsupported input_mode '{input_mode}'")
+            # Apply external water input then update discharges and water depth
+            pf.flood.gf_hydrodynamics.add_P_to_h(S.field, self.h.field, cte.DT_HYDRO_LS)
 
             ls.flow_route(
                 self.h.field,
@@ -253,6 +315,8 @@ class GGF_Object:
                 self.qx_LS.field,
                 self.qy_LS.field,
             )
+
+        S.release()
 
     # ------------------------------------------------------------------
     # Utility helpers
@@ -270,11 +334,13 @@ class GGF_Object:
         receivers_ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx * self.ny))
         receivers__ = pf.pool.taipool.get_tpfield(dtype=ti.i32, shape=(self.nx * self.ny))
 
+        # Work on the combined water surface (z + h)
         pf.general_algorithms.util_taichi.add_B_to_A(self.grid.z.field, self.h.field)
 
         self.router.compute_receivers()
         self.router.reroute_flow()
 
+        # Raise pits to remove local minima while preserving flow topology
         pf.flow.fill_z_add_delta(
             self.grid.z.field,
             self.h.field,
@@ -288,6 +354,7 @@ class GGF_Object:
         if compute_Qsfd:
             self.router.accumulate_constant_Q(cte.PREC, area=True)
 
+        # Restore original bed elevation by removing the temporarily added depth
         pf.general_algorithms.util_taichi.add_B_to_weighted_A(
             self.grid.z.field, self.h.field, -1.0
         )
