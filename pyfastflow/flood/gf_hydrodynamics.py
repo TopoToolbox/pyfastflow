@@ -1680,17 +1680,17 @@ def _compute_sw(index, z, h):
         if slope > msy:
             msy = slope
     if neigh[3]>-1:
-        slope = ((z[index] + h[index]) - (z[neigh[0]] + h[neigh[0]])) / cte.DX
+        slope = ((z[index] + h[index]) - (z[neigh[3]] + h[neigh[3]])) / cte.DX
         if slope > msy:
             msy = slope
 
     if neigh[1]>-1:
-        slope = ((z[index] + h[index]) - (z[neigh[0]] + h[neigh[0]])) / cte.DX
-        if slope > msy:
+        slope = ((z[index] + h[index]) - (z[neigh[1]] + h[neigh[1]])) / cte.DX
+        if slope > msx:
             msx = slope
     if neigh[2]>-1:
-        slope = ((z[index] + h[index]) - (z[neigh[0]] + h[neigh[0]])) / cte.DX
-        if slope > msy:
+        slope = ((z[index] + h[index]) - (z[neigh[2]] + h[neigh[2]])) / cte.DX
+        if slope > msx:
             msx = slope
 
     norm = ti.math.sqrt(msx**2 + msy**2)

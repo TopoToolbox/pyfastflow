@@ -22,8 +22,8 @@ def _topofill(
     z_: ti.template(),
     rec_: ti.template(),
     rec__: ti.template(),
-    epsilon: ti.template(),
-    iteration: ti.template(),
+    epsilon: ti.f32,
+    iteration: ti.i32,
 ):
     """
     Single iteration of topographic filling algorithm.
