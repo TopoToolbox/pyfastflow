@@ -836,6 +836,7 @@ def graphflood_cte_man_dt_nopropag(z: ti.template(), h:ti.template(), Q: ti.temp
 
         # Skip boundary cells
         if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            h[i] = 0
             continue
 
         dh[i] += dt_local * Q[i]/cte.DX**2
@@ -901,6 +902,7 @@ def graphflood_cte_man_dt_nopropag_mask(z: ti.template(), h:ti.template(), Q: ti
 
         # Skip boundary cells
         if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            h[i] = 0
             continue
 
         dh[i] += dt_local * Q[i]/cte.DX**2
