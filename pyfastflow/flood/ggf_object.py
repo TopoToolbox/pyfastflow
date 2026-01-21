@@ -144,7 +144,8 @@ class GGF_Object:
                 S_DA.field.copy_from(S.field)
                 pf.general_algorithms.util_taichi.multiply_by_scalar(S_DA.field, pf.constants.DX**2)
                 self.router.accumulate_custom_donwstream(S_DA.field)
-                self.router.Q.field.copy_from(S_DA.field)
+                pf.general_algorithms.util_taichi.weighted_mean_B_in_A(self.router.Q.field, S_DA.field, temporal_dumping)
+                # self.router.Q.field.copy_from(S_DA.field)
                 # Restore original bed elevation by removing the temporarily added depth
                 pf.general_algorithms.util_taichi.add_B_to_weighted_A(
                     self.grid.z.field, self.h.field, -1.0
@@ -161,7 +162,8 @@ class GGF_Object:
                     S_DA.field.copy_from(S.field)
                     pf.general_algorithms.util_taichi.multiply_by_scalar(S_DA.field, pf.constants.DX**2)
                     self.router.accumulate_custom_donwstream(S_DA.field)
-                    self.router.Q.field.copy_from(S_DA.field)
+                    pf.general_algorithms.util_taichi.weighted_mean_B_in_A(self.router.Q.field, S_DA.field, temporal_dumping)
+                    # self.router.Q.field.copy_from(S_DA.field)
                     # Restore original bed elevation by removing the temporarily added depth
                     pf.general_algorithms.util_taichi.add_B_to_weighted_A(
                         self.grid.z.field, self.h.field, -1.0
@@ -191,7 +193,7 @@ class GGF_Object:
                         S.field,
                         temporal_dumping,
                     )
-
+                # The actual physics happens here (apply the friction law and the h increment)
                 self.run_graphflood_diffuse_nopropag(N=1, dt=dt)
         finally:
             # Always free pooled fields even if the loop raises
@@ -199,7 +201,8 @@ class GGF_Object:
             wy.release()
             Q_.release()
             S.release()
-            S_DA.release()
+            if full_Qi >= 0:
+                S_DA.release()
 
     def run_graphflood_diffuse_nopropag(self, N: int = 10, dt: Optional[float] = None, mask=None):
         """
@@ -392,6 +395,10 @@ class GGF_Object:
             "prec2D must be None, a numpy array, a Taichi field, "
             "or a pool field with a `.field` attribute.",
         )
+
+
+    def set_outlet_h_to(self, val):
+        pf.flood.gf_hydrodynamics._set_outlet_to(self.h.field, val)
 
     # ------------------------------------------------------------------
     # Getters / setters (API parity with Flooder)
