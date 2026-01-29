@@ -140,16 +140,16 @@ class GGF_Object:
             if full_Qi >= 0 and full_Qi != 1:
                 self.router.compute_receivers()
                 self.router.reroute_flow()
-                self.fill_lakes_to_z()
+                # self.fill_lakes_to_z()
                 S_DA.field.copy_from(S.field)
                 pf.general_algorithms.util_taichi.multiply_by_scalar(S_DA.field, pf.constants.DX**2)
                 self.router.accumulate_custom_donwstream(S_DA.field)
                 pf.general_algorithms.util_taichi.weighted_mean_B_in_A(self.router.Q.field, S_DA.field, temporal_dumping)
                 # self.router.Q.field.copy_from(S_DA.field)
                 # Restore original bed elevation by removing the temporarily added depth
-                pf.general_algorithms.util_taichi.add_B_to_weighted_A(
-                    self.grid.z.field, self.h.field, -1.0
-                )
+                # pf.general_algorithms.util_taichi.add_B_to_weighted_A(
+                #     self.grid.z.field, self.h.field, -1.0
+                # )
 
 
 
@@ -158,16 +158,16 @@ class GGF_Object:
                 if full_Qi >= 1 and (_ % full_Qi) == 0:
                     self.router.compute_receivers()
                     self.router.reroute_flow()
-                    self.fill_lakes_to_z()
+                    # self.fill_lakes_to_z()
                     S_DA.field.copy_from(S.field)
                     pf.general_algorithms.util_taichi.multiply_by_scalar(S_DA.field, pf.constants.DX**2)
                     self.router.accumulate_custom_donwstream(S_DA.field)
                     pf.general_algorithms.util_taichi.weighted_mean_B_in_A(self.router.Q.field, S_DA.field, temporal_dumping)
                     # self.router.Q.field.copy_from(S_DA.field)
                     # Restore original bed elevation by removing the temporarily added depth
-                    pf.general_algorithms.util_taichi.add_B_to_weighted_A(
-                        self.grid.z.field, self.h.field, -1.0
-                    )
+                    # pf.general_algorithms.util_taichi.add_B_to_weighted_A(
+                    #     self.grid.z.field, self.h.field, -1.0
+                    # )
 
 
 
