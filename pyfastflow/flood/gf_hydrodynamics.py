@@ -852,6 +852,24 @@ def graphflood_cte_man_dt_nopropag(z: ti.template(), h:ti.template(), Q: ti.temp
             h[i] = 0
 
 
+@ti.kernel
+def graphflood_dt_splat(h:ti.template(), Q: ti.template(), dt_local :cte.FLOAT_TYPE_TI):
+    """
+    NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
+
+    Author: B.G.
+    """
+
+    coeff = dt_local/(cte.DX**2)
+
+    # Diffuse discharge based on slope gradients
+    for i in h:
+
+        # Skip boundary cells
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+
+        h[i] += Q[i] * coeff
 
 
 @ti.kernel
