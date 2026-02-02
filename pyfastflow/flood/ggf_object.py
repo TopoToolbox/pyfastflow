@@ -112,7 +112,7 @@ class GGF_Object:
             diffusion_cycles: Number of diffusion passes per iteration.
             weight_recomputations: Number of weight recomputations before each
                 diffusion pass.
-            dt: Timestep used inside ``run_graphflood_diffuse_nopropag``.
+            dt: Timestep used inside ``increment_h_gf``.
             temporal_dumping: Temporal damping parameter passed to
                 ``diffuse_Q_with_weights``.
             prec2D: Optional 2D precipitation map replacing the scalar rate.
@@ -140,15 +140,16 @@ class GGF_Object:
             if full_Qi >= 0 and full_Qi != 1:
                 self.router.compute_receivers()
                 self.router.reroute_flow()
-                self.fill_lakes_to_z()
+                # self.fill_lakes_to_z()
                 S_DA.field.copy_from(S.field)
                 pf.general_algorithms.util_taichi.multiply_by_scalar(S_DA.field, pf.constants.DX**2)
                 self.router.accumulate_custom_donwstream(S_DA.field)
-                self.router.Q.field.copy_from(S_DA.field)
+                pf.general_algorithms.util_taichi.weighted_mean_B_in_A(self.router.Q.field, S_DA.field, temporal_dumping)
+                # self.router.Q.field.copy_from(S_DA.field)
                 # Restore original bed elevation by removing the temporarily added depth
-                pf.general_algorithms.util_taichi.add_B_to_weighted_A(
-                    self.grid.z.field, self.h.field, -1.0
-                )
+                # pf.general_algorithms.util_taichi.add_B_to_weighted_A(
+                #     self.grid.z.field, self.h.field, -1.0
+                # )
 
 
 
@@ -157,15 +158,16 @@ class GGF_Object:
                 if full_Qi >= 1 and (_ % full_Qi) == 0:
                     self.router.compute_receivers()
                     self.router.reroute_flow()
-                    self.fill_lakes_to_z()
+                    # self.fill_lakes_to_z()
                     S_DA.field.copy_from(S.field)
                     pf.general_algorithms.util_taichi.multiply_by_scalar(S_DA.field, pf.constants.DX**2)
                     self.router.accumulate_custom_donwstream(S_DA.field)
-                    self.router.Q.field.copy_from(S_DA.field)
+                    pf.general_algorithms.util_taichi.weighted_mean_B_in_A(self.router.Q.field, S_DA.field, temporal_dumping)
+                    # self.router.Q.field.copy_from(S_DA.field)
                     # Restore original bed elevation by removing the temporarily added depth
-                    pf.general_algorithms.util_taichi.add_B_to_weighted_A(
-                        self.grid.z.field, self.h.field, -1.0
-                    )
+                    # pf.general_algorithms.util_taichi.add_B_to_weighted_A(
+                    #     self.grid.z.field, self.h.field, -1.0
+                    # )
 
 
 
@@ -191,17 +193,78 @@ class GGF_Object:
                         S.field,
                         temporal_dumping,
                     )
-
-                self.run_graphflood_diffuse_nopropag(N=1, dt=dt)
+                # The actual physics happens here (apply the friction law and the h increment)
+                self.increment_h_gf(N=1, dt=dt)
         finally:
             # Always free pooled fields even if the loop raises
             wx.release()
             wy.release()
             Q_.release()
             S.release()
-            S_DA.release()
+            if full_Qi >= 0:
+                S_DA.release()
 
-    def run_graphflood_diffuse_nopropag(self, N: int = 10, dt: Optional[float] = None, mask=None):
+    def propagate_Qin(self, prec2D = None, fill_lakes = False, temporal_dumping = 1):
+
+        S = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=self.grid.z.field.shape)
+
+        self._fill_precipitation_field(S.field, prec2D)
+
+        self.router.compute_receivers()
+        self.router.reroute_flow()
+        if fill_lakes:
+            self.fill_lakes_to_z()
+
+        pf.general_algorithms.util_taichi.multiply_by_scalar(S.field, pf.constants.DX**2)
+        self.router.accumulate_custom_donwstream(S.field)
+        pf.general_algorithms.util_taichi.weighted_mean_B_in_A(self.router.Q.field, S.field, temporal_dumping)
+        
+        if fill_lakes:
+        
+            # Restore original bed elevation by removing the temporarily added depth
+            pf.general_algorithms.util_taichi.add_B_to_weighted_A(
+                self.grid.z.field, self.h.field, -1.0
+            )
+
+        S.release()
+
+
+    def diffuse_Qin(self, prec2D = None, temporal_dumping = 0.5, diffusion_cycles = 1):
+
+        S = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=self.grid.z.field.shape)
+        wx = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=self.grid.z.field.shape)
+        wy = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=self.grid.z.field.shape)
+        Q_ = pf.pool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=self.grid.z.field.shape)
+
+
+        self._fill_precipitation_field(S.field, prec2D)
+
+        for _ in range(diffusion_cycles):
+            wx.field.fill(0.0)
+            wy.field.fill(0.0)
+
+            pf.flood.gf_hydrodynamics.compute_weights_wxy(
+                wx.field,
+                wy.field,
+                self.grid.z.field,
+                self.h.field,
+            )
+
+            # Diffuse discharge using the freshly computed weights and precipitation
+            pf.flood.gf_hydrodynamics.diffuse_Q_with_weights(
+                self.router.Q.field,
+                Q_.field,
+                wx.field,
+                wy.field,
+                S.field,
+                temporal_dumping,
+            )
+        S.release()
+        wx.release()
+        wy.release()
+        Q_.release()
+
+    def divergence_h_gf(self, N: int = 1, dt: Optional[float] = None, mask=None):
         """
         Run the hydrodynamic diffusion kernel without propagation.
 
@@ -244,6 +307,26 @@ class GGF_Object:
         dh.release()
         if tmask is not None:
             tmask.release()
+
+    def splat_h(self, N: int = 1, dt: Optional[float] = None):
+        """
+        Run the hydrodynamic diffusion kernel without propagation.
+
+        Args:
+            N: Number of solver steps.
+            dt: Optional explicit timestep overriding ``cte.DT_HYDRO``.
+            mask: Optional mask restricting updates to a subset of nodes.
+        """
+
+    
+
+        for _ in range(N):
+            # Dispatch masked vs. full kernels to avoid overhead in the common case
+            pf.flood.gf_hydrodynamics.graphflood_dt_splat(
+                self.h.field,
+                self.flow.Q.field,cte.DT_HYDRO if dt is None else dt
+            )
+
 
     def fill_lakes_to_z(self):
         z_ = pf.pool.taipool.get_tpfield(
@@ -392,6 +475,10 @@ class GGF_Object:
             "prec2D must be None, a numpy array, a Taichi field, "
             "or a pool field with a `.field` attribute.",
         )
+
+
+    def set_outlet_h_to(self, val):
+        pf.flood.gf_hydrodynamics._set_outlet_to(self.h.field, val)
 
     # ------------------------------------------------------------------
     # Getters / setters (API parity with Flooder)

@@ -40,6 +40,7 @@ Author: B.G.
 import taichi as ti
 
 import pyfastflow as pf
+import pyfastflow as pff
 import pyfastflow.flow as flow
 
 from .. import constants as cte
@@ -60,6 +61,8 @@ def init_LS_on_hw_from_constant_effective_prec(hw: ti.template(), z: ti.template
     Author: B.G.
     """
     for i in hw:
+        if pff.grid.neighbourer_flat.nodata(i):
+            continue
         dh = cte.PREC * cte.DT_HYDRO_LS
         hw[i] += dh
 
@@ -82,6 +85,8 @@ def init_LS_on_hw_from_variable_effective_prec(
     Author: B.G.
     """
     for i in hw:
+        if pff.grid.neighbourer_flat.nodata(i):
+            continue
         dh = rate[i] * cte.DT_HYDRO_LS
         hw[i] += dh
 
@@ -119,6 +124,8 @@ def flow_route(
 
     # Process each grid cell for flow routing
     for i in z:
+        if pff.grid.neighbourer_flat.nodata(i):
+            continue
         # Get neighboring cell indices
         top = pf.grid.neighbourer_flat.neighbour(i, 0)  # North neighbor
         left = pf.grid.neighbourer_flat.neighbour(i, 1)  # West neighbor
@@ -298,6 +305,8 @@ def depth_update(
 
     # Process each grid cell for depth update
     for i in z:
+        if pff.grid.neighbourer_flat.nodata(i):
+            continue
         # Get row and column indices (for potential boundary checks)
         row, col = flow.neighbourer_flat.rc_from_i(i)
 

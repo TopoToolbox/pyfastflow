@@ -28,6 +28,13 @@ def add_P_to_h(prec:ti.template(), h:ti.template(), dt:ti.f32):
     for i in h:
         h[i]+=prec[i]*dt
 
+@ti.kernel
+def _set_outlet_to(h:ti.template(), val:ti.f32):
+    for i in h:
+        # Skip boundary cells
+        if flow.neighbourer_flat.can_leave_domain(i):
+            h[i] = val
+
 
 @ti.kernel
 def diffuse_Q_constant_prec(z: ti.template(), Q: ti.template(), temp: ti.template()):
@@ -844,6 +851,25 @@ def graphflood_cte_man_dt_nopropag(z: ti.template(), h:ti.template(), Q: ti.temp
         if(h[i] < 0):
             h[i] = 0
 
+
+@ti.kernel
+def graphflood_dt_splat(h:ti.template(), Q: ti.template(), dt_local :cte.FLOAT_TYPE_TI):
+    """
+    NEXT STEPS::add a tag that propagate from local minimas and reroute from corrected receivers
+
+    Author: B.G.
+    """
+
+    coeff = dt_local/(cte.DX**2)
+
+    # Diffuse discharge based on slope gradients
+    for i in h:
+
+        # Skip boundary cells
+        if flow.neighbourer_flat.can_leave_domain(i) or flow.neighbourer_flat.nodata(i):
+            continue
+
+        h[i] += Q[i] * coeff
 
 
 @ti.kernel
