@@ -112,7 +112,7 @@ class GGF_Object:
             diffusion_cycles: Number of diffusion passes per iteration.
             weight_recomputations: Number of weight recomputations before each
                 diffusion pass.
-            dt: Timestep used inside ``increment_h_gf``.
+            dt: Timestep used inside ``divergence_h_gf``.
             temporal_dumping: Temporal damping parameter passed to
                 ``diffuse_Q_with_weights``.
             prec2D: Optional 2D precipitation map replacing the scalar rate.
@@ -194,7 +194,7 @@ class GGF_Object:
                         temporal_dumping,
                     )
                 # The actual physics happens here (apply the friction law and the h increment)
-                self.increment_h_gf(N=1, dt=dt)
+                self.divergence_h_gf(N=1, dt=dt)
         finally:
             # Always free pooled fields even if the loop raises
             wx.release()
