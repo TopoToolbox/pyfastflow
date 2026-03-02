@@ -113,7 +113,7 @@ def accumulate_wavefront_mfd(z_field, Q_field, nx, ny):
     
     # 3. Loop until queue is empty
     iters = 0
-    max_iters = nx + ny # Safety limit
+    max_iters = nx * ny # Safety limit
     
     while iters < max_iters:
         next_count.field.fill(0)
@@ -133,7 +133,7 @@ def accumulate_wavefront_mfd(z_field, Q_field, nx, ny):
         curr_count, next_count = next_count, curr_count
         iters += 1
 
-        if iters % 10 :
+        if iters % 100 == 0:
             if curr_count.field[None] <= 0:
                 break
         
