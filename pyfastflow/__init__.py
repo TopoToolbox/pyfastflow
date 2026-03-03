@@ -14,6 +14,7 @@ __author__ = "B.G."
 
 # Lazy submodule loading to avoid heavy side effects at import time.
 _LAZY_SUBMODULES = [
+    "general_algorithms",
     "grid",
     "noise",
     "pool",
@@ -28,7 +29,6 @@ __all__ += ["taipool", "tp"]
 # "erodep",
 # "flood",
 # "flow",
-# "general_algorithms",
 # "io",
 # "misc",
 # "rastermanip",
