@@ -1,6 +1,6 @@
 # PyFastFlow
 
-**GPU-accelerated geomorphological and hydraulic flow modeling powered by Taichi**
+**First full-GPU geomorphological and hydrodynamic toolbox powered by Taichi-lang**
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![Taichi](https://img.shields.io/badge/taichi-≥1.6.0-orange.svg)](https://github.com/taichi-dev/taichi)
@@ -10,8 +10,10 @@
 
 **A lot of work will be put into finalising v1.0 in Q1 2026 + paper**
 
+**02/03/2026: I am currently in a hackathlon to refactor the interface to fix it before submission, stay tuned**
 
-PyFastFlow is a high-performance Python package for general geomorphological and hydrodynamic computations on GPU. Built on the Taichi programming language with bindings to `pytopotoolbox`, it provides efficient, portable parallel algorithms for flow accumulation, depression filling, (simple) shallow water flow modeling, and landscape evolution simulations.
+
+<!-- PyFastFlow is a high-performance Python package for general geomorphological and hydrodynamic computations on GPU. Built on the Taichi programming language with bindings to `pytopotoolbox`, it provides efficient, portable parallel algorithms for flow accumulation, depression filling, (simple) shallow water flow modeling, and landscape evolution simulations.
 
 The fast flow routines are implemented following **Jain et al., 2024** [📝](https://www-sop.inria.fr/reves/Basilic/2024/JKGFC24/FastFlowPG2024_Author_Version.pdf), delivering state-of-the-art performance for GPU-oriented flow computation (flow accumulation and local minima handling).
 
@@ -119,5 +121,5 @@ If you use PyFastFlow in your research, please contact me.
 - **Documentation**: https://pyfastflow.readthedocs.io/ *(coming soon)*
 - **PyPI Package**: https://pypi.org/project/pyfastflow/ *(coming soon)*
 - **Jain et al. 2024 Paper**: [PDF](https://www-sop.inria.fr/reves/Basilic/2024/JKGFC24/FastFlowPG2024_Author_Version.pdf)
-
+ -->
 ---
