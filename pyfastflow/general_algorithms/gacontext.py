@@ -1,160 +1,29 @@
 from types import SimpleNamespace
 
-import taichi as ti
-
-from .. import constants as cte
+from .ga_kernels import (
+    add_to_flat_kernel,
+    add_weighted_to_flat_kernel,
+    init_flat_arange_kernel,
+    multiply_flat_by_scalar_kernel,
+    scan_copy_input_to_work_kernel,
+    scan_downsweep_step_kernel,
+    scan_make_inclusive_and_copy_kernel,
+    scan_set_root_zero_kernel,
+    scan_upsweep_step_kernel,
+    swap_flat_kernel,
+    weighted_mean_into_flat_kernel,
+)
 from .math_utils import atan
 from .pingpong import getSrc, updateSrc
-
-
-gridctx = None
-
-
-@ti.kernel
-def swap_flat_kernel(array1: ti.template(), array2: ti.template()):
-    """
-    Swap two flat arrays over the bound grid size.
-
-    Author: B.G (02/2026)
-    """
-    for i in range(gridctx.nx * gridctx.ny):
-        temp = array1[i]
-        array1[i] = array2[i]
-        array2[i] = temp
-
-
-@ti.kernel
-def add_to_flat_kernel(array1: ti.template(), array2: ti.template()):
-    """
-    Add array2 into array1 over the bound grid size.
-
-    Author: B.G (02/2026)
-    """
-    for i in range(gridctx.nx * gridctx.ny):
-        array1[i] += array2[i]
-
-
-@ti.kernel
-def add_weighted_to_flat_kernel(
-    array1: ti.template(), array2: ti.template(), weight: cte.FLOAT_TYPE_TI
-):
-    """
-    Add a weighted version of array2 into array1 over the bound grid size.
-
-    Author: B.G (02/2026)
-    """
-    for i in range(gridctx.nx * gridctx.ny):
-        array1[i] += array2[i] * weight
-
-
-@ti.kernel
-def weighted_mean_into_flat_kernel(
-    array1: ti.template(), array2: ti.template(), weight: cte.FLOAT_TYPE_TI
-):
-    """
-    Blend array2 into array1 with a weighted mean over the bound grid size.
-
-    Author: B.G (02/2026)
-    """
-    for i in range(gridctx.nx * gridctx.ny):
-        array1[i] = array2[i] * weight + array1[i] * (1.0 - weight)
-
-
-@ti.kernel
-def init_flat_arange_kernel(array: ti.template()):
-    """
-    Fill a flat array with its row-major indices over the bound grid size.
-
-    Author: B.G (02/2026)
-    """
-    for i in range(gridctx.nx * gridctx.ny):
-        array[i] = i
-
-
-@ti.kernel
-def multiply_flat_by_scalar_kernel(array: ti.template(), scalar: ti.template()):
-    """
-    Multiply a flat array by a scalar field over the bound grid size.
-
-    Author: B.G (02/2026)
-    """
-    for i in range(gridctx.nx * gridctx.ny):
-        array[i] *= scalar[None]
-
-
-@ti.kernel
-def _scan_copy_input_to_work_kernel(src: ti.template(), dst: ti.template()):
-    """
-    Copy flat input data into the scan work buffer and zero-pad the tail.
-
-    Author: B.G (02/2026)
-    """
-    for i in range(gridctx.ga.scan_work_size):
-        if i < gridctx.nx * gridctx.ny:
-            dst[i] = src[i]
-        else:
-            dst[i] = 0
-
-
-@ti.kernel
-def _scan_upsweep_step_kernel(data: ti.template(), stride: ti.i32):
-    """
-    Execute one upsweep step over the precomputed scan work size.
-
-    Author: B.G (02/2026)
-    """
-    for i in range(gridctx.ga.scan_work_size):
-        if (i + 1) % (stride * 2) == 0:
-            data[i] += data[i - stride]
-
-
-@ti.kernel
-def _scan_downsweep_step_kernel(data: ti.template(), stride: ti.i32):
-    """
-    Execute one downsweep step over the precomputed scan work size.
-
-    Author: B.G (02/2026)
-    """
-    for i in range(gridctx.ga.scan_work_size):
-        if (i + 1) % (stride * 2) == 0:
-            temp = data[i - stride]
-            data[i - stride] = data[i]
-            data[i] += temp
-
-
-@ti.kernel
-def _scan_set_root_zero_kernel(data: ti.template()):
-    """
-    Zero the scan-tree root element in the work buffer.
-
-    Author: B.G (02/2026)
-    """
-    data[gridctx.ga.scan_work_size - 1] = 0
-
-
-@ti.kernel
-def _scan_make_inclusive_and_copy_kernel(
-    input_arr: ti.template(), work_arr: ti.template(), output_arr: ti.template()
-):
-    """
-    Convert exclusive scan work data to inclusive output over the bound grid size.
-
-    Author: B.G (02/2026)
-    """
-    for i in range(gridctx.nx * gridctx.ny):
-        if i == 0:
-            output_arr[i] = input_arr[i]
-        else:
-            output_arr[i] = work_arr[i] + input_arr[i]
 
 
 class GAContext:
     """
     Grid-bound context for general Taichi algorithms.
 
-    This context provides a small set of flat kernels specialized against one
-    GridContext, plus direct access to reusable Taichi funcs that do not need
-    per-context recompilation.
+    This context only exposes the final specialized API. The raw Taichi helper
+    funcs and kernels live in dedicated modules and are rebound here through
+    ``gridctx.make_func`` and ``gridctx.make_kernel``.
 
     Author: B.G (02/2026)
     """
@@ -171,27 +40,28 @@ class GAContext:
         while self.scan_work_size < self.n_flat:
             self.scan_work_size *= 2
 
-        # Make the scan size visible as a static constant through the bound grid context.
+        # Make the scan-size metadata visible from the universal ``gridctx``
+        # entry point used by the generic scan kernels.
         self.gridctx.ga = self
 
         self.tfunc = SimpleNamespace()
         self.kernels = SimpleNamespace()
-        self._bind_tfunc()
+        self._compile_helpers()
         self._compile_kernels()
 
-    def _bind_tfunc(self):
+    def _compile_helpers(self):
         """
-        Bind reusable Taichi helper funcs.
+        Bind reusable Taichi helper funcs to this context.
 
         Author: B.G (02/2026)
         """
-        self.tfunc.atan = atan
-        self.tfunc.get_src = getSrc
-        self.tfunc.update_src = updateSrc
+        self.tfunc.atan = self.gridctx.make_func(atan)
+        self.tfunc.get_src = self.gridctx.make_func(getSrc)
+        self.tfunc.update_src = self.gridctx.make_func(updateSrc)
 
     def _compile_kernels(self):
         """
-        Compile the flat kernel family for this context.
+        Bind the flat kernel family to this context.
 
         Author: B.G (02/2026)
         """
@@ -207,15 +77,13 @@ class GAContext:
         )
 
         self.kernels.scan_copy_input_to_work = self.gridctx.make_kernel(
-            _scan_copy_input_to_work_kernel
+            scan_copy_input_to_work_kernel
         )
-        self.kernels.scan_upsweep_step = self.gridctx.make_kernel(_scan_upsweep_step_kernel)
-        self.kernels.scan_downsweep_step = self.gridctx.make_kernel(
-            _scan_downsweep_step_kernel
-        )
-        self.kernels.scan_set_root_zero = self.gridctx.make_kernel(_scan_set_root_zero_kernel)
+        self.kernels.scan_upsweep_step = self.gridctx.make_kernel(scan_upsweep_step_kernel)
+        self.kernels.scan_downsweep_step = self.gridctx.make_kernel(scan_downsweep_step_kernel)
+        self.kernels.scan_set_root_zero = self.gridctx.make_kernel(scan_set_root_zero_kernel)
         self.kernels.scan_make_inclusive_and_copy = self.gridctx.make_kernel(
-            _scan_make_inclusive_and_copy_kernel
+            scan_make_inclusive_and_copy_kernel
         )
 
     def inclusive_scan_flat(self, input_arr, output_arr, work_arr):

@@ -116,15 +116,16 @@ class GridContext:
             raise ValueError(f"Expected {expected} boundary codes, got {arr.size}")
         self.bcs.from_numpy(arr)
 
-    def make_kernel(self, kernel_template):
+    def make_kernel(self, kernel_template, **extra_globals):
         """
         Specialize a generic Taichi kernel against this context.
 
         The input kernel is expected to refer to ``gridctx`` as a global name
         inside its body. This method clones the original Python function,
-        injects the current context under that name, and re-wraps the
-        cloned function with ``ti.kernel`` so the compiled kernel is specialized
-        for this context.
+        injects the current context under that name, optionally overrides other
+        globals with already-specialized helper funcs, and re-wraps the cloned
+        function with ``ti.kernel`` so the compiled kernel is specialized for
+        this context.
 
         Parameters
         ----------
@@ -139,50 +140,60 @@ class GridContext:
 
         Author: B.G (02/2026)
         """
-        # `@ti.kernel` returns a Python wrapper. Taichi keeps the original undecorated
-        # Python function in `__wrapped__`, which is the version we need to clone.
-        # Cloning that body lets us bind a different `gridctx` per context instance
-        # without forcing the caller to write a separate kernel factory function.
-        source = getattr(kernel_template, "__wrapped__", kernel_template)
+        return self._specialize_callable(kernel_template, ti.kernel, **extra_globals)
 
-        # Start from the original function globals so every imported symbol keeps
-        # the same resolution context as in the user-written generic kernel.
-        kernel_globals = dict(source.__globals__)
+    def make_func(self, func_template, **extra_globals):
+        """
+        Specialize a generic Taichi function against this context.
 
-        # Inject this context under the single agreed global name used by kernels.
-        # From the user side this is what makes:
-        #     gridctx.tfunc.neighbour_flat(...)
-        # resolve to the helpers compiled for this exact context.
-        kernel_globals["gridctx"] = self
+        The input function is expected to refer to ``gridctx`` as a global name
+        inside its body. This method clones the original Python function,
+        injects the current context under that name, optionally overrides other
+        globals with already-specialized helper funcs, and re-wraps the cloned
+        function with ``ti.func``.
+
+        Author: B.G (02/2026)
+        """
+        return self._specialize_callable(func_template, ti.func, **extra_globals)
+
+    def _specialize_callable(self, func_template, decorator, **extra_globals):
+        """
+        Clone a Python function and bind this context plus optional helper overrides.
+
+        This is the shared implementation behind ``make_kernel`` and ``make_func``.
+
+        Author: B.G (02/2026)
+        """
+        # `@ti.kernel` and `@ti.func` both keep the undecorated Python body in
+        # `__wrapped__` when available. That is the version we clone.
+        source = getattr(func_template, "__wrapped__", func_template)
+
+        # Clone the original globals dictionary, then inject the bound grid
+        # context and any already-specialized helper funcs/kernels requested by
+        # the caller.
+        func_globals = dict(source.__globals__)
+        func_globals["gridctx"] = self
+        func_globals.update(extra_globals)
 
         # Rebuild a plain Python function object from the original code object.
-        # This is the key indirection layer:
-        # - same code object
-        # - same defaults / closure
-        # - different globals dictionary
-        #
-        # So the kernel body stays textually identical, but its global lookups
-        # now see this specific GridContext instance.
         specialised = FunctionType(
             source.__code__,
-            kernel_globals,
+            func_globals,
             source.__name__,
             source.__defaults__,
             source.__closure__,
         )
 
-        # Preserve usual Python metadata so the specialised function still looks
-        # like the original one when inspected or reported by Taichi.
+        # Preserve usual Python metadata so the specialized callable still reads
+        # like the original one under inspection.
         specialised.__kwdefaults__ = source.__kwdefaults__
         specialised.__annotations__ = dict(source.__annotations__)
         specialised.__doc__ = source.__doc__
         specialised.__qualname__ = source.__qualname__
 
-        # Re-apply `ti.kernel` on the cloned function.
-        # At that point Taichi sees a normal kernel function whose global `gridctx`
-        # is already bound to this context, so compilation proceeds as if the user
-        # had written a dedicated kernel for this exact grid configuration.
-        return ti.kernel(specialised)
+        # Re-apply the requested Taichi decorator to obtain the final specialized
+        # callable.
+        return decorator(specialised)
 
     def destroy(self):
         """

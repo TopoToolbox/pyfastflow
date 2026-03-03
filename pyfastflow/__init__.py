@@ -18,6 +18,7 @@ _LAZY_SUBMODULES = [
     "grid",
     "noise",
     "pool",
+    "visu",
 ]
 
 __all__ = list(_LAZY_SUBMODULES)
@@ -32,7 +33,6 @@ __all__ += ["taipool", "tp"]
 # "io",
 # "misc",
 # "rastermanip",
-# "visu",
 # "visuGL",
 
 
