@@ -63,7 +63,9 @@ class NoiseContext:
 
         Author: B.G (02/2026)
         """
-        noise_field = ppool.get_temp_field(cte.FLOAT_TYPE_TI, (self.gridctx.ny, self.gridctx.nx))
+        noise_field = ppool.taipool.get_tpfield(
+            cte.FLOAT_TYPE_TI, (self.gridctx.ny, self.gridctx.nx)
+        )
         self.kernels.white_noise(noise_field.field, amplitude, seed)
         return noise_field
 
@@ -85,8 +87,10 @@ class NoiseContext:
 
         Author: B.G (02/2026)
         """
-        noise_field = ppool.get_temp_field(cte.FLOAT_TYPE_TI, (self.gridctx.ny, self.gridctx.nx))
-        perm_field = ppool.get_temp_field(ti.i32, (512,))
+        noise_field = ppool.taipool.get_tpfield(
+            cte.FLOAT_TYPE_TI, (self.gridctx.ny, self.gridctx.nx)
+        )
+        perm_field = ppool.taipool.get_tpfield(ti.i32, (512,))
 
         try:
             perm_field.from_numpy(self._fisher_yates_permutation(seed))

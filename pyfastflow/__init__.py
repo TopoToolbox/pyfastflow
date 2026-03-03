@@ -16,9 +16,11 @@ __author__ = "B.G."
 _LAZY_SUBMODULES = [
     "grid",
     "noise",
+    "pool",
 ]
 
 __all__ = list(_LAZY_SUBMODULES)
+__all__ += ["taipool", "tp"]
 
 # LEGACY:
 # "cli",
@@ -29,7 +31,6 @@ __all__ = list(_LAZY_SUBMODULES)
 # "general_algorithms",
 # "io",
 # "misc",
-# "pool",
 # "rastermanip",
 # "visu",
 # "visuGL",
@@ -41,4 +42,12 @@ def __getattr__(name):
         mod = importlib.import_module(f".{name}", __name__)
         globals()[name] = mod
         return mod
+    if name == "taipool" or name == "tp":
+        import importlib
+
+        mod = importlib.import_module(".pool", __name__)
+        globals()["pool"] = mod
+        globals()["taipool"] = mod.taipool
+        globals()["tp"] = mod.taipool
+        return mod.taipool
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
