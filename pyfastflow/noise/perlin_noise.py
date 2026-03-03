@@ -90,7 +90,7 @@ def perlin_noise_at(
 
 
 @ti.kernel
-def perlin_noise_kernel(
+def perlin_noise_2d_kernel(
     noise_field: ti.template(),
     frequency_x: cte.FLOAT_TYPE_TI,
     frequency_y: cte.FLOAT_TYPE_TI,
@@ -126,3 +126,46 @@ def perlin_noise_kernel(
             noise_field[j, i] = (total / max_value) * amplitude
         else:
             noise_field[j, i] = 0.0
+
+
+@ti.kernel
+def perlin_noise_flat_kernel(
+    noise_field: ti.template(),
+    frequency_x: cte.FLOAT_TYPE_TI,
+    frequency_y: cte.FLOAT_TYPE_TI,
+    octaves: ti.i32,
+    persistence: cte.FLOAT_TYPE_TI,
+    amplitude: cte.FLOAT_TYPE_TI,
+    perm: ti.template(),
+):
+    """
+    Fill a flat row-major field with multi-octave Perlin noise.
+
+    Author: B.G (02/2026)
+    """
+    nx_f = ti.cast(gridctx.nx, cte.FLOAT_TYPE_TI)
+    ny_f = ti.cast(gridctx.ny, cte.FLOAT_TYPE_TI)
+
+    for j, i in ti.ndrange(gridctx.ny, gridctx.nx):
+        x = ti.cast(i, cte.FLOAT_TYPE_TI) * frequency_x / nx_f
+        y = ti.cast(j, cte.FLOAT_TYPE_TI) * frequency_y / ny_f
+
+        total = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+        max_value = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+        current_amplitude = ti.cast(1.0, cte.FLOAT_TYPE_TI)
+        current_frequency = ti.cast(1.0, cte.FLOAT_TYPE_TI)
+
+        for _ in range(octaves):
+            total += perlin_noise_at(x * current_frequency, y * current_frequency, perm) * current_amplitude
+            max_value += current_amplitude
+            current_amplitude *= persistence
+            current_frequency *= 2.0
+
+        idx = j * gridctx.nx + i
+        if max_value > 0.0:
+            noise_field[idx] = (total / max_value) * amplitude
+        else:
+            noise_field[idx] = 0.0
+
+
+perlin_noise_kernel = perlin_noise_2d_kernel

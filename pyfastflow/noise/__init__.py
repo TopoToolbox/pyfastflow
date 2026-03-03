@@ -8,7 +8,15 @@ Author: B.G (02/2026)
 """
 
 from .noisecontext import NoiseContext
-from .white_noise import white_noise_kernel
-from .perlin_noise import perlin_noise_kernel
+from .white_noise import white_noise_2d_kernel, white_noise_flat_kernel, white_noise_kernel
+from .perlin_noise import perlin_noise_2d_kernel, perlin_noise_flat_kernel, perlin_noise_kernel
 
-__all__ = ["NoiseContext", "white_noise_kernel", "perlin_noise_kernel"]
+__all__ = [
+    "NoiseContext",
+    "white_noise_kernel",
+    "white_noise_2d_kernel",
+    "white_noise_flat_kernel",
+    "perlin_noise_kernel",
+    "perlin_noise_2d_kernel",
+    "perlin_noise_flat_kernel",
+]

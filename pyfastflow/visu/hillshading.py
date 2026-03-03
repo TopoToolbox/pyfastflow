@@ -16,7 +16,7 @@ gridctx = None
 
 
 @ti.func
-def gradient_x(z: ti.template(), i: ti.i32) -> cte.FLOAT_TYPE_TI:
+def gradient_x_flat(z: ti.template(), i: ti.i32) -> cte.FLOAT_TYPE_TI:
     """
     Return x-gradient at node i using the bound grid context.
 
@@ -37,7 +37,7 @@ def gradient_x(z: ti.template(), i: ti.i32) -> cte.FLOAT_TYPE_TI:
 
 
 @ti.func
-def gradient_y(z: ti.template(), i: ti.i32) -> cte.FLOAT_TYPE_TI:
+def gradient_y_flat(z: ti.template(), i: ti.i32) -> cte.FLOAT_TYPE_TI:
     """
     Return y-gradient at node i using the bound grid context.
 
@@ -58,7 +58,7 @@ def gradient_y(z: ti.template(), i: ti.i32) -> cte.FLOAT_TYPE_TI:
 
 
 @ti.func
-def hillshade_at(
+def hillshade_at_flat(
     z: ti.template(),
     i: ti.i32,
     zenith_rad: cte.FLOAT_TYPE_TI,
@@ -70,8 +70,83 @@ def hillshade_at(
 
     Author: B.G (02/2026)
     """
-    dz_dx = gradient_x(z, i) * z_factor
-    dz_dy = gradient_y(z, i) * z_factor
+    dz_dx = gradient_x_flat(z, i) * z_factor
+    dz_dy = gradient_y_flat(z, i) * z_factor
+
+    slope_rad = atan(ti.math.sqrt(dz_dx * dz_dx + dz_dy * dz_dy))
+
+    aspect_rad = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+    if dz_dx != 0.0 or dz_dy != 0.0:
+        aspect_rad = ti.cast(ti.math.pi / 2.0, cte.FLOAT_TYPE_TI) - ti.math.atan2(dz_dy, dz_dx)
+        if aspect_rad < 0.0:
+            aspect_rad += ti.cast(2.0 * ti.math.pi, cte.FLOAT_TYPE_TI)
+
+    hillshade_value = (
+        ti.math.cos(zenith_rad) * ti.math.cos(slope_rad)
+        + ti.math.sin(zenith_rad)
+        * ti.math.sin(slope_rad)
+        * ti.math.cos(azimuth_rad - aspect_rad)
+    )
+    return ti.math.max(
+        ti.cast(0.0, cte.FLOAT_TYPE_TI),
+        ti.math.min(ti.cast(1.0, cte.FLOAT_TYPE_TI), hillshade_value),
+    )
+
+
+@ti.func
+def gradient_x_2d(z: ti.template(), row: ti.i32, col: ti.i32) -> cte.FLOAT_TYPE_TI:
+    """
+    Return x-gradient at node row, col using simple edge clamping.
+
+    Author: B.G (02/2026)
+    """
+    dx = ti.static(gridctx.dx)
+
+    grad_x = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+    if col > 0 and col < gridctx.nx - 1:
+        grad_x = (z[row, col + 1] - z[row, col - 1]) / ti.cast(2.0 * dx, cte.FLOAT_TYPE_TI)
+    elif col > 0:
+        grad_x = (z[row, col] - z[row, col - 1]) / ti.cast(dx, cte.FLOAT_TYPE_TI)
+    elif col < gridctx.nx - 1:
+        grad_x = (z[row, col + 1] - z[row, col]) / ti.cast(dx, cte.FLOAT_TYPE_TI)
+    return grad_x
+
+
+@ti.func
+def gradient_y_2d(z: ti.template(), row: ti.i32, col: ti.i32) -> cte.FLOAT_TYPE_TI:
+    """
+    Return y-gradient at node row, col using simple edge clamping.
+
+    Author: B.G (02/2026)
+    """
+    dx = ti.static(gridctx.dx)
+
+    grad_y = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+    if row > 0 and row < gridctx.ny - 1:
+        grad_y = (z[row + 1, col] - z[row - 1, col]) / ti.cast(2.0 * dx, cte.FLOAT_TYPE_TI)
+    elif row > 0:
+        grad_y = (z[row, col] - z[row - 1, col]) / ti.cast(dx, cte.FLOAT_TYPE_TI)
+    elif row < gridctx.ny - 1:
+        grad_y = (z[row + 1, col] - z[row, col]) / ti.cast(dx, cte.FLOAT_TYPE_TI)
+    return grad_y
+
+
+@ti.func
+def hillshade_at_2d(
+    z: ti.template(),
+    row: ti.i32,
+    col: ti.i32,
+    zenith_rad: cte.FLOAT_TYPE_TI,
+    azimuth_rad: cte.FLOAT_TYPE_TI,
+    z_factor: cte.FLOAT_TYPE_TI,
+) -> cte.FLOAT_TYPE_TI:
+    """
+    Return hillshade value at row, col for one light direction.
+
+    Author: B.G (02/2026)
+    """
+    dz_dx = gradient_x_2d(z, row, col) * z_factor
+    dz_dy = gradient_y_2d(z, row, col) * z_factor
 
     slope_rad = atan(ti.math.sqrt(dz_dx * dz_dx + dz_dy * dz_dy))
 
@@ -94,7 +169,7 @@ def hillshade_at(
 
 
 @ti.kernel
-def hillshading_kernel(
+def hillshading_flat_kernel(
     z: ti.template(),
     hillshade: ti.template(),
     zenith_rad: cte.FLOAT_TYPE_TI,
@@ -107,11 +182,11 @@ def hillshading_kernel(
     Author: B.G (02/2026)
     """
     for i in range(gridctx.nx * gridctx.ny):
-        hillshade[i] = hillshade_at(z, i, zenith_rad, azimuth_rad, z_factor)
+        hillshade[i] = hillshade_at_flat(z, i, zenith_rad, azimuth_rad, z_factor)
 
 
 @ti.kernel
-def multishading_kernel(
+def multishading_flat_kernel(
     z: ti.template(),
     hillshade: ti.template(),
     zenith_rad: cte.FLOAT_TYPE_TI,
@@ -127,11 +202,59 @@ def multishading_kernel(
     Author: B.G (02/2026)
     """
     for i in range(gridctx.nx * gridctx.ny):
-        value = hillshade_at(z, i, zenith_rad, azimuth0_rad, z_factor)
-        value += hillshade_at(z, i, zenith_rad, azimuth1_rad, z_factor)
-        value += hillshade_at(z, i, zenith_rad, azimuth2_rad, z_factor)
-        value += hillshade_at(z, i, zenith_rad, azimuth3_rad, z_factor)
+        value = hillshade_at_flat(z, i, zenith_rad, azimuth0_rad, z_factor)
+        value += hillshade_at_flat(z, i, zenith_rad, azimuth1_rad, z_factor)
+        value += hillshade_at_flat(z, i, zenith_rad, azimuth2_rad, z_factor)
+        value += hillshade_at_flat(z, i, zenith_rad, azimuth3_rad, z_factor)
         hillshade[i] = value * ti.cast(0.25, cte.FLOAT_TYPE_TI)
+
+
+@ti.kernel
+def hillshading_2d_kernel(
+    z: ti.template(),
+    hillshade: ti.template(),
+    zenith_rad: cte.FLOAT_TYPE_TI,
+    azimuth_rad: cte.FLOAT_TYPE_TI,
+    z_factor: cte.FLOAT_TYPE_TI,
+):
+    """
+    Compute single-direction hillshade for a 2D field.
+
+    Author: B.G (02/2026)
+    """
+    for row, col in ti.ndrange(gridctx.ny, gridctx.nx):
+        hillshade[row, col] = hillshade_at_2d(z, row, col, zenith_rad, azimuth_rad, z_factor)
+
+
+@ti.kernel
+def multishading_2d_kernel(
+    z: ti.template(),
+    hillshade: ti.template(),
+    zenith_rad: cte.FLOAT_TYPE_TI,
+    azimuth0_rad: cte.FLOAT_TYPE_TI,
+    azimuth1_rad: cte.FLOAT_TYPE_TI,
+    azimuth2_rad: cte.FLOAT_TYPE_TI,
+    azimuth3_rad: cte.FLOAT_TYPE_TI,
+    z_factor: cte.FLOAT_TYPE_TI,
+):
+    """
+    Compute four-direction averaged hillshade for a 2D field.
+
+    Author: B.G (02/2026)
+    """
+    for row, col in ti.ndrange(gridctx.ny, gridctx.nx):
+        value = hillshade_at_2d(z, row, col, zenith_rad, azimuth0_rad, z_factor)
+        value += hillshade_at_2d(z, row, col, zenith_rad, azimuth1_rad, z_factor)
+        value += hillshade_at_2d(z, row, col, zenith_rad, azimuth2_rad, z_factor)
+        value += hillshade_at_2d(z, row, col, zenith_rad, azimuth3_rad, z_factor)
+        hillshade[row, col] = value * ti.cast(0.25, cte.FLOAT_TYPE_TI)
+
+
+gradient_x = gradient_x_flat
+gradient_y = gradient_y_flat
+hillshade_at = hillshade_at_flat
+hillshading_kernel = hillshading_flat_kernel
+multishading_kernel = multishading_flat_kernel
 
 
 @ti.kernel

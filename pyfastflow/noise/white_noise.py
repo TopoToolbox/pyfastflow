@@ -38,7 +38,7 @@ def _white_unit(i: ti.i32, j: ti.i32, seed: ti.i32) -> cte.FLOAT_TYPE_TI:
 
 
 @ti.kernel
-def white_noise_kernel(
+def white_noise_2d_kernel(
     noise_field: ti.template(), amplitude: cte.FLOAT_TYPE_TI, seed: ti.i32
 ):
     """
@@ -48,3 +48,20 @@ def white_noise_kernel(
     """
     for j, i in ti.ndrange(gridctx.ny, gridctx.nx):
         noise_field[j, i] = (_white_unit(i, j, seed) - 0.5) * 2.0 * amplitude
+
+
+@ti.kernel
+def white_noise_flat_kernel(
+    noise_field: ti.template(), amplitude: cte.FLOAT_TYPE_TI, seed: ti.i32
+):
+    """
+    Fill a flat row-major field with deterministic white noise.
+
+    Author: B.G (02/2026)
+    """
+    for j, i in ti.ndrange(gridctx.ny, gridctx.nx):
+        idx = j * gridctx.nx + i
+        noise_field[idx] = (_white_unit(i, j, seed) - 0.5) * 2.0 * amplitude
+
+
+white_noise_kernel = white_noise_2d_kernel
