@@ -57,6 +57,7 @@ class FlowContext:
         weight: float = 1.0,
         min_slope_mode: str = "const",
         min_slope: float = 0.0,
+        diagonal_partition_correction: bool = False,
     ):
         """
         Initialize the flow context and bind the cleaned kernel families.
@@ -78,6 +79,7 @@ class FlowContext:
 
         self.weight_mode = self._normalize_mode(weight_mode, "weight_mode")
         self.min_slope_mode = self._normalize_mode(min_slope_mode, "min_slope_mode")
+        self.diagonal_partition_correction = bool(diagonal_partition_correction)
 
         self.weight_const = float(weight)
         self.min_slope_const = float(min_slope)

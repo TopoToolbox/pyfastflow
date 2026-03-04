@@ -8,6 +8,8 @@ grid topology.
 Author: B.G (02/2026)
 """
 
+import math
+
 import taichi as ti
 
 from .. import constants as cte
@@ -39,6 +41,12 @@ def compute_sfd_receivers_kernel(z: ti.template(), receivers: ti.template()):
             tsr = ti.cast(-1.0, cte.FLOAT_TYPE_TI)
             if valid:
                 tsr = (z[i] - z[j]) / gridctx.tfunc.dist_from_k_flat(k)
+                if ti.static(
+                    flowctx.diagonal_partition_correction
+                    and gridctx.n_neighbours == 8
+                    and k in (0, 2, 5, 7)
+                ):
+                    tsr *= ti.cast(ti.static(math.sqrt(2.0)), cte.FLOAT_TYPE_TI)
 
             better = valid and tsr > sr
             sr = tsr if better else sr
@@ -69,6 +77,12 @@ def compute_sfd_receivers_stochastic_kernel(z: ti.template(), receivers: ti.temp
             tsr = ti.cast(-1.0, cte.FLOAT_TYPE_TI)
             if valid:
                 tsr = (z[i] - z[j]) / gridctx.tfunc.dist_from_k_flat(k)
+                if ti.static(
+                    flowctx.diagonal_partition_correction
+                    and gridctx.n_neighbours == 8
+                    and k in (0, 2, 5, 7)
+                ):
+                    tsr *= ti.cast(ti.static(math.sqrt(2.0)), cte.FLOAT_TYPE_TI)
                 if tsr > 0.0:
                     tsr = ti.random(dtype=cte.FLOAT_TYPE_TI) * ti.math.sqrt(tsr)
 
