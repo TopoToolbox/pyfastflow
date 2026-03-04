@@ -42,7 +42,7 @@ class FlowContext:
     """
     Grid-bound context for cleaned flow-routing algorithms.
 
-    This first pass targets the flat D4 path and introduces the unified
+    This first pass targets the flat D4/D8 path and introduces the unified
     parameter-getter system used to specialize kernels at compile time while
     keeping the external kernel signatures compact.
 
@@ -65,8 +65,8 @@ class FlowContext:
         """
         if hasattr(gridctx, "layout") and str(gridctx.layout).lower() == "2d":
             raise ValueError("FlowContext only supports flat grid logic")
-        if gridctx.topology != "D4":
-            raise ValueError("FlowContext first pass only supports D4")
+        if gridctx.topology not in {"D4", "D8"}:
+            raise ValueError("FlowContext only supports D4 or D8")
 
         self.gridctx = gridctx
         self.gactx = gactx if gactx is not None else getattr(gridctx, "ga", None)
@@ -369,9 +369,13 @@ class FlowContext:
 
         Author: B.G (02/2026)
         """
-        donors = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(self.n_flat * 4))
+        donors = ppool.taipool.get_tpfield(
+            dtype=ti.i32, shape=(self.n_flat * self.gridctx.n_neighbours)
+        )
         ndonors = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(self.n_flat))
-        donors_alt = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(self.n_flat * 4))
+        donors_alt = ppool.taipool.get_tpfield(
+            dtype=ti.i32, shape=(self.n_flat * self.gridctx.n_neighbours)
+        )
         ndonors_alt = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(self.n_flat))
         q_alt = ppool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.n_flat))
         src = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(self.n_flat))
@@ -453,7 +457,7 @@ class FlowContext:
         Author: B.G (02/2026)
         """
         routing_weights = ppool.taipool.get_tpfield(
-            dtype=cte.FLOAT_TYPE_TI, shape=(self.n_flat, 4)
+            dtype=cte.FLOAT_TYPE_TI, shape=(self.n_flat, self.gridctx.n_neighbours)
         )
         routing_sum = ppool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.n_flat))
         source = ppool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.n_flat))
@@ -651,6 +655,7 @@ class FlowContext:
 
         for _ in range(ndep_iters):
             ndep_bis = self.kernels.depression_counter(rec_work_field)
+            # print('ndep_bis',ndep_bis)
 
             self.kernels.basin_id_init(bid_field)
             rec_jump_field.copy_from(rec_work_field)

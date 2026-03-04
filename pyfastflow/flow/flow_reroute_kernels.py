@@ -1,8 +1,9 @@
 """
-Generic D4 lake rerouting kernels for ``FlowContext``.
+Generic lake rerouting kernels for ``FlowContext``.
 
 This module ports the operational core of ``lakeflow.py`` to the new context
-style while keeping the logic close to the reference implementation.
+style while keeping the logic close to the reference implementation and
+specializing the neighbour stencil from the bound grid topology.
 
 Author: B.G (02/2026)
 """
@@ -59,7 +60,7 @@ def propagate_basin_iter_kernel(rec_work: ti.template()):
     Author: B.G (02/2026)
     """
     for i in rec_work:
-        if rec_work[i] != rec_work[rec_work[i]]:
+        if rec_work[i] != -1 and rec_work[i] != rec_work[rec_work[i]]:
             rec_work[i] = rec_work[rec_work[i]]
 
 
@@ -71,7 +72,10 @@ def propagate_basin_final_kernel(bid: ti.template(), rec_work: ti.template()):
     Author: B.G (02/2026)
     """
     for i in bid:
-        bid[i] = bid[rec_work[i]]
+        if rec_work[i] == -1:
+            bid[i] = 0
+        else:
+            bid[i] = bid[rec_work[i]]
 
 
 @ti.kernel
@@ -90,6 +94,7 @@ def saddlesort_kernel(
     Author: B.G (02/2026)
     """
     invalid = _invalid_pack()
+    n_neighbours = ti.static(gridctx.n_neighbours)
 
     for i in z:
         if gridctx.tfunc.can_out_flat(i):
@@ -100,7 +105,7 @@ def saddlesort_kernel(
         z_prime[i] = 1e9
         zn = 1e9
 
-        for k in ti.static(range(4)):
+        for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and bid[j] != bid[i]:
                 is_border[i] = True
@@ -121,7 +126,7 @@ def saddlesort_kernel(
         tbid = bid[i]
         res = invalid
 
-        for k in ti.static(range(4)):
+        for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and bid[j] != tbid:
                 candidate = pack_float_index(z_prime[i], bid[j])
@@ -137,7 +142,7 @@ def saddlesort_kernel(
         target_z, target_b = unpack_float_index(basin_saddle[bid[i]])
         is_here = False
 
-        for k in ti.static(range(4)):
+        for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and bid[j] == target_b and z_prime[i] == target_z:
                 is_here = True
@@ -154,7 +159,7 @@ def saddlesort_kernel(
         tz = 1e9
         rec_out = -1
 
-        for k in ti.static(range(4)):
+        for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(node, k)
             if j != -1 and bid[j] != tbid and tz > z[j]:
                 tz = z[j]
@@ -242,14 +247,15 @@ def iteration_reroute_carve_kernel(
     for i in tag:
         if bid[i] == 0:
             continue
-        if tag[i]:
+        if tag[i] and rec[i] != -1:
             tag_alt[rec[i]] = True
         rec_work[i] = rec[i]
 
     for i in tag:
         if bid[i] == 0:
             continue
-        rec[i] = rec_work[rec_work[i]]
+        if rec_work[i] != -1:
+            rec[i] = rec_work[rec_work[i]]
         tag[i] = tag_alt[i]
 
 
@@ -273,7 +279,7 @@ def finalise_reroute_carve_kernel(
         rec[i] = rec_work[i]
 
     for i in rec:
-        if tag[rec_work[i]] and tag[i] and i != rec_work[i]:
+        if rec_work[i] != -1 and tag[rec_work[i]] and tag[i] and i != rec_work[i]:
             rec[rec_work[i]] = i
             rerouted[rec_work[i]] = True
 

@@ -1,7 +1,8 @@
 """
 Generic single-flow-direction accumulation kernels for ``FlowContext``.
 
-These kernels implement the D4 rake-and-compress downstream accumulation path.
+These kernels implement the rake-and-compress downstream accumulation path with
+the donor stencil size specialized from the bound grid topology.
 
 Author: B.G (02/2026)
 """
@@ -40,7 +41,7 @@ def receivers_to_donors_kernel(
     """
     for tid in receivers:
         rcv = receivers[tid]
-        if rcv != tid:
+        if rcv != tid and rcv != -1:
             old_val = ti.atomic_add(ndonors[rcv], 1)
             donors[rcv * gridctx.n_neighbours + old_val] = tid
 
@@ -63,15 +64,16 @@ def rake_compress_accum_kernel(
     """
     for tid in q:
         flip = get_src(src, tid, iteration)
+        n_neighbours = ti.static(gridctx.n_neighbours)
 
         worked = False
         todo = ndonors[tid] if not flip else ndonors_alt[tid]
         base = tid * gridctx.n_neighbours
-        donors_local = ti.Vector([-1, -1, -1, -1])
+        donors_local = ti.Vector([-1, -1, -1, -1, -1, -1, -1, -1])
         q_added = ti.cast(0.0, cte.FLOAT_TYPE_TI)
 
         i = 0
-        while i < todo and i < gridctx.n_neighbours:
+        while i < todo and i < n_neighbours:
             if donors_local[i] == -1:
                 donors_local[i] = donors[base + i] if not flip else donors_alt[base + i]
             did = donors_local[i]
@@ -101,13 +103,13 @@ def rake_compress_accum_kernel(
             if flip:
                 ndonors[tid] = todo
                 q[tid] = q_added
-                for j in ti.static(range(4)):
+                for j in ti.static(range(n_neighbours)):
                     if j < todo:
                         donors[base + j] = donors_local[j]
             else:
                 ndonors_alt[tid] = todo
                 q_alt[tid] = q_added
-                for j in ti.static(range(4)):
+                for j in ti.static(range(n_neighbours)):
                     if j < todo:
                         donors_alt[base + j] = donors_local[j]
             update_src(src, tid, iteration, flip)

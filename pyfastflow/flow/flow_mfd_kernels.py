@@ -1,8 +1,9 @@
 """
-Generic D4 multiple-flow-direction kernels for ``FlowContext``.
+Generic multiple-flow-direction kernels for ``FlowContext``.
 
 This first pass keeps the Jacobi-style power-iteration approach while using the
-new parameter getters for the source term.
+new parameter getters for the source term and specializing the stencil size from
+the bound grid topology.
 
 Author: B.G (02/2026)
 """
@@ -15,25 +16,6 @@ from .. import constants as cte
 gridctx = None
 flowctx = None
 get_weight = None
-
-
-@ti.func
-def _opposite_d4(k: ti.i32) -> ti.i32:
-    """
-    Return the opposite D4 direction index.
-
-    Author: B.G (02/2026)
-    """
-    out = ti.cast(0, ti.i32)
-    if k == 0:
-        out = 3
-    elif k == 1:
-        out = 2
-    elif k == 2:
-        out = 1
-    else:
-        out = 0
-    return out
 
 
 @ti.kernel
@@ -52,21 +34,22 @@ def compute_mfd_routing_weights_kernel(
     z: ti.template(), routing_weights: ti.template(), routing_sum: ti.template()
 ):
     """
-    Compute normalized MFD routing weights to D4 neighbours.
+    Compute normalized MFD routing weights to the active neighbour stencil.
 
     Author: B.G (02/2026)
     """
     for i in z:
+        n_neighbours = ti.static(gridctx.n_neighbours)
         if gridctx.tfunc.nodata_flat(i):
             routing_sum[i] = 0.0
-            for k in ti.static(range(4)):
+            for k in ti.static(range(n_neighbours)):
                 routing_weights[i, k] = 0.0
             continue
 
         zi = z[i]
         sum_s = ti.cast(0.0, cte.FLOAT_TYPE_TI)
 
-        for k in ti.static(range(4)):
+        for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and not gridctx.tfunc.nodata_flat(j):
                 slope = (zi - z[j]) / gridctx.tfunc.dist_from_k_flat(k)
@@ -80,7 +63,7 @@ def compute_mfd_routing_weights_kernel(
 
         routing_sum[i] = sum_s
         if sum_s > 0.0:
-            for k in ti.static(range(4)):
+            for k in ti.static(range(n_neighbours)):
                 routing_weights[i, k] /= sum_s
 
 
@@ -97,15 +80,28 @@ def mfd_power_iteration_step_kernel(
     Author: B.G (02/2026)
     """
     for i in source:
+        n_neighbours = ti.static(gridctx.n_neighbours)
         if gridctx.tfunc.nodata_flat(i):
             q_next[i] = 0.0
             continue
 
         acc = source[i]
-        for k in ti.static(range(4)):
+        for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and not gridctx.tfunc.nodata_flat(j):
-                wj = routing_weights[j, _opposite_d4(k)]
+                opp_k = ti.cast(0, ti.i32)
+                if ti.static(gridctx.n_neighbours == 4):
+                    if k == 0:
+                        opp_k = 3
+                    elif k == 1:
+                        opp_k = 2
+                    elif k == 2:
+                        opp_k = 1
+                    else:
+                        opp_k = 0
+                else:
+                    opp_k = 7 - k
+                wj = routing_weights[j, opp_k]
                 if wj > 0.0:
                     acc += wj * q_current[j]
         q_next[i] = acc

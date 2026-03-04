@@ -1,8 +1,9 @@
 """
 Generic SFD receiver kernels for ``FlowContext``.
 
-This first pass targets the flat D4 case only. The kernels use the unified
-``gridctx`` and ``flowctx`` globals rebound by the context classes.
+The kernels use the unified ``gridctx`` and ``flowctx`` globals rebound by the
+context classes, with the neighbour count specialized statically from the bound
+grid topology.
 
 Author: B.G (02/2026)
 """
@@ -24,10 +25,15 @@ def compute_sfd_receivers_kernel(z: ti.template(), receivers: ti.template()):
     Author: B.G (02/2026)
     """
     for i in receivers:
+        if gridctx.tfunc.can_out_flat(i):
+            receivers[i] = -1
+            continue
+
         r = i
         sr = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+        n_neighbours = ti.static(gridctx.n_neighbours)
 
-        for k in ti.static(range(4)):
+        for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             valid = j != -1
             tsr = ti.cast(-1.0, cte.FLOAT_TYPE_TI)
@@ -49,10 +55,15 @@ def compute_sfd_receivers_stochastic_kernel(z: ti.template(), receivers: ti.temp
     Author: B.G (02/2026)
     """
     for i in receivers:
+        if gridctx.tfunc.can_out_flat(i):
+            receivers[i] = -1
+            continue
+
         r = i
         sr = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+        n_neighbours = ti.static(gridctx.n_neighbours)
 
-        for k in ti.static(range(4)):
+        for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             valid = j != -1
             tsr = ti.cast(-1.0, cte.FLOAT_TYPE_TI)

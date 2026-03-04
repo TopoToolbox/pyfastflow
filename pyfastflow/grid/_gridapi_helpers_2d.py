@@ -174,10 +174,10 @@ def build_2d_helpers(gridctx):
         """Return 1 when the node behaves as an edge node. Author: B.G (02/2026)"""
         # Edge meaning stays tied to the edge mode; bcs only adds local blocked-neighbour edges.
         edge = 0
-        if ti.static(boundary_mode != "periodic_NS"):
+        if ti.static(boundary_mode != "periodic_EW"):
             if col == 0 or col == ti.static(nx) - 1:
                 edge = 1
-        if ti.static(boundary_mode != "periodic_EW"):
+        if ti.static(boundary_mode != "periodic_NS"):
             if row == 0 or row == ti.static(ny) - 1:
                 edge = 1
 
@@ -196,12 +196,12 @@ def build_2d_helpers(gridctx):
         # Compact code: 0 top, 1 left, 2 right, 3 bottom, -1 interior.
         edge = -1
 
-        if ti.static(boundary_mode != "periodic_EW"):
+        if ti.static(boundary_mode != "periodic_NS"):
             if row == 0:
                 edge = 0
             elif row == ti.static(ny) - 1:
                 edge = 3
-        if edge == -1 and ti.static(boundary_mode != "periodic_NS"):
+        if edge == -1 and ti.static(boundary_mode != "periodic_EW"):
             if col == 0:
                 edge = 1
             elif col == ti.static(nx) - 1:

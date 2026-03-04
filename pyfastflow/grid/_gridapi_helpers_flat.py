@@ -190,10 +190,10 @@ def build_flat_helpers(gridctx):
         row = _row(i)
         col = _col(i)
         edge = 0
-        if ti.static(boundary_mode != "periodic_NS"):
+        if ti.static(boundary_mode != "periodic_EW"):
             if col == 0 or col == ti.static(nx) - 1:
                 edge = 1
-        if ti.static(boundary_mode != "periodic_EW"):
+        if ti.static(boundary_mode != "periodic_NS"):
             if row == 0 or row == ti.static(ny) - 1:
                 edge = 1
 
@@ -214,12 +214,12 @@ def build_flat_helpers(gridctx):
         col = _col(i)
         edge = -1
 
-        if ti.static(boundary_mode != "periodic_EW"):
+        if ti.static(boundary_mode != "periodic_NS"):
             if row == 0:
                 edge = 0
             elif row == ti.static(ny) - 1:
                 edge = 3
-        if edge == -1 and ti.static(boundary_mode != "periodic_NS"):
+        if edge == -1 and ti.static(boundary_mode != "periodic_EW"):
             if col == 0:
                 edge = 1
             elif col == ti.static(nx) - 1:
