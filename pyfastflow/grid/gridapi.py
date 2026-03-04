@@ -37,6 +37,7 @@ class GridContext:
         # Small immutable kernel-facing state; grid data stays outside this context.
         self.nx = int(nx)
         self.ny = int(ny)
+        self.rshp = (self.ny,self.nx)
         self.dx = float(dx)
         self.boundary_mode = boundary_mode
         self.topology = str(topology).upper()
