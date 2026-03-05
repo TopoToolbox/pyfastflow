@@ -43,7 +43,7 @@ import pyfastflow as pf
 import pyfastflow as pff
 import pyfastflow.flow as flow
 
-from .. import constants as cte
+from ... import constants as cte
 
 
 @ti.kernel

@@ -312,29 +312,28 @@ def build_flat_helpers(gridctx):
     def dist_between_nodes_flat(i: ti.i32, j: ti.i32) -> ti.f32:
         """Return local distance between adjacent nodes, or -1 otherwise. Author: B.G (02/2026)"""
         # Local stencil distance helper only; non-neighbour pairs return -1.
-        if j < 0:
-            return ti.cast(-1.0, ti.f32)
+        out = ti.cast(-1.0, ti.f32)
+        if j >= 0:
+            row_i = _row(i)
+            col_i = _col(i)
+            row_j = _row(j)
+            col_j = _col(j)
+            dr = ti.abs(row_j - row_i)
+            dc = ti.abs(col_j - col_i)
 
-        row_i = _row(i)
-        col_i = _col(i)
-        row_j = _row(j)
-        col_j = _col(j)
-        dr = ti.abs(row_j - row_i)
-        dc = ti.abs(col_j - col_i)
+            if ti.static(boundary_mode == "periodic_NS"):
+                dr = ti.min(dr, ti.static(ny) - dr)
+            if ti.static(boundary_mode == "periodic_EW"):
+                dc = ti.min(dc, ti.static(nx) - dc)
 
-        if ti.static(boundary_mode == "periodic_NS"):
-            dr = ti.min(dr, ti.static(ny) - dr)
-        if ti.static(boundary_mode == "periodic_EW"):
-            dc = ti.min(dc, ti.static(nx) - dc)
-
-        if dr == 0 and dc == 1:
-            return ti.cast(ti.static(dx), ti.f32)
-        if dr == 1 and dc == 0:
-            return ti.cast(ti.static(dx), ti.f32)
-        if ti.static(d8):
-            if dr == 1 and dc == 1:
-                return ti.cast(ti.static(sqrt2dx), ti.f32)
-        return ti.cast(-1.0, ti.f32)
+            if dr == 0 and dc == 1:
+                out = ti.cast(ti.static(dx), ti.f32)
+            elif dr == 1 and dc == 0:
+                out = ti.cast(ti.static(dx), ti.f32)
+            elif ti.static(d8):
+                if dr == 1 and dc == 1:
+                    out = ti.cast(ti.static(sqrt2dx), ti.f32)
+        return out
 
     # Public flat helper surface exposed through gridctx.tfunc.
     helpers.can_out_flat = can_out_flat

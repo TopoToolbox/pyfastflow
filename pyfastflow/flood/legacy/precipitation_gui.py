@@ -41,8 +41,8 @@ import click
 import taichi as ti
 from matplotlib.path import Path
 
-from .. import constants as cte
-from ..cli.guihelper import (
+from ... import constants as cte
+from ...cli.guihelper import (
     prepare_display_textures,
     compute_viewport,
 )
@@ -71,7 +71,7 @@ def precipitation_gui(dem_file: str, output_npy: str | None, boundary_npy: str |
 
     # Load DEM: .npy direct, other rasters via TopoToolbox wrapper
     try:
-        from ..io import raster_to_numpy, TOPOTOOLBOX_AVAILABLE
+        from ...io import raster_to_numpy, TOPOTOOLBOX_AVAILABLE
     except Exception:
         TOPOTOOLBOX_AVAILABLE = False
         raster_to_numpy = None
@@ -128,7 +128,7 @@ def precipitation_gui(dem_file: str, output_npy: str | None, boundary_npy: str |
     hill_tex.from_numpy(hill_u8)
     dem_disp_tex.from_numpy(dem_disp.astype(np.float32))
     if boundary_npy is not None:
-        from ..rastermanip import resize_to_dims
+        from ...rastermanip import resize_to_dims
         nod_ds = (resize_to_dims(nodata.astype(np.float32), nx_disp, ny_disp) >= 0.5).astype(np.uint8)
         out_ds = (resize_to_dims(outlets.astype(np.float32), nx_disp, ny_disp) >= 0.5).astype(np.uint8)
         nodata_tex.from_numpy(nod_ds)
@@ -210,7 +210,7 @@ def precipitation_gui(dem_file: str, output_npy: str | None, boundary_npy: str |
             p = (p / mp).astype(np.float32)
         else:
             p = np.zeros_like(p, dtype=np.float32)
-        from ..rastermanip import resize_to_dims
+        from ...rastermanip import resize_to_dims
         p_ds = resize_to_dims(p, nx_disp, ny_disp)
         precip_disp_tex.from_numpy(p_ds.astype(np.float32))
         # Draw

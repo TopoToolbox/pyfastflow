@@ -1,7 +1,7 @@
 import taichi as ti
 import pyfastflow.flow as flow
 import pyfastflow.grid as grid
-from .. import constants as cte
+from ... import constants as cte
 
 # ---------------- Particle structure ----------------
 Particle = ti.types.struct(pos=ti.i32, hw=cte.FLOAT_TYPE_TI)

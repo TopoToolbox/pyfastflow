@@ -20,7 +20,7 @@ import taichi as ti
 
 import pyfastflow.flow as flow
 
-from .. import constants as cte
+from ... import constants as cte
 
 
 @ti.kernel

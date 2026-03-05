@@ -8,6 +8,7 @@ from .. import constants as cte
 from .. import pool as ppool
 from ..general_algorithms import GAContext
 from ._flow_param_helpers import get_min_slope, get_weight
+from .flow_analysis_kernels import sum_at_can_out_kernel
 from .flow_fill_kernels import apply_fill_delta_kernel, fill_topography_step_kernel
 from .flow_mfd_kernels import (
     check_mfd_convergence_kernel,
@@ -81,8 +82,8 @@ class FlowContext:
         self.min_slope_mode = self._normalize_mode(min_slope_mode, "min_slope_mode")
         self.diagonal_partition_correction = bool(diagonal_partition_correction)
 
-        self.weight_const = float(weight)
-        self.min_slope_const = float(min_slope)
+        self.weight_const = float(weight) if self.weight_mode == "const" else 0.0
+        self.min_slope_const = float(min_slope) if self.min_slope_mode == "const" else 0.0
 
         self._weight_scalar_tpfield = None
         self.weight_scalar = None
@@ -152,6 +153,15 @@ class FlowContext:
 
         Author: B.G (02/2026)
         """
+        src = values.field if hasattr(values, "field") else values
+        if hasattr(src, "shape") and hasattr(dst, "copy_from"):
+            try:
+                if tuple(src.shape) == tuple(dst.shape):
+                    dst.copy_from(src)
+                    return
+            except (AttributeError, TypeError):
+                pass
+
         if hasattr(values, "to_numpy"):
             arr = np.asarray(values.to_numpy(), dtype=np.float32)
         else:
@@ -279,6 +289,7 @@ class FlowContext:
         self.kernels.init_reroute_carve = self.make_kernel(init_reroute_carve_kernel)
         self.kernels.iteration_reroute_carve = self.make_kernel(iteration_reroute_carve_kernel)
         self.kernels.finalise_reroute_carve = self.make_kernel(finalise_reroute_carve_kernel)
+        self.kernels.sum_at_can_out = self.make_kernel(sum_at_can_out_kernel)
 
     def _unwrap_field(self, field_like):
         """
@@ -318,6 +329,33 @@ class FlowContext:
         z_field = self._require_flat(z, "z")
         rec_field = self._require_flat(receivers, "receivers")
         self.kernels.compute_sfd_receivers_stochastic(z_field, rec_field)
+
+    def sum_at_can_out_with_accumulator(self, field, out_sum):
+        """
+        Sum one field over outlet nodes using a caller-provided scalar field.
+
+        ``out_sum`` must be a 0D scalar Taichi field (or TPField wrapper).
+
+        Author: B.G (02/2026)
+        """
+        field_handle = self._require_flat(field, "field")
+        out_handle = self._unwrap_field(out_sum)
+        if tuple(out_handle.shape) != ():
+            raise ValueError("out_sum must be a 0D scalar field")
+        self.kernels.sum_at_can_out(field_handle, out_handle)
+
+    def sum_at_can_out(self, field) -> float:
+        """
+        Sum one field over outlet nodes and return the scalar value.
+
+        Author: B.G (02/2026)
+        """
+        out_sum = ppool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=())
+        try:
+            self.sum_at_can_out_with_accumulator(field, out_sum.field)
+            return float(out_sum.field[None])
+        finally:
+            out_sum.release()
 
     def accumulate_sfd_with_temps(
         self,

@@ -24,7 +24,7 @@ import numpy as np
 
 import pyfastflow as pf
 
-from .. import constants as cte
+from ... import constants as cte
 from . import gf_ls as ls
 
 
