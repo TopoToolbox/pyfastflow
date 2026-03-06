@@ -15,8 +15,8 @@ Author: B.G.
 import numpy as np
 import taichi as ti
 
-from .. import pool
-from .. import constants as cte
+from ... import pool
+from ... import constants as cte
 
 
 # Boundary handling modes
@@ -272,12 +272,12 @@ def double_resolution(
     boundary_mode = boundary_map[boundary]
 
     # Create source field and copy data
-    source_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (ny * nx,))
+    source_field = pool.taipool.get_tpfield(cte.FLOAT_TYPE_TI, (ny * nx,))
     source_field.field.from_numpy(data_np)
 
     # Create target field for upscaled result
     target_size = (2 * ny) * (2 * nx)
-    target_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (target_size,))
+    target_field = pool.taipool.get_tpfield(cte.FLOAT_TYPE_TI, (target_size,))
 
     # Execute upscaling kernel
     seed_val = 0 if seed is None else seed

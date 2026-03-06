@@ -18,6 +18,7 @@ _LAZY_SUBMODULES = [
     "grid",
     "noise",
     "pool",
+    "rastermanip",
     "visu",
 ]
 
@@ -32,7 +33,6 @@ __all__ += ["taipool", "tp"]
 # "flow",
 # "io",
 # "misc",
-# "rastermanip",
 # "visuGL",
 
 

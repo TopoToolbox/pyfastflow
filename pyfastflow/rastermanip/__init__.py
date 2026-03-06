@@ -1,34 +1,18 @@
-"""Raster manipulation module for PyFastFlow.
+"""
+Raster manipulation tools for PyFastFlow.
 
-Provides GPU-accelerated raster upscaling, downscaling, and arbitrary resizing
-functions for 2D grid data. All functions support both Taichi fields and NumPy
-arrays as input/output, with efficient memory pool integration for GPU field
-management.
+The package root now exports only the reworked context API.
+Legacy resizing/upscaling/downscaling helpers live under
+``pyfastflow.rastermanip.legacy``.
 
-Author: B.G.
+Author: B.G (02/2026)
 """
 
-from .upscaling import double_resolution, double_resolution_kernel
-from .downscaling import (
-    halve_resolution,
-    halve_resolution_kernel_max,
-    halve_resolution_kernel_min,
-    halve_resolution_kernel_mean,
-    halve_resolution_kernel_cubic,
-)
-from .resizing import resize_raster, resize_kernel
-from .resizing import resize_to_max_dim, resize_to_dims
+from .rasmancontext import RasManContext
 
-__all__ = [
-    "double_resolution",
-    "double_resolution_kernel",
-    "halve_resolution",
-    "halve_resolution_kernel_max",
-    "halve_resolution_kernel_min",
-    "halve_resolution_kernel_mean",
-    "halve_resolution_kernel_cubic",
-    "resize_raster",
-    "resize_kernel",
-    "resize_to_max_dim",
-    "resize_to_dims",
-]
+__all__ = ["RasManContext"]
+
+# LEGACY (moved):
+# - pyfastflow.rastermanip.legacy.upscaling
+# - pyfastflow.rastermanip.legacy.downscaling
+# - pyfastflow.rastermanip.legacy.resizing

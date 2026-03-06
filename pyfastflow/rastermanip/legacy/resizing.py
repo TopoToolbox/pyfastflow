@@ -10,8 +10,8 @@ Author: OpenAI Assistant
 import numpy as np
 import taichi as ti
 
-from .. import pool
-from .. import constants as cte
+from ... import pool
+from ... import constants as cte
 
 _BOUNDARY_CLAMP = 0
 _BOUNDARY_WRAP = 1
@@ -140,10 +140,10 @@ def resize_raster(
         raise ValueError("boundary must be 'clamp', 'wrap', or 'reflect'")
     boundary_mode = boundary_map[boundary]
 
-    source_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (ny * nx,))
+    source_field = pool.taipool.get_tpfield(cte.FLOAT_TYPE_TI, (ny * nx,))
     source_field.field.from_numpy(data_np)
 
-    target_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (ny_t * nx_t,))
+    target_field = pool.taipool.get_tpfield(cte.FLOAT_TYPE_TI, (ny_t * nx_t,))
 
     resize_kernel(
         source_field.field,
@@ -205,10 +205,10 @@ def resize_to_dims(
         raise ValueError("boundary must be 'clamp', 'wrap', or 'reflect'")
     boundary_mode = boundary_map[boundary]
 
-    source_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (ny * nx,))
+    source_field = pool.taipool.get_tpfield(cte.FLOAT_TYPE_TI, (ny * nx,))
     source_field.field.from_numpy(data_np)
 
-    target_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (target_ny * target_nx,))
+    target_field = pool.taipool.get_tpfield(cte.FLOAT_TYPE_TI, (target_ny * target_nx,))
 
     resize_kernel(
         source_field.field,
