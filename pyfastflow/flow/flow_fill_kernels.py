@@ -31,9 +31,6 @@ def fill_topography_step_kernel(
     """
     for i in z_ref:
         receivers_next[i] = receivers[i]
-
-        if receivers[i] == -1:
-            continue
         receivers_next[i] = receivers[receivers[i]]
 
         if i == receivers[i]:

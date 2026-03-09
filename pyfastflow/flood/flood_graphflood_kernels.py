@@ -4,8 +4,6 @@ GraphFlood-oriented kernels for ``FloodContext``.
 Author: B.G (02/2026)
 """
 
-import math
-
 import taichi as ti
 
 from .. import constants as cte
@@ -14,8 +12,6 @@ from .. import constants as cte
 gridctx = None
 flowctx = None
 floodctx = None
-
-SQRT2 = math.sqrt(2.0)
 
 
 @ti.kernel
@@ -74,10 +70,7 @@ def distribute_flow_kernel(
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = ((z[i] + h[i]) - (z[j] + h[j])) / gridctx.tfunc.dist_from_k_flat(k)
-                if ti.static(gridctx.n_neighbours == 8 and flowctx.diagonal_partition_correction):
-                    if ti.static(k in (0, 2, 5, 7)):
-                        s *= ti.cast(ti.static(SQRT2), cte.FLOAT_TYPE_TI)
+                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
                 s = ti.max(s, ti.cast(0.0, cte.FLOAT_TYPE_TI))
                 slopes[k] = s
                 sum_s += s
@@ -126,10 +119,7 @@ def graphflood_core_kernel(
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = ((z[i] + h[i]) - (z[j] + h[j])) / gridctx.tfunc.dist_from_k_flat(k)
-                if ti.static(gridctx.n_neighbours == 8 and flowctx.diagonal_partition_correction):
-                    if ti.static(k in (0, 2, 5, 7)):
-                        s *= ti.cast(ti.static(SQRT2), cte.FLOAT_TYPE_TI)
+                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
                 if s > best_s:
                     best_s = s
         slope = ti.max(best_s, ti.cast(1e-9, cte.FLOAT_TYPE_TI))
@@ -161,13 +151,11 @@ def compute_Qo_kernel(
             continue
         slope = ti.cast(1e-9, cte.FLOAT_TYPE_TI)
         r = receivers[i]
-        if r != -1:
-            dist = gridctx.tfunc.dist_between_nodes_flat(i, r)
-            if dist > 0:
-                slope = ti.max(
-                    ((z[i] + h[i]) - (z[r] + h[r])) / dist,
-                    ti.cast(1e-9, cte.FLOAT_TYPE_TI),
-                )
+        if r != i:
+            slope = ti.max(
+                flowctx.tfunc.slope_between_nodes(z[i] + h[i], z[r] + h[r], i, r),
+                ti.cast(1e-9, cte.FLOAT_TYPE_TI),
+            )
         Qo[i] = floodctx.tfunc.qo_from_h_slope(h[i], slope, i)
 
 
@@ -185,13 +173,11 @@ def compute_u_kernel(
             continue
         slope = ti.cast(1e-9, cte.FLOAT_TYPE_TI)
         r = receivers[i]
-        if r != -1:
-            dist = gridctx.tfunc.dist_between_nodes_flat(i, r)
-            if dist > 0:
-                slope = ti.max(
-                    ((z[i] + h[i]) - (z[r] + h[r])) / dist,
-                    ti.cast(1e-9, cte.FLOAT_TYPE_TI),
-                )
+        if r != i:
+            slope = ti.max(
+                flowctx.tfunc.slope_between_nodes(z[i] + h[i], z[r] + h[r], i, r),
+                ti.cast(1e-9, cte.FLOAT_TYPE_TI),
+            )
         u[i] = floodctx.tfunc.u_from_h_slope(h[i], slope, i)
 
 
@@ -207,10 +193,7 @@ def compute_tau_kernel(z: ti.template(), h: ti.template(), tau: ti.template()):
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = ((z[i] + h[i]) - (z[j] + h[j])) / gridctx.tfunc.dist_from_k_flat(k)
-                if ti.static(gridctx.n_neighbours == 8 and flowctx.diagonal_partition_correction):
-                    if ti.static(k in (0, 2, 5, 7)):
-                        s *= ti.cast(ti.static(SQRT2), cte.FLOAT_TYPE_TI)
+                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
                 if s > slope:
                     slope = s
         tau[i] = slope * h[i] * floodctx.tfunc.rho_w(i) * floodctx.tfunc.gravity(i)

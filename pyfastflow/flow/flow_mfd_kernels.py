@@ -8,8 +8,6 @@ the bound grid topology.
 Author: B.G (02/2026)
 """
 
-import math
-
 import taichi as ti
 
 from .. import constants as cte
@@ -54,13 +52,7 @@ def compute_mfd_routing_weights_kernel(
         for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and not gridctx.tfunc.nodata_flat(j):
-                slope = (zi - z[j]) / gridctx.tfunc.dist_from_k_flat(k)
-                if ti.static(
-                    flowctx.diagonal_partition_correction
-                    and gridctx.n_neighbours == 8
-                    and k in (0, 2, 5, 7)
-                ):
-                    slope *= ti.cast(ti.static(math.sqrt(2.0)), cte.FLOAT_TYPE_TI)
+                slope = flowctx.tfunc.slope_from_values_k(zi, z[j], k)
                 if slope > 0.0:
                     routing_weights[i, k] = slope
                     sum_s += slope

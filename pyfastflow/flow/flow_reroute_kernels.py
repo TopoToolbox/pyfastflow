@@ -60,7 +60,7 @@ def propagate_basin_iter_kernel(rec_work: ti.template()):
     Author: B.G (02/2026)
     """
     for i in rec_work:
-        if rec_work[i] != -1 and rec_work[i] != rec_work[rec_work[i]]:
+        if rec_work[i] != rec_work[rec_work[i]]:
             rec_work[i] = rec_work[rec_work[i]]
 
 
@@ -72,10 +72,7 @@ def propagate_basin_final_kernel(bid: ti.template(), rec_work: ti.template()):
     Author: B.G (02/2026)
     """
     for i in bid:
-        if rec_work[i] == -1:
-            bid[i] = 0
-        else:
-            bid[i] = bid[rec_work[i]]
+        bid[i] = bid[rec_work[i]]
 
 
 @ti.kernel
@@ -247,14 +244,14 @@ def iteration_reroute_carve_kernel(
     for i in tag:
         if bid[i] == 0:
             continue
-        if tag[i] and rec[i] != -1:
+        if tag[i] and rec[i] != i:
             tag_alt[rec[i]] = True
         rec_work[i] = rec[i]
 
     for i in tag:
         if bid[i] == 0:
             continue
-        if rec_work[i] != -1:
+        if rec_work[i] != i:
             rec[i] = rec_work[rec_work[i]]
         tag[i] = tag_alt[i]
 
@@ -279,7 +276,7 @@ def finalise_reroute_carve_kernel(
         rec[i] = rec_work[i]
 
     for i in rec:
-        if rec_work[i] != -1 and tag[rec_work[i]] and tag[i] and i != rec_work[i]:
+        if tag[rec_work[i]] and tag[i] and i != rec_work[i]:
             rec[rec_work[i]] = i
             rerouted[rec_work[i]] = True
 

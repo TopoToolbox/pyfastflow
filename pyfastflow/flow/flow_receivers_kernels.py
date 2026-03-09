@@ -8,8 +8,6 @@ grid topology.
 Author: B.G (02/2026)
 """
 
-import math
-
 import taichi as ti
 
 from .. import constants as cte
@@ -26,27 +24,28 @@ def compute_sfd_receivers_kernel(z: ti.template(), receivers: ti.template()):
 
     Author: B.G (02/2026)
     """
+
+    # Main parallel loop over the whole GPU
     for i in receivers:
+
+        # Generic check if the node is a base level
+        # Base levels now use the same self-receiver convention as internal pits.
         if gridctx.tfunc.can_out_flat(i):
-            receivers[i] = -1
+            receivers[i] = i
             continue
 
+        # stores the receiver/steepest slope and all
         r = i
         sr = ti.cast(0.0, cte.FLOAT_TYPE_TI)
         n_neighbours = ti.static(gridctx.n_neighbours)
 
+        # check neighbours
         for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             valid = j != -1
             tsr = ti.cast(-1.0, cte.FLOAT_TYPE_TI)
             if valid:
-                tsr = (z[i] - z[j]) / gridctx.tfunc.dist_from_k_flat(k)
-                if ti.static(
-                    flowctx.diagonal_partition_correction
-                    and gridctx.n_neighbours == 8
-                    and k in (0, 2, 5, 7)
-                ):
-                    tsr *= ti.cast(ti.static(math.sqrt(2.0)), cte.FLOAT_TYPE_TI)
+                tsr = flowctx.tfunc.slope_from_values_k(z[i], z[j], k)
 
             better = valid and tsr > sr
             sr = tsr if better else sr
@@ -64,7 +63,7 @@ def compute_sfd_receivers_stochastic_kernel(z: ti.template(), receivers: ti.temp
     """
     for i in receivers:
         if gridctx.tfunc.can_out_flat(i):
-            receivers[i] = -1
+            receivers[i] = i
             continue
 
         r = i
@@ -76,13 +75,7 @@ def compute_sfd_receivers_stochastic_kernel(z: ti.template(), receivers: ti.temp
             valid = j != -1
             tsr = ti.cast(-1.0, cte.FLOAT_TYPE_TI)
             if valid:
-                tsr = (z[i] - z[j]) / gridctx.tfunc.dist_from_k_flat(k)
-                if ti.static(
-                    flowctx.diagonal_partition_correction
-                    and gridctx.n_neighbours == 8
-                    and k in (0, 2, 5, 7)
-                ):
-                    tsr *= ti.cast(ti.static(math.sqrt(2.0)), cte.FLOAT_TYPE_TI)
+                tsr = flowctx.tfunc.slope_from_values_k(z[i], z[j], k)
                 if tsr > 0.0:
                     tsr = ti.random(dtype=cte.FLOAT_TYPE_TI) * ti.math.sqrt(tsr)
 

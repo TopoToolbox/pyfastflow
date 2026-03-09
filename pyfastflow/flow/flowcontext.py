@@ -7,7 +7,14 @@ import taichi as ti
 from .. import constants as cte
 from .. import pool as ppool
 from ..general_algorithms import GAContext
-from ._flow_param_helpers import get_min_slope, get_weight
+from ._flow_param_helpers import (
+    dist_between_nodes_corrected,
+    dist_from_k_corrected,
+    get_min_slope,
+    get_weight,
+    slope_between_nodes,
+    slope_from_values_k,
+)
 from .flow_analysis_kernels import sum_at_can_out_kernel
 from .flow_fill_kernels import apply_fill_delta_kernel, fill_topography_step_kernel
 from .flow_mfd_kernels import (
@@ -234,6 +241,18 @@ class FlowContext:
         """
         self.tfunc.get_weight = self.make_func(get_weight)
         self.tfunc.get_min_slope = self.make_func(get_min_slope)
+        self.tfunc.dist_from_k_corrected = self.make_func(dist_from_k_corrected)
+        self.tfunc.dist_between_nodes_corrected = self.make_func(
+            dist_between_nodes_corrected
+        )
+        self.tfunc.slope_from_values_k = self.make_func(
+            slope_from_values_k,
+            dist_from_k_corrected=self.tfunc.dist_from_k_corrected,
+        )
+        self.tfunc.slope_between_nodes = self.make_func(
+            slope_between_nodes,
+            dist_between_nodes_corrected=self.tfunc.dist_between_nodes_corrected,
+        )
 
     def _compile_kernels(self):
         """

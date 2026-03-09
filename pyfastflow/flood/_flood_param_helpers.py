@@ -7,8 +7,6 @@ bound flood context.
 Author: B.G (02/2026)
 """
 
-import math
-
 import taichi as ti
 
 from .. import constants as cte
@@ -179,5 +177,3 @@ def compute_qo_from_h_slope(h: cte.FLOAT_TYPE_TI, slope: cte.FLOAT_TYPE_TI, i: t
     dx = ti.cast(ti.static(gridctx.dx), cte.FLOAT_TYPE_TI)
     return compute_q_from_h_slope(h, slope, i) * dx
 
-
-SQRT2 = math.sqrt(2.0)

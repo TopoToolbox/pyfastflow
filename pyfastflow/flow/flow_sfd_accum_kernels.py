@@ -41,7 +41,7 @@ def receivers_to_donors_kernel(
     """
     for tid in receivers:
         rcv = receivers[tid]
-        if rcv != tid and rcv != -1:
+        if rcv != tid:
             old_val = ti.atomic_add(ndonors[rcv], 1)
             donors[rcv * gridctx.n_neighbours + old_val] = tid
 
