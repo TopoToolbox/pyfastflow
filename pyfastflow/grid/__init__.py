@@ -8,6 +8,6 @@ grid containers and neighbourer implementations remain available under the
 Author: B.G.
 """
 
-from .gridapi import GridContext
+from .gridcontext import GridContext
 
 __all__ = ["GridContext"]

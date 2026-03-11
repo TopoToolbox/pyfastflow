@@ -14,6 +14,7 @@ __author__ = "B.G."
 
 # Lazy submodule loading to avoid heavy side effects at import time.
 _LAZY_SUBMODULES = [
+    "erodep",
     "general_algorithms",
     "grid",
     "noise",
