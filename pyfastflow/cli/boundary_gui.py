@@ -115,9 +115,9 @@ def boundary_gui(dem_file: str, output_npy: str | None = None, disp_max: int = 2
     dem_disp_tex.from_numpy(dem_disp.astype(np.float32))
 
     # Build display-resolution masks (resize boolean masks with bilinear then threshold)
-    from ..rastermanip import resize_raster
+    from ..rastermanip.legacy import resize_raster
     def rebuild_display_masks():
-        from ..rastermanip import resize_to_dims
+        from ..rastermanip.legacy import resize_to_dims
         outlet_mask = (boundaries == 3).astype(np.float32)
         burned_mask = (boundaries == 0).astype(np.float32)
         nan_mask = np.isnan(dem).astype(np.float32)

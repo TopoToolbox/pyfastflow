@@ -29,24 +29,30 @@ def _require_topotoolbox():
 @click.argument("input_raster", type=click.Path(exists=True))
 @click.argument("output_raster", type=click.Path())
 @click.option(
-    "--noise",
-    "-n",
-    default=0.0,
+    "--method",
+    "-m",
+    type=click.Choice(["nearest", "bilinear", "bicubic", "lanczos"]),
+    default="bicubic",
     show_default=True,
-    type=float,
-    help="Noise amplitude to add during upscaling",
+    help="Interpolation method for upscaling",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
-def raster_upscale(input_raster, output_raster, noise, verbose):
+def raster_upscale(input_raster, output_raster, method, verbose):
     """Double the resolution of INPUT_RASTER and save to OUTPUT_RASTER."""
     try:
         _require_topotoolbox()
         if verbose:
             click.echo(
-                f"Upscaling raster '{input_raster}' -> '{output_raster}' with noise={noise}"
+                f"Upscaling raster '{input_raster}' -> '{output_raster}' with method='{method}'"
             )
         grid = ttb.read_tif(input_raster)
-        result = pf.rastermanip.double_resolution(grid.z, noise_amplitude=noise)
+        rasmanctx = pf.rastermanip.RasManContext()
+        result = rasmanctx.double_resolution(
+            grid.z,
+            method=method,
+            as_numpy=True,
+            output_layout="2d",
+        )
         grid.z = result.astype("float32")
         grid.cellsize = grid.cellsize / 2
         t = grid.transform
@@ -66,13 +72,21 @@ def raster_upscale(input_raster, output_raster, noise, verbose):
 @click.option(
     "--method",
     "-m",
-    type=click.Choice(["mean", "max", "min", "cubic"]),
+    type=click.Choice(["mean", "median", "min", "max", "percentile"]),
     default="mean",
     show_default=True,
     help="Aggregation method for downscaling",
 )
+@click.option(
+    "--percentile",
+    "-p",
+    default=50.0,
+    show_default=True,
+    type=float,
+    help="Percentile value when method='percentile'",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
-def raster_downscale(input_raster, output_raster, method, verbose):
+def raster_downscale(input_raster, output_raster, method, percentile, verbose):
     """Halve the resolution of INPUT_RASTER and save to OUTPUT_RASTER."""
     try:
         _require_topotoolbox()
@@ -81,7 +95,14 @@ def raster_downscale(input_raster, output_raster, method, verbose):
                 f"Downscaling raster '{input_raster}' -> '{output_raster}' using method='{method}'"
             )
         grid = ttb.read_tif(input_raster)
-        result = pf.rastermanip.halve_resolution(grid.z, method=method)
+        rasmanctx = pf.rastermanip.RasManContext()
+        result = rasmanctx.halve_resolution(
+            grid.z,
+            method=method,
+            percentile=percentile,
+            as_numpy=True,
+            output_layout="2d",
+        )
         grid.z = result.astype("float32")
         grid.cellsize = grid.cellsize * 2
         t = grid.transform

@@ -63,7 +63,7 @@ def compute_visual_layers(dem: np.ndarray, sea_min: float, sea_max: float) -> tu
 
 
 def prepare_display_textures(dem: np.ndarray, sea_min: float, sea_max: float, max_dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int, float, float]:
-    from ..rastermanip import resize_to_max_dim
+    from ..rastermanip.legacy import resize_to_max_dim
     ny, nx = dem.shape
     dem_disp = resize_to_max_dim(dem, max_dim)
     ny_disp, nx_disp = dem_disp.shape

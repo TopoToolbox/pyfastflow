@@ -1,218 +1,171 @@
 """
-Perlin noise generation for PyFastFlow.
+Perlin noise Taichi primitives for PyFastFlow.
 
-Provides GPU-accelerated Perlin noise generation with proper permutation tables
-and gradient vectors for natural-looking procedural terrain and texture generation
-in geomorphological and hydrological modeling applications.
+This module intentionally only exposes Taichi functions and kernels. Python-side
+orchestration lives in ``noisecontext.py``.
 
-Author: B.G.
+Author: B.G (02/2026)
 """
 
 import taichi as ti
-import numpy as np
-from .. import pool
+
 from .. import constants as cte
 
 
-def fisher_yates_permutation(seed: int) -> np.ndarray:
-    """
-    Generate a permutation table using Fisher-Yates shuffle algorithm.
-    
-    Args:
-        seed: Random seed for reproducible permutation
-        
-    Returns:
-        512-element permutation array (256 values duplicated)
-    """
-    np.random.seed(seed)
-    
-    # Create initial sequence [0, 1, 2, ..., 255]
-    perm = np.arange(256, dtype=np.int32)
-    
-    # Fisher-Yates shuffle
-    for i in range(255, 0, -1):
-        j = np.random.randint(0, i + 1)
-        perm[i], perm[j] = perm[j], perm[i]
-    
-    # Duplicate to 512 elements for easier wrapping
-    perm_512 = np.concatenate([perm, perm])
-    
-    return perm_512
-
-
-# 8-direction 2D gradient vectors
-GRADIENTS_2D = np.array([
-    [1, 1], [-1, 1], [1, -1], [-1, -1],  # Diagonal gradients
-    [1, 0], [-1, 0], [0, 1], [0, -1]      # Axis-aligned gradients
-], dtype=cte.FLOAT_TYPE_NP)
+gridctx = None
 
 
 @ti.func
 def fade(t: cte.FLOAT_TYPE_TI) -> cte.FLOAT_TYPE_TI:
-    """Perlin fade function: 6t^5 - 15t^4 + 10t^3"""
+    """Return Perlin fade curve value. Author: B.G (02/2026)"""
     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 
 
 @ti.func
 def lerp(t: cte.FLOAT_TYPE_TI, a: cte.FLOAT_TYPE_TI, b: cte.FLOAT_TYPE_TI) -> cte.FLOAT_TYPE_TI:
-    """Linear interpolation between a and b by factor t"""
+    """Return linear interpolation between a and b. Author: B.G (02/2026)"""
     return a + t * (b - a)
 
 
 @ti.func
-def grad(hash_val: ti.i32, dx: cte.FLOAT_TYPE_TI, dy: cte.FLOAT_TYPE_TI, gradients: ti.template()) -> cte.FLOAT_TYPE_TI:
-    """Compute dot product of gradient vector and distance vector"""
-    idx = hash_val & 7  # Use lower 3 bits to select from 8 gradients
-    gx = gradients[idx, 0]
-    gy = gradients[idx, 1]
+def grad(hash_val: ti.i32, dx: cte.FLOAT_TYPE_TI, dy: cte.FLOAT_TYPE_TI) -> cte.FLOAT_TYPE_TI:
+    """Return 2D gradient dot product from hashed corner index. Author: B.G (02/2026)"""
+    idx = hash_val & 7
+    gx = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+    gy = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+
+    if idx == 0:
+        gx, gy = 1.0, 1.0
+    elif idx == 1:
+        gx, gy = -1.0, 1.0
+    elif idx == 2:
+        gx, gy = 1.0, -1.0
+    elif idx == 3:
+        gx, gy = -1.0, -1.0
+    elif idx == 4:
+        gx, gy = 1.0, 0.0
+    elif idx == 5:
+        gx, gy = -1.0, 0.0
+    elif idx == 6:
+        gx, gy = 0.0, 1.0
+    else:
+        gx, gy = 0.0, -1.0
+
     return gx * dx + gy * dy
 
 
 @ti.func
-def perlin_noise_at(x: cte.FLOAT_TYPE_TI, y: cte.FLOAT_TYPE_TI, perm: ti.template(), gradients: ti.template()) -> cte.FLOAT_TYPE_TI:
-    """
-    Generate Perlin noise value at specific coordinates using proper permutation table.
-    
-    Args:
-        x, y: Coordinates for noise evaluation
-        perm: 512-element permutation table (read-only Taichi field)
-        gradients: 8x2 gradient vector table (read-only Taichi field)
-        
-    Returns:
-        Perlin noise value in range approximately [-1, 1]
-    """
-    # Find unit grid cell containing point
-    X = ti.cast(ti.floor(x), ti.i32) & 255
-    Y = ti.cast(ti.floor(y), ti.i32) & 255
-    
-    # Find relative x,y of point in cube
-    x -= ti.floor(x)
-    y -= ti.floor(y)
-    
-    # Compute fade curves for x,y
-    u = fade(x)
-    v = fade(y)
-    
-    # Hash coordinates of 4 cube corners using permutation table
+def perlin_noise_at(
+    x: cte.FLOAT_TYPE_TI, y: cte.FLOAT_TYPE_TI, perm: ti.template()
+) -> cte.FLOAT_TYPE_TI:
+    """Return Perlin noise value at x, y using a permutation field. Author: B.G (02/2026)"""
+    x_floor = ti.floor(x)
+    y_floor = ti.floor(y)
+
+    X = ti.cast(x_floor, ti.i32) & 255
+    Y = ti.cast(y_floor, ti.i32) & 255
+
+    x_local = x - x_floor
+    y_local = y - y_floor
+
+    u = fade(x_local)
+    v = fade(y_local)
+
     A = perm[X] + Y
     B = perm[(X + 1) & 255] + Y
     AA = perm[A & 255]
-    AB = perm[(A + 1) & 255]  
+    AB = perm[(A + 1) & 255]
     BA = perm[B & 255]
     BB = perm[(B + 1) & 255]
-    
-    # Add blended results from 4 corners of cube using proper gradients
-    return lerp(v, 
-                lerp(u, grad(AA, x, y, gradients), grad(BA, x - 1, y, gradients)),
-                lerp(u, grad(AB, x, y - 1, gradients), grad(BB, x - 1, y - 1, gradients)))
+
+    return lerp(
+        v,
+        lerp(u, grad(AA, x_local, y_local), grad(BA, x_local - 1.0, y_local)),
+        lerp(
+            u,
+            grad(AB, x_local, y_local - 1.0),
+            grad(BB, x_local - 1.0, y_local - 1.0),
+        ),
+    )
 
 
 @ti.kernel
-def perlin_noise_kernel(noise_field: ti.template(), frequency_x: cte.FLOAT_TYPE_TI, frequency_y: cte.FLOAT_TYPE_TI, octaves: ti.i32,
-                       persistence: cte.FLOAT_TYPE_TI, amplitude: cte.FLOAT_TYPE_TI, perm: ti.template(),
-                       gradients: ti.template()):
+def perlin_noise_2d_kernel(
+    noise_field: ti.template(),
+    frequency_x: cte.FLOAT_TYPE_TI,
+    frequency_y: cte.FLOAT_TYPE_TI,
+    octaves: ti.i32,
+    persistence: cte.FLOAT_TYPE_TI,
+    amplitude: cte.FLOAT_TYPE_TI,
+    perm: ti.template(),
+):
     """
-    Generate Perlin noise with multiple octaves in a Taichi field.
-    
-    Args:
-        noise_field: Taichi field to fill with Perlin noise
-        frequency: Base frequency of the noise (higher = more detail)
-        octaves: Number of octaves to combine (more = more detail levels)  
-        persistence: How much each octave contributes (0.0-1.0)
-        amplitude: Maximum amplitude of the final noise
-        perm: 512-element permutation table (read-only Taichi field)
-        gradients: 8x2 gradient vector table (read-only Taichi field)
+    Fill a field with multi-octave Perlin noise using the bound grid context.
+
+    Author: B.G (02/2026)
     """
-    ny, nx = noise_field.shape
-    
-    for j, i in noise_field:
-        # Convert grid coordinates to noise space
-        x = ti.cast(i, ti.f32) * frequency_x / ti.cast(nx, ti.f32)
-        y = ti.cast(j, ti.f32) * frequency_y / ti.cast(ny, ti.f32)
-        
-        total = 0.0
-        max_value = 0.0
-        current_amplitude = 1.0  # Start with unit amplitude for proper normalization
-        current_frequency = 1.0
-        
-        # Sum octaves using the same permutation table for all octaves
-        for octave in range(octaves):
-            noise_value = perlin_noise_at(x * current_frequency, y * current_frequency, perm, gradients)
-            total += noise_value * current_amplitude
+    nx_f = ti.cast(gridctx.nx, cte.FLOAT_TYPE_TI)
+    ny_f = ti.cast(gridctx.ny, cte.FLOAT_TYPE_TI)
+
+    for j, i in ti.ndrange(gridctx.ny, gridctx.nx):
+        x = ti.cast(i, cte.FLOAT_TYPE_TI) * frequency_x / nx_f
+        y = ti.cast(j, cte.FLOAT_TYPE_TI) * frequency_y / ny_f
+
+        total = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+        max_value = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+        current_amplitude = ti.cast(1.0, cte.FLOAT_TYPE_TI)
+        current_frequency = ti.cast(1.0, cte.FLOAT_TYPE_TI)
+
+        for _ in range(octaves):
+            total += perlin_noise_at(x * current_frequency, y * current_frequency, perm) * current_amplitude
             max_value += current_amplitude
-            
             current_amplitude *= persistence
             current_frequency *= 2.0
-        
-        # Normalize to [-1, 1] range then scale by requested amplitude
+
         if max_value > 0.0:
             noise_field[j, i] = (total / max_value) * amplitude
         else:
             noise_field[j, i] = 0.0
 
 
-def perlin_noise(nx: int, ny: int, frequency: float = 8.0, octaves: int = 4,
-                persistence: float = 0.5, amplitude: float = 1.0, seed: int = 42,
-                return_field: bool = False, frequency_x: float | None = None, frequency_y: float | None = None):
+@ti.kernel
+def perlin_noise_flat_kernel(
+    noise_field: ti.template(),
+    frequency_x: cte.FLOAT_TYPE_TI,
+    frequency_y: cte.FLOAT_TYPE_TI,
+    octaves: ti.i32,
+    persistence: cte.FLOAT_TYPE_TI,
+    amplitude: cte.FLOAT_TYPE_TI,
+    perm: ti.template(),
+):
     """
-    Generate Perlin noise with multiple octaves using proper permutation tables.
-    
-    Creates coherent noise with natural-looking patterns by combining multiple
-    scales of noise. Uses proper permutation tables and gradient vectors for
-    artifact-free, deterministic results suitable for procedural terrain generation.
-    
-    Args:
-        nx: Number of cells in x direction
-        ny: Number of cells in y direction
-        frequency: Base frequency of noise patterns (default: 8.0)
-                  Higher values create more detailed, smaller-scale features
-        octaves: Number of noise layers to combine (default: 4)
-                More octaves add finer detail at computational cost
-        persistence: Amplitude ratio between octaves (default: 0.5)
-                    Controls how much each octave contributes to final result
-                    Values near 0.0 emphasize large-scale features
-                    Values near 1.0 emphasize fine-scale details
-        amplitude: Maximum amplitude of final noise values (default: 1.0)
-        seed: Random seed for reproducible permutation table (default: 42)
-        return_field: If True, return Taichi field; if False, return numpy array (default: False)
-    
-    Returns:
-        numpy.ndarray or taichi.Field: Perlin noise array/field of shape (ny, nx)
-        Values range approximately from -amplitude to +amplitude
-        
-    Example:
-        # Generate terrain-like noise with multiple detail levels
-        terrain = perlin_noise(512, 512, frequency=16.0, octaves=6, 
-                              persistence=0.6, amplitude=100.0, seed=456)
-        
-        # Generate fine-grained texture noise  
-        texture = perlin_noise(256, 256, frequency=32.0, octaves=2,
-                              persistence=0.3, return_field=True)
+    Fill a flat row-major field with multi-octave Perlin noise.
+
+    Author: B.G (02/2026)
     """
-    # Generate permutation table using Fisher-Yates shuffle
-    perm_array = fisher_yates_permutation(seed)
-    
-    # Create Taichi fields for permutation table and gradients
-    perm_field = ti.field(ti.i32, shape=(512,))
-    gradients_field = ti.field(cte.FLOAT_TYPE_TI, shape=(8, 2))
-    
-    # Copy data to Taichi fields
-    perm_field.from_numpy(perm_array)
-    gradients_field.from_numpy(GRADIENTS_2D)
-    
-    # Get noise field from pool
-    noise_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (ny, nx))
-    
-    # Note: Taichi random state is global, seeding happens at permutation generation level
-    # Allow anisotropic frequency for world-isotropic noise when mapping non-square textures
-    fx = float(frequency_x if frequency_x is not None else frequency)
-    fy = float(frequency_y if frequency_y is not None else frequency)
-    perlin_noise_kernel(noise_field.field, fx, fy, octaves,
-                       persistence, amplitude, perm_field, gradients_field)
-    
-    if return_field:
-        return noise_field.field
-    else:
-        result = noise_field.field.to_numpy()
-        noise_field.release()
-        return result
+    nx_f = ti.cast(gridctx.nx, cte.FLOAT_TYPE_TI)
+    ny_f = ti.cast(gridctx.ny, cte.FLOAT_TYPE_TI)
+
+    for j, i in ti.ndrange(gridctx.ny, gridctx.nx):
+        x = ti.cast(i, cte.FLOAT_TYPE_TI) * frequency_x / nx_f
+        y = ti.cast(j, cte.FLOAT_TYPE_TI) * frequency_y / ny_f
+
+        total = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+        max_value = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+        current_amplitude = ti.cast(1.0, cte.FLOAT_TYPE_TI)
+        current_frequency = ti.cast(1.0, cte.FLOAT_TYPE_TI)
+
+        for _ in range(octaves):
+            total += perlin_noise_at(x * current_frequency, y * current_frequency, perm) * current_amplitude
+            max_value += current_amplitude
+            current_amplitude *= persistence
+            current_frequency *= 2.0
+
+        idx = j * gridctx.nx + i
+        if max_value > 0.0:
+            noise_field[idx] = (total / max_value) * amplitude
+        else:
+            noise_field[idx] = 0.0
+
+
+perlin_noise_kernel = perlin_noise_2d_kernel

@@ -20,13 +20,14 @@ def flow_route(
     qx: ti.template(),
     flow_timestep: float,
 ):
-    for i, j in elev:
+    for i, j in hw:
         if i == 0 or j == 0:
             continue
 
         if elev[i, j] > -9999:  # to stop moving water into -9999's on elev
             # routing in y direction
             if (hw[i, j] > 0 or hw[i - 1, j] > 0) and elev[i - 1, j] > -9999:
+
                 hflow = tm.max(
                     elev[i, j] + hw[i, j], elev[i - 1, j] + hw[i - 1, j]
                 ) - tm.max(elev[i - 1, j], elev[i, j])
@@ -148,7 +149,7 @@ def depth_update(
     qx: ti.template(),
     flow_timestep: float,
 ):
-    for i, j in elev:
+    for i, j in hw:
         if i == NY - 1 or j == NX - 1:
             continue
 
@@ -156,3 +157,11 @@ def depth_update(
         hw[i, j] += (
             flow_timestep * (qy[i + 1, j] - qy[i, j] + qx[i, j + 1] - qx[i, j]) / DX
         )
+
+
+@ti.kernel
+def rainongrid(hw:ti.template(), Prate:ti.f32, dt:ti.f32 ):
+    for i, j in hw:
+        if i == NY - 1 or j == NX - 1:
+            continue
+        hw[i,j] += Prate * dt

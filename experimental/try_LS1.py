@@ -12,6 +12,7 @@ dem = scb.io.load_raster("/home/bgailleton/Desktop/data/green_river_1.tif")
 nx, ny = dem.geo.nx, dem.geo.ny
 LS.NX = nx
 LS.NY = ny
+print(nx*ny)
 
 thw = np.zeros((ny, nx), dtype=np.float32)
 # thw[800:820,100:120] = 1.
@@ -42,6 +43,7 @@ while True:
     LS.depth_update(hw, elev, qy, qx, flow_timestep)
 
     if it % 10000 == 0:
+        ti.sync()
         print('took', time.perf_counter() - st)
         im.set_data(hw.to_numpy())
         fig.canvas.draw_idle()

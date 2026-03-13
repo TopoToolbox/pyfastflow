@@ -72,7 +72,7 @@ def process_node_list_sfd(
         if state[i] != S_PROCESSABLE() or donors_remaining[i] != 0:
             continue
         r = receivers[i]
-        if r != i and r >= 0:
+        if r != i:
             ti.atomic_add(Q[r], Q[i])
             ti.atomic_add(donors_remaining[r], -1)
         state[i] = S_PROCESSED()
@@ -87,7 +87,7 @@ def process_all_bruteforce_sfd(
         if state[i] == S_PROCESSABLE() and donors_remaining[i] == 0:
             changed = True
             r = receivers[i]
-            if r != i and r >= 0:
+            if r != i:
                 ti.atomic_add(Q[r], Q[i])
                 ti.atomic_add(donors_remaining[r], -1)
             state[i] = S_PROCESSED()
@@ -160,4 +160,3 @@ def iteration_scan(Q, receivers, donors_remaining, state, flags, scan_out, work,
         return 0
     process_node_list_sfd(ids, count_scalar, Q, receivers, donors_remaining, state)
     return count
-

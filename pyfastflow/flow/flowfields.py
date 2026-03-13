@@ -24,6 +24,8 @@ from . import fill_topo as fl
 from . import lakeflow as lf
 from . import receivers as rcv
 from . import propagate_upstream as pup
+from . import wavefront_mfd as wfd
+from . import power_iteration_mfd as pif
 
 
 class FlowRouter:
@@ -496,6 +498,57 @@ class FlowRouter:
 
         self.Q.field.copy_from(fullQ.field)
         fullQ.release()
+
+    def accumulate_wavefront_mfd(self, value, area=True):
+        """
+        Accumulate flow using a wavefront-based Multiple Flow Direction (MFD) algorithm.
+        
+        This method uses a sparse topological sort (wavefront) to accumulate flow
+        downstream, distributing it to all downhill neighbors proportionally to 
+        their slopes. It is more efficient than full-grid scans for MFD.
+        
+        Args:
+            value (float): Constant flow value to accumulate at each node.
+            area (bool, optional): If True, multiply value by cell area (dx²). 
+                                   Default: True.
+        """
+        # Initialize flow values
+        self.Q.field.fill(value * (cte.DX * cte.DX if area else 1.0))
+        
+        # Call the wavefront accumulation implementation
+        wfd.accumulate_wavefront_mfd(
+            self.grid.z.field, 
+            self.Q.field, 
+            self.nx,
+            self.ny
+        )
+
+    def accumulate_power_iteration_mfd(self, value, area=True, iterations=2000, tol=1., check_interval=10):
+        """
+        Accumulate flow using a Power Iteration (Jacobi) MFD algorithm.
+        
+        This method solves the flow accumulation as a linear system using 
+        iterative power series (Q = S + WQ). It is highly parallel and 
+        avoids the sequential dependencies of wavefronts.
+        
+        Args:
+            value (float): Constant flow value to accumulate at each node.
+            area (bool, optional): If True, multiply value by cell area (dx²). 
+            iterations (int, optional): Maximum number of power iterations.
+            tol (float, optional): Convergence tolerance.
+            check_interval (int, optional): Frequency of convergence checks.
+        """
+        self.Q.field.fill(value * (cte.DX * cte.DX if area else 1.0))
+        
+        pif.accumulate_power_iteration_mfd(
+            self.grid.z.field,
+            self.Q.field,
+            self.nx,
+            self.ny,
+            max_iterations=iterations,
+            tol=tol,
+            check_interval=check_interval
+        )
 
     def fill_z(self, epsilon=1e-3):
         """

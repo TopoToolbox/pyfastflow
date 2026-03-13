@@ -1,71 +1,67 @@
 """
-White noise generation for PyFastFlow.
+White noise Taichi primitives for PyFastFlow.
 
-Provides GPU-accelerated white noise generation with seeded random number generation
-for reproducible results in geomorphological and hydrological modeling.
+This module intentionally only exposes Taichi functions and kernels. Python-side
+orchestration lives in ``noisecontext.py``.
 
-Author: B.G.
+Author: B.G (02/2026)
 """
 
 import taichi as ti
-import numpy as np
-from .. import pool
+
 from .. import constants as cte
 
 
+gridctx = None
+
+
+@ti.func
+def _hash_u32(x: ti.u32) -> ti.u32:
+    """Small integer hash used for deterministic white noise. Author: B.G (02/2026)"""
+    h = x
+    h ^= h >> ti.u32(16)
+    h *= ti.u32(0x7FEB352D)
+    h ^= h >> ti.u32(15)
+    h *= ti.u32(0x846CA68B)
+    h ^= h >> ti.u32(16)
+    return h
+
+
+@ti.func
+def _white_unit(i: ti.i32, j: ti.i32, seed: ti.i32) -> cte.FLOAT_TYPE_TI:
+    """Return deterministic pseudo-random value in [0, 1). Author: B.G (02/2026)"""
+    key = ti.u32(seed)
+    key ^= ti.u32(i) * ti.u32(374761393)
+    key ^= ti.u32(j) * ti.u32(668265263)
+    hashed = _hash_u32(key)
+    return ti.cast(hashed, cte.FLOAT_TYPE_TI) / ti.cast(4294967296.0, cte.FLOAT_TYPE_TI)
+
+
 @ti.kernel
-def white_noise_kernel(noise_field: ti.template(), amplitude: cte.FLOAT_TYPE_TI, seed: ti.i32):
+def white_noise_2d_kernel(
+    noise_field: ti.template(), amplitude: cte.FLOAT_TYPE_TI, seed: ti.i32
+):
     """
-    Generate white noise in a Taichi field.
-    
-    White noise has equal intensity at all frequencies with no correlation between
-    adjacent values. Each value is independently and identically distributed.
-    
-    Args:
-        noise_field: Taichi field to fill with white noise
-        amplitude: Maximum amplitude of the noise (noise range: [-amplitude, amplitude])
-        seed: Random seed for reproducible results
+    Fill a field with deterministic white noise using the bound grid context.
+
+    Author: B.G (02/2026)
     """
-    # Note: Taichi seeds the random generator globally, per-element seeding not supported in struct for
-    for j, i in noise_field:
-        # Generate uniform random value in [-amplitude, amplitude]
-        noise_field[j, i] = (ti.random(cte.FLOAT_TYPE_TI) - 0.5) * 2.0 * amplitude
+    for j, i in ti.ndrange(gridctx.ny, gridctx.nx):
+        noise_field[j, i] = (_white_unit(i, j, seed) - 0.5) * 2.0 * amplitude
 
 
-def white_noise(nx: int, ny: int, amplitude: float = 1.0, seed: int = 42, return_field: bool = False):
+@ti.kernel
+def white_noise_flat_kernel(
+    noise_field: ti.template(), amplitude: cte.FLOAT_TYPE_TI, seed: ti.i32
+):
     """
-    Generate white noise with specified dimensions.
-    
-    Creates a 2D array of white noise values with independent random values at each point.
-    White noise is characterized by having equal power at all frequencies and no spatial
-    correlation between neighboring values.
-    
-    Args:
-        nx: Number of cells in x direction
-        ny: Number of cells in y direction  
-        amplitude: Maximum amplitude of noise values (default: 1.0)
-                  Noise values range from -amplitude to +amplitude
-        seed: Random seed for reproducible results (default: 42)
-        return_field: If True, return Taichi field; if False, return numpy array (default: False)
-    
-    Returns:
-        numpy.ndarray or taichi.Field: White noise array/field of shape (ny, nx)
-        
-    Example:
-        # Generate 100x100 white noise with amplitude 0.5
-        noise = white_noise(100, 100, amplitude=0.5, seed=123)
-        
-        # Get Taichi field instead of numpy array
-        noise_field = white_noise(100, 100, return_field=True)
+    Fill a flat row-major field with deterministic white noise.
+
+    Author: B.G (02/2026)
     """
-    noise_field = pool.get_temp_field(cte.FLOAT_TYPE_TI, (ny, nx))
-    
-    # Note: Taichi random state is global, seeding happens at ti.init() level
-    white_noise_kernel(noise_field.field, amplitude, seed)
-    
-    if return_field:
-        return noise_field.field
-    else:
-        result = noise_field.field.to_numpy()
-        noise_field.release()
-        return result
+    for j, i in ti.ndrange(gridctx.ny, gridctx.nx):
+        idx = j * gridctx.nx + i
+        noise_field[idx] = (_white_unit(i, j, seed) - 0.5) * 2.0 * amplitude
+
+
+white_noise_kernel = white_noise_2d_kernel
