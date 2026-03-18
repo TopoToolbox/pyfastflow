@@ -5,12 +5,22 @@ Author: B.G (03/2026)
 """
 
 from dataclasses import dataclass
-from types import FunctionType, SimpleNamespace
+from types import FunctionType
 
 import numpy as np
 import taichi as ti
 
 from .. import pool as ppool
+
+
+class APINamespace:
+    """
+    Lightweight namespace used for compiled context API surfaces.
+
+    Author: B.G (03/2026)
+    """
+
+    pass
 
 
 def unwrap_field(field_like):
@@ -32,6 +42,30 @@ def require_flat_field(field_like, label):
     if len(tuple(field.shape)) != 1:
         raise ValueError(f"{label} must be a flat field")
     return field
+
+
+def flat_field_to_numpy(field_like):
+    """
+    Return one flat field-like object as a flat numpy array copy.
+
+    Author: B.G (03/2026)
+    """
+    return np.asarray(require_flat_field(field_like, "field").to_numpy()).reshape(-1)
+
+
+def format_flat_numpy(flat_values, shape, output_layout="flat"):
+    """
+    Format flat values as flat or 2D numpy output at the boundary.
+
+    Author: B.G (03/2026)
+    """
+    arr = np.asarray(flat_values).reshape(-1)
+    layout = str(output_layout).lower()
+    if layout == "flat":
+        return arr
+    if layout == "2d":
+        return arr.reshape(tuple(shape))
+    raise ValueError("output_layout must be 'flat' or '2d'")
 
 
 @dataclass(frozen=True)
@@ -262,7 +296,7 @@ class ContextFactory:
         current = self.owner
         for part in path.split("."):
             if not hasattr(current, part):
-                setattr(current, part, SimpleNamespace())
+                setattr(current, part, APINamespace())
             current = getattr(current, part)
         return current
 

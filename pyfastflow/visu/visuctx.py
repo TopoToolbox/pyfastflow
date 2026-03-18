@@ -1,9 +1,8 @@
 import math
-from types import SimpleNamespace
 
 from .. import constants as cte
 from .. import pool as ppool
-from ..context import require_flat_field
+from ..context import ContextFactory, ContextRef, flat_field_to_numpy, format_flat_numpy, require_flat_field
 from .hillshading import (
     gradient_x_flat,
     gradient_y_flat,
@@ -15,50 +14,57 @@ from .hillshading import (
 
 class VisuContext:
     """
-    Flat grid-bound hillshading context.
-
-    The compiled API is flat-only. Optional 2D output formatting happens only
-    at the numpy/TPField boundary.
+    Flat grid-bound hillshading API context.
 
     Author: B.G (03/2026)
     """
 
     def __init__(self, gridctx):
         self.gridctx = gridctx
-        self.tfunc = SimpleNamespace()
-        self.kernels = SimpleNamespace()
-        self._compile_helpers()
-        self._compile_kernels()
-
-    def _compile_helpers(self):
-        self.tfunc.gradient_x = self.gridctx.make_func(gradient_x_flat)
-        self.tfunc.gradient_y = self.gridctx.make_func(gradient_y_flat)
-        self.tfunc.hillshade_at = self.gridctx.make_func(
-            hillshade_at_flat,
-            gradient_x_flat=self.tfunc.gradient_x,
-            gradient_y_flat=self.tfunc.gradient_y,
+        self._factory = ContextFactory(
+            self,
+            bindings={"gridctx": self.gridctx, "visuctx": self},
+            n_flat=self.gridctx.n_flat,
         )
-
-    def _compile_kernels(self):
-        self.kernels.hillshading = self.gridctx.make_kernel(
-            hillshading_flat_kernel,
-            hillshade_at_flat=self.tfunc.hillshade_at,
+        self._factory.compile_block(
+            [
+                {"target": "tfunc", "name": "gradient_x", "template": gradient_x_flat, "kind": "func"},
+                {"target": "tfunc", "name": "gradient_y", "template": gradient_y_flat, "kind": "func"},
+                {
+                    "target": "tfunc",
+                    "name": "hillshade_at",
+                    "template": hillshade_at_flat,
+                    "kind": "func",
+                    "bindings": {
+                        "gradient_x_flat": ContextRef("tfunc.gradient_x"),
+                        "gradient_y_flat": ContextRef("tfunc.gradient_y"),
+                    },
+                },
+                {
+                    "target": "kernels",
+                    "name": "hillshading",
+                    "template": hillshading_flat_kernel,
+                    "kind": "kernel",
+                    "bindings": {"hillshade_at_flat": ContextRef("tfunc.hillshade_at")},
+                },
+                {
+                    "target": "kernels",
+                    "name": "multishading",
+                    "template": multishading_flat_kernel,
+                    "kind": "kernel",
+                    "bindings": {"hillshade_at_flat": ContextRef("tfunc.hillshade_at")},
+                },
+            ]
         )
-        self.kernels.multishading = self.gridctx.make_kernel(
-            multishading_flat_kernel,
-            hillshade_at_flat=self.tfunc.hillshade_at,
+        self._factory.export(
+            {
+                "hillshading": "kernels.hillshading",
+                "multishading": "kernels.multishading",
+            }
         )
-        self.hillshading = self.kernels.hillshading
-        self.multishading = self.kernels.multishading
 
     def _allocate_output(self):
         return ppool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(self.gridctx.n_flat))
-
-    def _format_numpy_output(self, out_field, output_layout):
-        arr = out_field.to_numpy().reshape(-1)
-        if output_layout == "flat":
-            return arr
-        return arr.reshape((self.gridctx.ny, self.gridctx.nx))
 
     def generate_hillshade(
         self,
@@ -83,7 +89,11 @@ class VisuContext:
                 math.radians(azimuth_deg),
                 z_factor,
             )
-            return self._format_numpy_output(hillshade.field, str(output_layout).lower())
+            return format_flat_numpy(
+                flat_field_to_numpy(hillshade.field),
+                self.gridctx.rshp,
+                output_layout=output_layout,
+            )
         finally:
             hillshade.release()
 
@@ -96,7 +106,7 @@ class VisuContext:
         output_layout="2d",
     ):
         """
-        Compute a four-direction averaged hillshade image from a flat field.
+        Compute one four-direction averaged hillshade image from a flat field.
 
         Author: B.G (03/2026)
         """
@@ -118,6 +128,10 @@ class VisuContext:
                 math.radians(float(azimuths_deg[3])),
                 z_factor,
             )
-            return self._format_numpy_output(hillshade.field, str(output_layout).lower())
+            return format_flat_numpy(
+                flat_field_to_numpy(hillshade.field),
+                self.gridctx.rshp,
+                output_layout=output_layout,
+            )
         finally:
             hillshade.release()

@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import numpy as np
 import taichi as ti
 
@@ -57,7 +55,7 @@ class GridContext:
             raise ValueError("bcs data was provided but has_bcs is False")
 
         self._factory = ContextFactory(self, bindings={"gridctx": self}, n_flat=self.n_flat)
-        self.tfunc = SimpleNamespace()
+        self.tfunc = self._factory.ensure_namespace("tfunc")
         self._compile_helpers()
 
     def _compile_helpers(self):
@@ -104,30 +102,6 @@ class GridContext:
         if arr.size != self.n_flat:
             raise ValueError(f"Expected {self.n_flat} boundary codes, got {arr.size}")
         self.bcs.from_numpy(arr)
-
-    def make_kernel(self, kernel_template, **extra_globals):
-        """
-        Specialize one generic Taichi kernel against this grid context.
-
-        Author: B.G (03/2026)
-        """
-        return self._factory.callables.compile(
-            kernel_template,
-            kind="kernel",
-            bindings=extra_globals,
-        )
-
-    def make_func(self, func_template, **extra_globals):
-        """
-        Specialize one generic Taichi helper against this grid context.
-
-        Author: B.G (03/2026)
-        """
-        return self._factory.callables.compile(
-            func_template,
-            kind="func",
-            bindings=extra_globals,
-        )
 
     def destroy(self):
         """

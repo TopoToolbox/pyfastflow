@@ -250,13 +250,6 @@ def multishading_2d_kernel(
         hillshade[row, col] = value * ti.cast(0.25, cte.FLOAT_TYPE_TI)
 
 
-gradient_x = gradient_x_flat
-gradient_y = gradient_y_flat
-hillshade_at = hillshade_at_flat
-hillshading_kernel = hillshading_flat_kernel
-multishading_kernel = multishading_flat_kernel
-
-
 @ti.kernel
 def hillshade_2d(
     z: ti.types.ndarray(dtype=cte.FLOAT_TYPE_TI, ndim=2),

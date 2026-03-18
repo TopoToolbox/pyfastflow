@@ -77,7 +77,7 @@ def distribute_flow_kernel(
 
         if sum_s <= 0.0:
             ti.atomic_add(Q_next[i], qi)
-            ti.atomic_add(h[i], floodctx.tfunc.gf_minimum_increment(i))
+            ti.atomic_add(h[i], floodctx.tfunc.get_gf_min_increment(i))
         else:
             # sumslope = 0.
             for k in ti.static(range(n_neigh)):
@@ -110,7 +110,7 @@ def graphflood_core_kernel(
             continue
 
         if gridctx.tfunc.can_out_flat(i) == 1:
-            h_next[i] = floodctx.tfunc.boundary_h(i)
+            h_next[i] = floodctx.tfunc.get_boundary_h(i)
             continue
 
         # Recompute local steepest slope directly from z+h each pass.
@@ -124,11 +124,11 @@ def graphflood_core_kernel(
                     best_s = s
         slope = ti.max(best_s, ti.cast(1e-9, cte.FLOAT_TYPE_TI))
 
-        Qo = floodctx.tfunc.qo_from_h_slope(h[i], slope, i)
-        dth = floodctx.tfunc.dth(i)
+        Qo = floodctx.tfunc.compute_qo_from_h_slope(h[i], slope, i)
+        dth = floodctx.tfunc.get_dth(i)
         dh = (Q_in[i] - Qo) / area * dth
 
-        min_inc = floodctx.tfunc.gf_minimum_increment(i)
+        min_inc = floodctx.tfunc.get_gf_min_increment(i)
         if Q_in[i] > Qo and dh < min_inc:
             dh = min_inc
         elif Qo > Q_in[i] and dh > -min_inc:
@@ -195,7 +195,7 @@ def localpass_kernel(
             h_next[i] = h[i]
             continue
         if gridctx.tfunc.can_out_flat(i) == 1:
-            h_next[i] = floodctx.tfunc.boundary_h(i)
+            h_next[i] = floodctx.tfunc.get_boundary_h(i)
             continue
 
         best_s = ti.cast(0.0, cte.FLOAT_TYPE_TI)
@@ -207,11 +207,11 @@ def localpass_kernel(
                     best_s = s
         slope = ti.max(best_s, ti.cast(1e-9, cte.FLOAT_TYPE_TI))
 
-        qo = floodctx.tfunc.qo_from_h_slope(h[i], slope, i)
-        dth = floodctx.tfunc.dth(i)
+        qo = floodctx.tfunc.compute_qo_from_h_slope(h[i], slope, i)
+        dth = floodctx.tfunc.get_dth(i)
         dh = (Q_next[i] - qo) / area * dth
 
-        min_inc = floodctx.tfunc.gf_minimum_increment(i)
+        min_inc = floodctx.tfunc.get_gf_min_increment(i)
         if Q_next[i] > qo and dh < min_inc:
             dh = min_inc
         elif qo > Q_next[i] and dh > -min_inc:
@@ -239,7 +239,7 @@ def compute_Qo_kernel(
                 flowctx.tfunc.slope_between_nodes(z[i] + h[i], z[r] + h[r], i, r),
                 ti.cast(1e-9, cte.FLOAT_TYPE_TI),
             )
-        Qo[i] = floodctx.tfunc.qo_from_h_slope(h[i], slope, i)
+        Qo[i] = floodctx.tfunc.compute_qo_from_h_slope(h[i], slope, i)
 
 
 @ti.kernel
@@ -261,7 +261,7 @@ def compute_u_kernel(
                 flowctx.tfunc.slope_between_nodes(z[i] + h[i], z[r] + h[r], i, r),
                 ti.cast(1e-9, cte.FLOAT_TYPE_TI),
             )
-        u[i] = floodctx.tfunc.u_from_h_slope(h[i], slope, i)
+        u[i] = floodctx.tfunc.compute_u_from_h_slope(h[i], slope, i)
 
 
 @ti.kernel
@@ -279,4 +279,4 @@ def compute_tau_kernel(z: ti.template(), h: ti.template(), tau: ti.template()):
                 s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
                 if s > slope:
                     slope = s
-        tau[i] = slope * h[i] * floodctx.tfunc.rho_w(i) * floodctx.tfunc.gravity(i)
+        tau[i] = slope * h[i] * floodctx.tfunc.get_rho_w(i) * floodctx.tfunc.get_gravity(i)

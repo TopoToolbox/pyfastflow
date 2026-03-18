@@ -1,7 +1,8 @@
-from types import SimpleNamespace
 import math
 
 import taichi as ti
+
+from ..context import APINamespace
 
 
 def build_flat_helpers(gridctx):
@@ -16,7 +17,7 @@ def build_flat_helpers(gridctx):
 
     Author: B.G (02/2026)
     """
-    helpers = SimpleNamespace()
+    helpers = APINamespace()
 
     # One capture point keeps all mode decisions fixed for the emitted Taichi helpers.
     nx = int(gridctx.nx)

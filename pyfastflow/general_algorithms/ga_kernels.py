@@ -1,5 +1,5 @@
 """
-Generic Taichi kernels bound by ``GAContext`` through ``gridctx.make_kernel``.
+Generic Taichi kernels bound by ``GAContext`` through the shared context factory.
 
 The kernels in this module intentionally stay generic. They only rely on the
 universal ``gridctx`` global injected by :class:`pyfastflow.grid.GridContext`

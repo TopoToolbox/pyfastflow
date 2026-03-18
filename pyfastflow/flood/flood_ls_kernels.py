@@ -39,10 +39,10 @@ def ls_flow_route_kernel(
 
         top = gridctx.tfunc.neighbour_flat(i, 0)
         left = gridctx.tfunc.neighbour_flat(i, 1)
-        dt_loc = floodctx.tfunc.dth(i)
-        grav = floodctx.tfunc.gravity(i)
-        man = ti.max(floodctx.tfunc.friction_coeff(i), ti.cast(1e-9, cte.FLOAT_TYPE_TI))
-        flow_exp = floodctx.tfunc.friction_exponent(i)
+        dt_loc = floodctx.tfunc.get_dth(i)
+        grav = floodctx.tfunc.get_gravity(i)
+        man = ti.max(floodctx.tfunc.get_friction_coeff(i), ti.cast(1e-9, cte.FLOAT_TYPE_TI))
+        flow_exp = floodctx.tfunc.get_friction_exponent(i)
         denom_pow = ti.cast(2.0, cte.FLOAT_TYPE_TI) + ti.cast(2.0, cte.FLOAT_TYPE_TI) * flow_exp
 
         if top != -1 and (h[i] > 0.0 or h[top] > 0.0):
@@ -123,7 +123,7 @@ def ls_depth_update_kernel(
         if right != -1:
             tqx += qx[right]
 
-        dh = floodctx.tfunc.dth(i) * (tqy + tqx) / dx
+        dh = floodctx.tfunc.get_dth(i) * (tqy + tqx) / dx
         h[i] = ti.max(ti.cast(0.0, cte.FLOAT_TYPE_TI), h[i] + dh)
         if gridctx.tfunc.can_out_flat(i) == 1:
-            h[i] = floodctx.tfunc.boundary_h(i)
+            h[i] = floodctx.tfunc.get_boundary_h(i)

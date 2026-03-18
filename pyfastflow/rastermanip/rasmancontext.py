@@ -7,14 +7,12 @@ GridContext and can process many raster sizes.
 Author: B.G (02/2026)
 """
 
-from types import SimpleNamespace
-
 import numpy as np
 import taichi as ti
 
 from .. import constants as cte
 from .. import pool as ppool
-from ..context import ContextFactory
+from ..context import ContextFactory, ContextRef
 from ..grid import GridContext
 from . import rasman_kernels as rk
 
@@ -39,16 +37,8 @@ class RasManContext:
         Author: B.G (02/2026)
         """
         self._factory = ContextFactory(self, bindings={"rasmanctx": self})
-        self.tfunc = self._factory.ensure_namespace("tfunc")
-        self.kernels = self._factory.ensure_namespace("kernels")
         self._compile_helpers()
         self._compile_kernels()
-
-    def make_kernel(self, kernel_template, **extra_globals):
-        return self._factory.callables.compile(kernel_template, kind="kernel", bindings=extra_globals)
-
-    def make_func(self, func_template, **extra_globals):
-        return self._factory.callables.compile(func_template, kind="func", bindings=extra_globals)
 
     def _compile_helpers(self):
         """
@@ -56,37 +46,67 @@ class RasManContext:
 
         Author: B.G (02/2026)
         """
-        self.tfunc.wrap_index = self.make_func(rk.wrap_index)
-        self.tfunc.reflect_index = self.make_func(rk.reflect_index)
-        self.tfunc.resolve_index = self.make_func(
-            rk.resolve_index,
-            wrap_index=self.tfunc.wrap_index,
-            reflect_index=self.tfunc.reflect_index,
+        self._factory.compile_block(
+            [
+                {"target": "tfunc", "name": "wrap_index", "template": rk.wrap_index, "kind": "func"},
+                {"target": "tfunc", "name": "reflect_index", "template": rk.reflect_index, "kind": "func"},
+                {
+                    "target": "tfunc",
+                    "name": "resolve_index",
+                    "template": rk.resolve_index,
+                    "kind": "func",
+                    "bindings": {
+                        "wrap_index": ContextRef("tfunc.wrap_index"),
+                        "reflect_index": ContextRef("tfunc.reflect_index"),
+                    },
+                },
+                {"target": "tfunc", "name": "cubic_interpolate", "template": rk.cubic_interpolate, "kind": "func"},
+                {"target": "tfunc", "name": "sinc", "template": rk.sinc, "kind": "func"},
+                {
+                    "target": "tfunc",
+                    "name": "lanczos_weight",
+                    "template": rk.lanczos_weight,
+                    "kind": "func",
+                    "bindings": {"sinc": ContextRef("tfunc.sinc")},
+                },
+                {
+                    "target": "tfunc",
+                    "name": "sample_nearest",
+                    "template": rk.sample_nearest,
+                    "kind": "func",
+                    "bindings": {"resolve_index": ContextRef("tfunc.resolve_index")},
+                },
+                {
+                    "target": "tfunc",
+                    "name": "sample_bilinear",
+                    "template": rk.sample_bilinear,
+                    "kind": "func",
+                    "bindings": {"resolve_index": ContextRef("tfunc.resolve_index")},
+                },
+                {
+                    "target": "tfunc",
+                    "name": "sample_bicubic",
+                    "template": rk.sample_bicubic,
+                    "kind": "func",
+                    "bindings": {
+                        "resolve_index": ContextRef("tfunc.resolve_index"),
+                        "cubic_interpolate": ContextRef("tfunc.cubic_interpolate"),
+                    },
+                },
+                {
+                    "target": "tfunc",
+                    "name": "sample_lanczos8",
+                    "template": rk.sample_lanczos8,
+                    "kind": "func",
+                    "bindings": {
+                        "resolve_index": ContextRef("tfunc.resolve_index"),
+                        "lanczos_weight": ContextRef("tfunc.lanczos_weight"),
+                    },
+                },
+                {"target": "tfunc", "name": "source_coord_1d", "template": rk.source_coord_1d, "kind": "func"},
+                {"target": "tfunc", "name": "box_bounds_1d", "template": rk.box_bounds_1d, "kind": "func"},
+            ]
         )
-        self.tfunc.cubic_interpolate = self.make_func(rk.cubic_interpolate)
-        self.tfunc.sinc = self.make_func(rk.sinc)
-        self.tfunc.lanczos_weight = self.make_func(rk.lanczos_weight, sinc=self.tfunc.sinc)
-
-        self.tfunc.sample_nearest = self.make_func(
-            rk.sample_nearest,
-            resolve_index=self.tfunc.resolve_index,
-        )
-        self.tfunc.sample_bilinear = self.make_func(
-            rk.sample_bilinear,
-            resolve_index=self.tfunc.resolve_index,
-        )
-        self.tfunc.sample_bicubic = self.make_func(
-            rk.sample_bicubic,
-            resolve_index=self.tfunc.resolve_index,
-            cubic_interpolate=self.tfunc.cubic_interpolate,
-        )
-        self.tfunc.sample_lanczos8 = self.make_func(
-            rk.sample_lanczos8,
-            resolve_index=self.tfunc.resolve_index,
-            lanczos_weight=self.tfunc.lanczos_weight,
-        )
-        self.tfunc.source_coord_1d = self.make_func(rk.source_coord_1d)
-        self.tfunc.box_bounds_1d = self.make_func(rk.box_bounds_1d)
 
     def _compile_kernels(self):
         """
@@ -94,49 +114,86 @@ class RasManContext:
 
         Author: B.G (02/2026)
         """
-        self.kernels.two_d_to_flat = self.make_kernel(rk.two_d_to_flat_kernel)
-        self.kernels.flat_to_2d = self.make_kernel(rk.flat_to_2d_kernel)
-
-        self.kernels.upscale_nearest = self.make_kernel(
-            rk.upscale_nearest_kernel,
-            source_coord_1d=self.tfunc.source_coord_1d,
-            sample_nearest=self.tfunc.sample_nearest,
-        )
-        self.kernels.upscale_bilinear = self.make_kernel(
-            rk.upscale_bilinear_kernel,
-            source_coord_1d=self.tfunc.source_coord_1d,
-            sample_bilinear=self.tfunc.sample_bilinear,
-        )
-        self.kernels.upscale_bicubic = self.make_kernel(
-            rk.upscale_bicubic_kernel,
-            source_coord_1d=self.tfunc.source_coord_1d,
-            sample_bicubic=self.tfunc.sample_bicubic,
-        )
-        self.kernels.upscale_lanczos = self.make_kernel(
-            rk.upscale_lanczos8_kernel,
-            source_coord_1d=self.tfunc.source_coord_1d,
-            sample_lanczos8=self.tfunc.sample_lanczos8,
-        )
-
-        self.kernels.downscale_mean = self.make_kernel(
-            rk.downscale_mean_kernel,
-            box_bounds_1d=self.tfunc.box_bounds_1d,
-        )
-        self.kernels.downscale_min = self.make_kernel(
-            rk.downscale_min_kernel,
-            box_bounds_1d=self.tfunc.box_bounds_1d,
-        )
-        self.kernels.downscale_max = self.make_kernel(
-            rk.downscale_max_kernel,
-            box_bounds_1d=self.tfunc.box_bounds_1d,
-        )
-        self.kernels.downscale_median = self.make_kernel(
-            rk.downscale_median_kernel,
-            box_bounds_1d=self.tfunc.box_bounds_1d,
-        )
-        self.kernels.downscale_percentile = self.make_kernel(
-            rk.downscale_percentile_kernel,
-            box_bounds_1d=self.tfunc.box_bounds_1d,
+        self._factory.compile_block(
+            [
+                {"target": "kernels", "name": "two_d_to_flat", "template": rk.two_d_to_flat_kernel, "kind": "kernel"},
+                {"target": "kernels", "name": "flat_to_2d", "template": rk.flat_to_2d_kernel, "kind": "kernel"},
+                {
+                    "target": "kernels",
+                    "name": "upscale_nearest",
+                    "template": rk.upscale_nearest_kernel,
+                    "kind": "kernel",
+                    "bindings": {
+                        "source_coord_1d": ContextRef("tfunc.source_coord_1d"),
+                        "sample_nearest": ContextRef("tfunc.sample_nearest"),
+                    },
+                },
+                {
+                    "target": "kernels",
+                    "name": "upscale_bilinear",
+                    "template": rk.upscale_bilinear_kernel,
+                    "kind": "kernel",
+                    "bindings": {
+                        "source_coord_1d": ContextRef("tfunc.source_coord_1d"),
+                        "sample_bilinear": ContextRef("tfunc.sample_bilinear"),
+                    },
+                },
+                {
+                    "target": "kernels",
+                    "name": "upscale_bicubic",
+                    "template": rk.upscale_bicubic_kernel,
+                    "kind": "kernel",
+                    "bindings": {
+                        "source_coord_1d": ContextRef("tfunc.source_coord_1d"),
+                        "sample_bicubic": ContextRef("tfunc.sample_bicubic"),
+                    },
+                },
+                {
+                    "target": "kernels",
+                    "name": "upscale_lanczos",
+                    "template": rk.upscale_lanczos8_kernel,
+                    "kind": "kernel",
+                    "bindings": {
+                        "source_coord_1d": ContextRef("tfunc.source_coord_1d"),
+                        "sample_lanczos8": ContextRef("tfunc.sample_lanczos8"),
+                    },
+                },
+                {
+                    "target": "kernels",
+                    "name": "downscale_mean",
+                    "template": rk.downscale_mean_kernel,
+                    "kind": "kernel",
+                    "bindings": {"box_bounds_1d": ContextRef("tfunc.box_bounds_1d")},
+                },
+                {
+                    "target": "kernels",
+                    "name": "downscale_min",
+                    "template": rk.downscale_min_kernel,
+                    "kind": "kernel",
+                    "bindings": {"box_bounds_1d": ContextRef("tfunc.box_bounds_1d")},
+                },
+                {
+                    "target": "kernels",
+                    "name": "downscale_max",
+                    "template": rk.downscale_max_kernel,
+                    "kind": "kernel",
+                    "bindings": {"box_bounds_1d": ContextRef("tfunc.box_bounds_1d")},
+                },
+                {
+                    "target": "kernels",
+                    "name": "downscale_median",
+                    "template": rk.downscale_median_kernel,
+                    "kind": "kernel",
+                    "bindings": {"box_bounds_1d": ContextRef("tfunc.box_bounds_1d")},
+                },
+                {
+                    "target": "kernels",
+                    "name": "downscale_percentile",
+                    "template": rk.downscale_percentile_kernel,
+                    "kind": "kernel",
+                    "bindings": {"box_bounds_1d": ContextRef("tfunc.box_bounds_1d")},
+                },
+            ]
         )
 
     def _unwrap_field(self, data):

@@ -63,5 +63,3 @@ def white_noise_flat_kernel(
         idx = j * gridctx.nx + i
         noise_field[idx] = (_white_unit(i, j, seed) - 0.5) * 2.0 * amplitude
 
-
-white_noise_kernel = white_noise_2d_kernel

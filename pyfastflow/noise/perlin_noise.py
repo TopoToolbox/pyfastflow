@@ -167,5 +167,3 @@ def perlin_noise_flat_kernel(
         else:
             noise_field[idx] = 0.0
 
-
-perlin_noise_kernel = perlin_noise_2d_kernel

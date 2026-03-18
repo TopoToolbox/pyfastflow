@@ -241,24 +241,6 @@ class FloodContext:
             ]
         )
 
-        aliases = {
-            "dth": self.tfunc.get_dth,
-            "boundary_h": self.tfunc.get_boundary_h,
-            "gf_minimum_increment": self.tfunc.get_gf_min_increment,
-            "gravity": self.tfunc.get_gravity,
-            "rho_w": self.tfunc.get_rho_w,
-            "rho_s": self.tfunc.get_rho_s,
-            "friction_coeff": self.tfunc.get_friction_coeff,
-            "friction_exponent": self.tfunc.get_friction_exponent,
-            "dt_morpho": self.tfunc.get_dt_morpho,
-            "dt_morpho_coeff": self.tfunc.get_dt_morpho_coeff,
-            "u_from_h_slope": self.tfunc.compute_u_from_h_slope,
-            "q_from_h_slope": self.tfunc.compute_q_from_h_slope,
-            "qo_from_h_slope": self.tfunc.compute_qo_from_h_slope,
-        }
-        for name, value in aliases.items():
-            setattr(self.tfunc, name, value)
-
         self._factory.compile_block(
             [
                 {
