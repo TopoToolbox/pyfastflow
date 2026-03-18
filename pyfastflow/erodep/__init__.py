@@ -9,8 +9,9 @@ Author: B.G (02/2026)
 """
 
 from .lemcontext import LEMContext
+from . import runtime
 
-__all__ = ["LEMContext"]
+__all__ = ["LEMContext", "runtime"]
 
 # LEGACY:
 # - pyfastflow.erodep.legacy

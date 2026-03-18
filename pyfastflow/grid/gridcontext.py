@@ -1,27 +1,21 @@
-from types import FunctionType, SimpleNamespace
+from types import SimpleNamespace
 
 import numpy as np
 import taichi as ti
 
 from .. import pool as ppool
+from ..context import ContextFactory
 from ._gridapi_helpers_flat import build_flat_helpers
-from ._gridapi_helpers_2d import build_2d_helpers
 
 
 class GridContext:
     """
-    Lightweight kernel-facing grid context with pre-bound Taichi helpers.
+    Flat-index grid specialization context.
 
-    This object stores only the compile-time constants and the optional internal
-    boundary-condition field required by the neighbouring helpers. It
-    exposes a single ``tfunc`` namespace containing both flat and 2D helper
-    variants so user kernels can stay generic and compact.
+    This context only stores compile-time grid constants, optional boundary
+    codes, and the flat helper/callable surface specialized against that grid.
 
-    The context does not own general simulation fields. It is intentionally kept
-    small so several contexts can coexist and specialize the same generic kernel
-    body independently through :meth:`make_kernel`.
-
-    Author: B.G (02/2026)
+    Author: B.G (03/2026)
     """
 
     def __init__(
@@ -34,10 +28,10 @@ class GridContext:
         has_bcs: bool = False,
         bcs=None,
     ):
-        # Small immutable kernel-facing state; grid data stays outside this context.
         self.nx = int(nx)
         self.ny = int(ny)
-        self.rshp = (self.ny,self.nx)
+        self.n_flat = self.nx * self.ny
+        self.rshp = (self.ny, self.nx)
         self.dx = float(dx)
         self.boundary_mode = boundary_mode
         self.topology = str(topology).upper()
@@ -52,11 +46,8 @@ class GridContext:
         self._bcs_tpfield = None
         self.bcs = None
 
-        # _^^_
-        # (.. )  Optional internal boundary mask, injected statically in helpers when enabled.
-        # /||\\
         if self.has_bcs:
-            self._bcs_tpfield = ppool.taipool.get_tpfield(dtype=ti.u8, shape=(self.nx * self.ny))
+            self._bcs_tpfield = ppool.taipool.get_tpfield(dtype=ti.u8, shape=(self.n_flat))
             self.bcs = self._bcs_tpfield.field
             if bcs is None:
                 self.bcs.fill(1)
@@ -65,156 +56,95 @@ class GridContext:
         elif bcs is not None:
             raise ValueError("bcs data was provided but has_bcs is False")
 
+        self._factory = ContextFactory(self, bindings={"gridctx": self}, n_flat=self.n_flat)
         self.tfunc = SimpleNamespace()
         self._compile_helpers()
 
     def _compile_helpers(self):
         """
-        Compile and bind the full helper surface for this context.
+        Compile and bind the flat helper surface for this grid.
 
-        The flat and 2D helper builders both capture the current constants and
-        the optional internal boundary field. Their outputs are merged into the
-        unique ``tfunc`` namespace exposed by the context.
-
-        Author: B.G (02/2026)
+        Author: B.G (03/2026)
         """
-        # Build both flat and 2D helper namespaces once, then expose them through one surface.
-        flat_helpers = build_flat_helpers(self)
-        two_d_helpers = build_2d_helpers(self)
-        for name, value in flat_helpers.__dict__.items():
+        helpers = build_flat_helpers(self)
+        for name, value in helpers.__dict__.items():
             setattr(self.tfunc, name, value)
-        for name, value in two_d_helpers.__dict__.items():
+
+        canonical = {
+            "is_active": self.tfunc.is_active_flat,
+            "nodata": self.tfunc.nodata_flat,
+            "neighbour": self.tfunc.neighbour_flat,
+            "neighbour_raw": self.tfunc.neighbour_raw_flat,
+            "neighbours": self.tfunc.neighbours_flat,
+            "neighbours_raw": self.tfunc.neighbours_raw_flat,
+            "is_on_edge": self.tfunc.is_on_edge_flat,
+            "which_edge": self.tfunc.which_edge_flat,
+            "can_out": self.tfunc.can_out_flat,
+            "dist_from_k": self.tfunc.dist_from_k_flat,
+            "dist_between_nodes": self.tfunc.dist_between_nodes_flat,
+        }
+        for name, value in canonical.items():
             setattr(self.tfunc, name, value)
 
     def set_bcs(self, values):
         """
-        Copy boundary codes into the internal ``bcs`` field.
+        Copy boundary codes into the internal flat boundary field.
 
-        Parameters
-        ----------
-        values:
-            Flat or 2D numpy-like array, or a Taichi field exposing ``to_numpy``,
-            containing exactly ``nx * ny`` unsigned byte boundary codes.
-
-        Notes
-        -----
-        This method is only available when ``has_bcs=True``.
-
-        Author: B.G (02/2026)
+        Author: B.G (03/2026)
         """
         if self._bcs_tpfield is None:
             raise ValueError("This GridContext has no internal bcs field")
 
-        # Accept numpy arrays or Taichi fields; normalize once before copying to device.
         if hasattr(values, "to_numpy"):
             arr = np.asarray(values.to_numpy(), dtype=np.uint8)
         else:
             arr = np.asarray(values, dtype=np.uint8)
 
         arr = arr.reshape(-1)
-        expected = self.nx * self.ny
-        if arr.size != expected:
-            raise ValueError(f"Expected {expected} boundary codes, got {arr.size}")
+        if arr.size != self.n_flat:
+            raise ValueError(f"Expected {self.n_flat} boundary codes, got {arr.size}")
         self.bcs.from_numpy(arr)
 
     def make_kernel(self, kernel_template, **extra_globals):
         """
-        Specialize a generic Taichi kernel against this context.
+        Specialize one generic Taichi kernel against this grid context.
 
-        The input kernel is expected to refer to ``gridctx`` as a global name
-        inside its body. This method clones the original Python function,
-        injects the current context under that name, optionally overrides other
-        globals with already-specialized helper funcs, and re-wraps the cloned
-        function with ``ti.kernel`` so the compiled kernel is specialized for
-        this context.
-
-        Parameters
-        ----------
-        kernel_template:
-            A generic ``@ti.kernel`` function whose body uses ``gridctx`` to
-            access constants and helpers.
-
-        Returns
-        -------
-        function
-            A context-specialized Taichi kernel ready to be called directly.
-
-        Author: B.G (02/2026)
+        Author: B.G (03/2026)
         """
-        return self._specialize_callable(kernel_template, ti.kernel, **extra_globals)
+        return self._factory.callables.compile(
+            kernel_template,
+            kind="kernel",
+            bindings=extra_globals,
+        )
 
     def make_func(self, func_template, **extra_globals):
         """
-        Specialize a generic Taichi function against this context.
+        Specialize one generic Taichi helper against this grid context.
 
-        The input function is expected to refer to ``gridctx`` as a global name
-        inside its body. This method clones the original Python function,
-        injects the current context under that name, optionally overrides other
-        globals with already-specialized helper funcs, and re-wraps the cloned
-        function with ``ti.func``.
-
-        Author: B.G (02/2026)
+        Author: B.G (03/2026)
         """
-        return self._specialize_callable(func_template, ti.func, **extra_globals)
-
-    def _specialize_callable(self, func_template, decorator, **extra_globals):
-        """
-        Clone a Python function and bind this context plus optional helper overrides.
-
-        This is the shared implementation behind ``make_kernel`` and ``make_func``.
-
-        Author: B.G (02/2026)
-        """
-        # `@ti.kernel` and `@ti.func` both keep the undecorated Python body in
-        # `__wrapped__` when available. That is the version we clone.
-        source = getattr(func_template, "__wrapped__", func_template)
-
-        # Clone the original globals dictionary, then inject the bound grid
-        # context and any already-specialized helper funcs/kernels requested by
-        # the caller.
-        func_globals = dict(source.__globals__)
-        func_globals["gridctx"] = self
-        func_globals.update(extra_globals)
-
-        # Rebuild a plain Python function object from the original code object.
-        specialised = FunctionType(
-            source.__code__,
-            func_globals,
-            source.__name__,
-            source.__defaults__,
-            source.__closure__,
+        return self._factory.callables.compile(
+            func_template,
+            kind="func",
+            bindings=extra_globals,
         )
-
-        # Preserve usual Python metadata so the specialized callable still reads
-        # like the original one under inspection.
-        specialised.__kwdefaults__ = source.__kwdefaults__
-        specialised.__annotations__ = dict(source.__annotations__)
-        specialised.__doc__ = source.__doc__
-        specialised.__qualname__ = source.__qualname__
-
-        # Re-apply the requested Taichi decorator to obtain the final specialized
-        # callable.
-        return decorator(specialised)
 
     def destroy(self):
         """
-        Release pooled internal fields held by this context.
+        Release pooled internal fields owned by this context.
 
-        This should be called when a context with internal pooled resources is no
-        longer needed. After destruction, the context should not be reused.
-
-        Author: B.G (02/2026)
+        Author: B.G (03/2026)
         """
-        if hasattr(self, "_bcs_tpfield") and self._bcs_tpfield is not None:
+        if self._bcs_tpfield is not None:
             self._bcs_tpfield.release()
             self._bcs_tpfield = None
             self.bcs = None
 
     def __del__(self):
         """
-        Destructor - automatically release pooled resources when possible.
+        Best-effort pooled resource cleanup.
 
-        Author: B.G (02/2026)
+        Author: B.G (03/2026)
         """
         try:
             self.destroy()

@@ -7,13 +7,14 @@ GridContext and can process many raster sizes.
 Author: B.G (02/2026)
 """
 
-from types import FunctionType, SimpleNamespace
+from types import SimpleNamespace
 
 import numpy as np
 import taichi as ti
 
 from .. import constants as cte
 from .. import pool as ppool
+from ..context import ContextFactory
 from ..grid import GridContext
 from . import rasman_kernels as rk
 
@@ -37,50 +38,17 @@ class RasManContext:
 
         Author: B.G (02/2026)
         """
-        self.tfunc = SimpleNamespace()
-        self.kernels = SimpleNamespace()
+        self._factory = ContextFactory(self, bindings={"rasmanctx": self})
+        self.tfunc = self._factory.ensure_namespace("tfunc")
+        self.kernels = self._factory.ensure_namespace("kernels")
         self._compile_helpers()
         self._compile_kernels()
 
     def make_kernel(self, kernel_template, **extra_globals):
-        """
-        Specialize one generic kernel against this context.
-
-        Author: B.G (02/2026)
-        """
-        return self._specialize_callable(kernel_template, ti.kernel, **extra_globals)
+        return self._factory.callables.compile(kernel_template, kind="kernel", bindings=extra_globals)
 
     def make_func(self, func_template, **extra_globals):
-        """
-        Specialize one generic helper against this context.
-
-        Author: B.G (02/2026)
-        """
-        return self._specialize_callable(func_template, ti.func, **extra_globals)
-
-    def _specialize_callable(self, func_template, decorator, **extra_globals):
-        """
-        Clone and inject this context plus helper overrides.
-
-        Author: B.G (02/2026)
-        """
-        source = getattr(func_template, "__wrapped__", func_template)
-        func_globals = dict(source.__globals__)
-        func_globals["rasmanctx"] = self
-        func_globals.update(extra_globals)
-
-        specialised = FunctionType(
-            source.__code__,
-            func_globals,
-            source.__name__,
-            source.__defaults__,
-            source.__closure__,
-        )
-        specialised.__kwdefaults__ = source.__kwdefaults__
-        specialised.__annotations__ = dict(source.__annotations__)
-        specialised.__doc__ = source.__doc__
-        specialised.__qualname__ = source.__qualname__
-        return decorator(specialised)
+        return self._factory.callables.compile(func_template, kind="func", bindings=extra_globals)
 
     def _compile_helpers(self):
         """

@@ -9,8 +9,9 @@ Author: B.G (02/2026)
 """
 
 from .flowcontext import FlowContext
+from . import runtime
 
-__all__ = ["FlowContext"]
+__all__ = ["FlowContext", "runtime"]
 
 # LEGACY:
 try:
