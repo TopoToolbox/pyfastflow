@@ -196,18 +196,7 @@ class TPField:
         return False
 
     def __repr__(self):
-        """
-        Return the underlying Taichi field for direct usage.
-
-        Enables transparent usage of TPField as if it were the actual
-        Taichi field, allowing seamless integration with existing code.
-
-        Returns:
-            ti.Field: The underlying Taichi field
-
-        Author: B. Gailleton
-        """
-        return self.field
+        return f"TPField(id={self.id}, dtype={self.dtype}, shape={self.shape}, in_use={self.in_use})"
 
     def __str__(self):
         return f"Taichi field from the temp pool id:{self.id} - in_use:{self.in_use} - dtype:{self.dtype} - shape:{self.shape}"

@@ -332,7 +332,6 @@ def reroute_flow_with_temps(
     basin_saddlenode,
     tag,
     tag_alt,
-    change,
     rerouted,
     *,
     carve=True,
@@ -355,8 +354,6 @@ def reroute_flow_with_temps(
     tag_field = require_flat_field(tag, "tag")
     tag_alt_field = require_flat_field(tag_alt, "tag_alt")
     rerouted_field = require_flat_field(rerouted, "rerouted")
-
-    _ = unwrap_field(change)
 
     rec_work_field.copy_from(rec_field)
     rerouted_field.fill(False)
@@ -435,7 +432,6 @@ def reroute_flow(flowctx, z, receivers, *, carve=True):
     basin_saddlenode = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(flowctx.n_flat))
     tag = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(flowctx.n_flat))
     tag_alt = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(flowctx.n_flat))
-    change = ppool.taipool.get_tpfield(dtype=ti.i32, shape=())
     rerouted = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(flowctx.n_flat))
 
     try:
@@ -453,7 +449,6 @@ def reroute_flow(flowctx, z, receivers, *, carve=True):
             basin_saddlenode,
             tag,
             tag_alt,
-            change,
             rerouted,
             carve=carve,
         )
@@ -468,6 +463,5 @@ def reroute_flow(flowctx, z, receivers, *, carve=True):
         basin_saddlenode.release()
         tag.release()
         tag_alt.release()
-        change.release()
 
     return rerouted
