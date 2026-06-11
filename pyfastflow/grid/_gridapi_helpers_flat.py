@@ -93,7 +93,8 @@ def build_flat_helpers(gridctx):
     def _bc_code(i: ti.i32) -> ti.u8:
         """Return the optional internal boundary code for a node. Author: B.G (02/2026)"""
         if ti.static(has_bcs):
-            return bcs[i]
+            ret = 0 if i == -1 else bcs[i]
+            return ret
         return ti.u8(1)
 
     @ti.func
