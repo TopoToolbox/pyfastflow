@@ -38,7 +38,7 @@ def make_surface_kernel(z: ti.template(), h: ti.template(), surface: ti.template
 
 
 @ti.kernel
-def distribute_flow_kernel(
+def distribute_flow_local_kernel(
     z: ti.template(),
     h: ti.template(),
     Q_in: ti.template(),

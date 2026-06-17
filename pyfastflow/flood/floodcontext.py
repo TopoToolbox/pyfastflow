@@ -34,7 +34,7 @@ from .flood_graphflood_kernels import (
     compute_tau_kernel,
     compute_u_direction_kernel,
     compute_u_kernel,
-    distribute_flow_kernel,
+    distribute_flow_local_kernel,
     graphflood_core_kernel,
     localpass_kernel,
     make_surface_kernel,
@@ -270,8 +270,8 @@ class FloodContext:
                 },
                 {
                     "target": "kernels.graphflood",
-                    "name": "distribute_flow",
-                    "template": distribute_flow_kernel,
+                    "name": "distribute_flow_local",
+                    "template": distribute_flow_local_kernel,
                     "kind": "kernel",
                 },
                 {
@@ -372,7 +372,7 @@ class FloodContext:
                 "add_source_to_Q": "kernels.graphflood.add_source_to_Q",
                 "add_source_to_h": "kernels.graphflood.add_source_to_h",
                 "make_surface": "kernels.graphflood.make_surface",
-                "distribute_flow": "kernels.graphflood.distribute_flow",
+                "distribute_flow_local": "kernels.graphflood.distribute_flow_local",
                 "graphflood_core": "kernels.graphflood.core",
                 "localpass": "kernels.graphflood.localpass",
                 "compute_Qo": "kernels.graphflood.compute_Qo",

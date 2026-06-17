@@ -147,7 +147,6 @@ def graphflood_propagate_with_fields(
                     reroute_buffers["basin_saddlenode"],
                     reroute_buffers["tag"],
                     reroute_buffers["tag_alt"],
-                    reroute_buffers["change"],
                     reroute_buffers["rerouted"],
                     carve=carve,
                 )
