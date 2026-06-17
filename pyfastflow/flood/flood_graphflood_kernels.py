@@ -92,12 +92,65 @@ def distribute_flow_local_kernel(
 def graphflood_core_kernel(
     z: ti.template(),
     h: ti.template(),
-    receivers: ti.template(),
     Q_in: ti.template(),
-    h_next: ti.template(),
+    dh: ti.template(),
 ):
     """
-    Apply friction-law core update and compute next depth.
+    Apply friction-law core update via two passes to avoid race conditions.
+
+    First pass writes dh[i], second pass applies h[i] += dh[i].
+
+    Author: B.G (02/2026)
+    """
+    dx = ti.cast(ti.static(gridctx.dx), cte.FLOAT_TYPE_TI)
+    area = dx * dx
+    n_neigh = ti.static(gridctx.n_neighbours)
+
+    for i in h:
+        if gridctx.tfunc.nodata_flat(i) == 1:
+            dh[i] = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+            continue
+
+        if gridctx.tfunc.can_out_flat(i) == 1:
+            dh[i] = floodctx.tfunc.get_boundary_h(i) - h[i]
+            continue
+
+        best_s = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+        for k in ti.static(range(n_neigh)):
+            j = gridctx.tfunc.neighbour_flat(i, k)
+            if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
+                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+                if s > best_s:
+                    best_s = s
+        slope = ti.max(best_s, ti.cast(1e-9, cte.FLOAT_TYPE_TI))
+
+        Qo = floodctx.tfunc.compute_qo_from_h_slope(h[i], slope, i)
+        dth = floodctx.tfunc.get_dth(i)
+        d = (Q_in[i] - Qo) / area * dth
+
+        min_inc = floodctx.tfunc.get_gf_min_increment(i)
+        if Q_in[i] > Qo and d < min_inc:
+            d = min_inc
+        elif Qo > Q_in[i] and d > -min_inc:
+            d = -min_inc
+
+        dh[i] = d
+
+    for i in h:
+        h[i] = ti.max(ti.cast(0.0, cte.FLOAT_TYPE_TI), h[i] + dh[i])
+
+
+@ti.kernel
+def graphflood_core_unsafe_kernel(
+    z: ti.template(),
+    h: ti.template(),
+    Q_in: ti.template(),
+):
+    """
+    Apply friction-law core update, modifying h in-place without a dh buffer.
+
+    Faster than graphflood_core_kernel but subject to race conditions when
+    neighbours read h values that have already been updated in the same pass.
 
     Author: B.G (02/2026)
     """
@@ -106,15 +159,12 @@ def graphflood_core_kernel(
     n_neigh = ti.static(gridctx.n_neighbours)
     for i in h:
         if gridctx.tfunc.nodata_flat(i) == 1:
-            h_next[i] = h[i]
             continue
 
         if gridctx.tfunc.can_out_flat(i) == 1:
-            h_next[i] = floodctx.tfunc.get_boundary_h(i)
+            h[i] = floodctx.tfunc.get_boundary_h(i)
             continue
 
-        # Recompute local steepest slope directly from z+h each pass.
-        # `receivers` is intentionally ignored here (kept in signature for API compatibility).
         best_s = ti.cast(0.0, cte.FLOAT_TYPE_TI)
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
@@ -134,7 +184,7 @@ def graphflood_core_kernel(
         elif Qo > Q_in[i] and dh > -min_inc:
             dh = -min_inc
 
-        h_next[i] = ti.max(ti.cast(0.0, cte.FLOAT_TYPE_TI), h[i] + dh)
+        h[i] = ti.max(ti.cast(0.0, cte.FLOAT_TYPE_TI), h[i] + dh)
 
 
 @ti.kernel

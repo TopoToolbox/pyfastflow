@@ -36,6 +36,7 @@ from .flood_graphflood_kernels import (
     compute_u_kernel,
     distribute_flow_local_kernel,
     graphflood_core_kernel,
+    graphflood_core_unsafe_kernel,
     localpass_kernel,
     make_surface_kernel,
 )
@@ -282,6 +283,12 @@ class FloodContext:
                 },
                 {
                     "target": "kernels.graphflood",
+                    "name": "core_unsafe",
+                    "template": graphflood_core_unsafe_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels.graphflood",
                     "name": "localpass",
                     "template": localpass_kernel,
                     "kind": "kernel",
@@ -374,6 +381,7 @@ class FloodContext:
                 "make_surface": "kernels.graphflood.make_surface",
                 "distribute_flow_local": "kernels.graphflood.distribute_flow_local",
                 "graphflood_core": "kernels.graphflood.core",
+                "graphflood_core_unsafe": "kernels.graphflood.core_unsafe",
                 "localpass": "kernels.graphflood.localpass",
                 "compute_Qo": "kernels.graphflood.compute_Qo",
                 "compute_u": "kernels.graphflood.compute_u",
