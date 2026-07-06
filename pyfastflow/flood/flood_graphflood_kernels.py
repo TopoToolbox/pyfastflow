@@ -70,7 +70,7 @@ def distribute_flow_local_kernel(
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+                s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
                 s = ti.max(s, ti.cast(0.0, cte.FLOAT_TYPE_TI))
                 slopes[k] = s
                 sum_s += s
@@ -119,10 +119,10 @@ def graphflood_core_kernel(
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+                s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
                 if s > best_s:
                     best_s = s
-        slope = ti.max(best_s, ti.cast(1e-9, cte.FLOAT_TYPE_TI))
+        slope = ti.max(best_s, ti.cast(1e-5, cte.FLOAT_TYPE_TI))
 
         Qo = floodctx.tfunc.compute_qo_from_h_slope(h[i], slope, i)
         dth = floodctx.tfunc.get_dth(i)
@@ -169,7 +169,7 @@ def graphflood_core_unsafe_kernel(
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+                s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
                 if s > best_s:
                     best_s = s
         slope = ti.max(best_s, ti.cast(1e-9, cte.FLOAT_TYPE_TI))
@@ -227,7 +227,7 @@ def localpass_kernel(
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+                s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
                 s = ti.max(s, ti.cast(0.0, cte.FLOAT_TYPE_TI))
                 slopes[k] = s
                 sum_s += s
@@ -252,7 +252,7 @@ def localpass_kernel(
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+                s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
                 if s > best_s:
                     best_s = s
         slope = ti.max(best_s, ti.cast(1e-9, cte.FLOAT_TYPE_TI))
@@ -271,6 +271,15 @@ def localpass_kernel(
 
 
 @ti.kernel
+def sum_Q_at_outlets_kernel(Q_in: ti.template(), out_sum: ti.template()):
+    """Sum Q_in at all can_out nodes. Author: B.G (06/2026)"""
+    out_sum[None] = ti.cast(0.0, cte.FLOAT_TYPE_TI)
+    for i in Q_in:
+        if gridctx.tfunc.can_out_flat(i) == 1 and gridctx.tfunc.nodata_flat(i) == 0:
+            ti.atomic_add(out_sum[None], ti.cast(Q_in[i], cte.FLOAT_TYPE_TI))
+
+
+@ti.kernel
 def compute_Qo_kernel(
     z: ti.template(), h: ti.template(), Qo: ti.template()
 ):
@@ -284,7 +293,7 @@ def compute_Qo_kernel(
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+                s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
                 if s > slope:
                     slope = s
         Qo[i] = floodctx.tfunc.compute_qo_from_h_slope(h[i], ti.max(slope, ti.cast(1e-9, cte.FLOAT_TYPE_TI)), i)
@@ -304,7 +313,7 @@ def compute_u_kernel(
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+                s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
                 if s > slope:
                     slope = s
         u[i] = floodctx.tfunc.compute_u_from_h_slope(h[i], ti.max(slope, ti.cast(1e-9, cte.FLOAT_TYPE_TI)), i)
@@ -322,7 +331,7 @@ def compute_tau_kernel(z: ti.template(), h: ti.template(), tau: ti.template()):
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+                s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
                 if s > slope:
                     slope = s
         tau[i] = slope * h[i] * floodctx.tfunc.get_rho_w(i) * floodctx.tfunc.get_gravity(i)
@@ -340,7 +349,7 @@ def compute_Sw_kernel(z: ti.template(), h: ti.template(), Sw: ti.template()):
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+                s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
                 if s > slope:
                     slope = s
         Sw[i] = slope
@@ -358,7 +367,7 @@ def compute_q_kernel(z: ti.template(), h: ti.template(), q: ti.template()):
         for k in ti.static(range(n_neigh)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+                s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
                 if s > slope:
                     slope = s
         q[i] = floodctx.tfunc.compute_q_from_h_slope(h[i], ti.max(slope, ti.cast(1e-9, cte.FLOAT_TYPE_TI)), i)
@@ -373,7 +382,7 @@ def compute_Sw_direction_kernel(z: ti.template(), h: ti.template(), k: ti.templa
             continue
         j = gridctx.tfunc.neighbour_flat(i, k)
         if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-            Sw_dir[i] = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+            Sw_dir[i] = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
         else:
             Sw_dir[i] = 0.0
 
@@ -387,7 +396,7 @@ def compute_u_direction_kernel(z: ti.template(), h: ti.template(), k: ti.templat
             continue
         j = gridctx.tfunc.neighbour_flat(i, k)
         if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-            s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+            s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
             # We use absolute slope for Manning but keep sign of velocity
             u_val = floodctx.tfunc.compute_u_from_h_slope(h[i], ti.abs(s), i)
             u_dir[i] = u_val if s >= 0.0 else -u_val
@@ -404,7 +413,7 @@ def compute_tau_direction_kernel(z: ti.template(), h: ti.template(), k: ti.templ
             continue
         j = gridctx.tfunc.neighbour_flat(i, k)
         if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-            s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+            s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
             tau_dir[i] = s * h[i] * floodctx.tfunc.get_rho_w(i) * floodctx.tfunc.get_gravity(i)
         else:
             tau_dir[i] = 0.0
@@ -419,7 +428,7 @@ def compute_q_direction_kernel(z: ti.template(), h: ti.template(), k: ti.templat
             continue
         j = gridctx.tfunc.neighbour_flat(i, k)
         if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-            s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+            s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
             q_val = floodctx.tfunc.compute_q_from_h_slope(h[i], ti.abs(s), i)
             q_dir[i] = q_val if s >= 0.0 else -q_val
         else:
@@ -435,7 +444,7 @@ def compute_Q_direction_kernel(z: ti.template(), h: ti.template(), k: ti.templat
             continue
         j = gridctx.tfunc.neighbour_flat(i, k)
         if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-            s = flowctx.tfunc.slope_from_values_k(z[i] + h[i], z[j] + h[j], k)
+            s = flowctx.tfunc.slope_from_values_k(z[i], h[i], z[j], h[j], k)
             qo_val = floodctx.tfunc.compute_qo_from_h_slope(h[i], ti.abs(s), i)
             Q_dir[i] = qo_val if s >= 0.0 else -qo_val
         else:

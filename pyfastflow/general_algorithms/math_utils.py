@@ -51,3 +51,39 @@ def atan(x: cte.FLOAT_TYPE_TI) -> cte.FLOAT_TYPE_TI:
     Author: B. Gailleton
     """
     return ti.math.atan2(x, 1.0)
+
+
+@ti.func
+def nextafter(x: cte.FLOAT_TYPE_TI, y: cte.FLOAT_TYPE_TI) -> cte.FLOAT_TYPE_TI:
+    """
+    Return the next representable float after ``x`` in the direction of ``y``.
+
+    IEEE-754 bit-twiddling implementation (no libm nextafter on GPU): bumps
+    the raw bit pattern by one ULP towards ``y``. NaN/Inf are not handled --
+    only meant for finite physical field values.
+
+    Author: B.G (07/2026)
+    """
+    result = y
+    if x != y:
+        if ti.static(cte.FLOAT_TYPE_TI == ti.f32):
+            sign_mask = ti.bit_cast(ti.cast(-0.0, ti.f32), ti.u32)
+            ix = ti.bit_cast(x, ti.u32)
+            if x == 0.0:
+                ix = (ti.bit_cast(y, ti.u32) & sign_mask) | ti.cast(1, ti.u32)
+            elif (x > 0.0) == (y > x):
+                ix += ti.cast(1, ti.u32)
+            else:
+                ix -= ti.cast(1, ti.u32)
+            result = ti.bit_cast(ix, ti.f32)
+        else:
+            sign_mask = ti.bit_cast(ti.cast(-0.0, ti.f64), ti.u64)
+            ix = ti.bit_cast(x, ti.u64)
+            if x == 0.0:
+                ix = (ti.bit_cast(y, ti.u64) & sign_mask) | ti.cast(1, ti.u64)
+            elif (x > 0.0) == (y > x):
+                ix += ti.cast(1, ti.u64)
+            else:
+                ix -= ti.cast(1, ti.u64)
+            result = ti.bit_cast(ix, ti.f64)
+    return result

@@ -13,8 +13,18 @@ from ._flow_param_helpers import (
     slope_between_nodes,
     slope_from_values_k,
 )
-from .flow_analysis_kernels import sum_at_can_out_kernel
-from .flow_fill_kernels import apply_fill_delta_kernel, fill_topography_step_kernel
+from .flow_analysis_kernels import (
+    monitor_lm_z_kernel,
+    monitor_lm_zh_kernel,
+    sum_at_can_out_kernel,
+)
+from .flow_fill_kernels import (
+    apply_fill_delta_kernel,
+    fill_h_epsilon_kernel,
+    fill_topography_step_kernel,
+    solve_lm_z_kernel,
+    solve_lm_zh_kernel,
+)
 from .flow_mfd_kernels import (
     check_mfd_convergence_kernel,
     compute_mfd_routing_weights_kernel,
@@ -282,6 +292,39 @@ class FlowContext:
                     "template": sum_at_can_out_kernel,
                     "kind": "kernel",
                 },
+                {
+                    "target": "kernels",
+                    "name": "fill_h_epsilon",
+                    "template": fill_h_epsilon_kernel,
+                    "kind": "kernel",
+                    "bindings": {"get_min_slope": ContextRef("tfunc.get_min_slope")},
+                },
+                {
+                    "target": "kernels",
+                    "name": "solve_lm_z",
+                    "template": solve_lm_z_kernel,
+                    "kind": "kernel",
+                    "bindings": {"nextafter": ContextRef("gactx.tfunc.nextafter")},
+                },
+                {
+                    "target": "kernels",
+                    "name": "solve_lm_zh",
+                    "template": solve_lm_zh_kernel,
+                    "kind": "kernel",
+                    "bindings": {"nextafter": ContextRef("gactx.tfunc.nextafter")},
+                },
+                {
+                    "target": "kernels",
+                    "name": "monitor_lm_z",
+                    "template": monitor_lm_z_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "monitor_lm_zh",
+                    "template": monitor_lm_zh_kernel,
+                    "kind": "kernel",
+                },
             ]
         )
 
@@ -309,6 +352,11 @@ class FlowContext:
                 "iteration_reroute_carve": "kernels.iteration_reroute_carve",
                 "finalise_reroute_carve": "kernels.finalise_reroute_carve",
                 "sum_at_can_out": "kernels.sum_at_can_out",
+                "fill_h_epsilon": "kernels.fill_h_epsilon",
+                "solve_lm_z": "kernels.solve_lm_z",
+                "solve_lm_zh": "kernels.solve_lm_zh",
+                "monitor_lm_z": "kernels.monitor_lm_z",
+                "monitor_lm_zh": "kernels.monitor_lm_zh",
             }
         )
 

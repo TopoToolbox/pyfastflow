@@ -255,6 +255,54 @@ def fill_topography_inplace(flowctx, z, receivers):
         receivers_next.release()
 
 
+def fill_h_epsilon_inplace_with_temps(flowctx, z, h, receivers, receivers_work, receivers_next):
+    """
+    Fill h (surface z+h) in place with caller-provided receivers buffers.
+
+    Author: B.G (07/2026)
+    """
+    z_field = require_flat_field(z, "z")
+    h_field = require_flat_field(h, "h")
+    rec_field = require_flat_field(receivers, "receivers")
+    receivers_work_field = require_flat_field(receivers_work, "receivers_work")
+    receivers_next_field = require_flat_field(receivers_next, "receivers_next")
+
+    receivers_work_field.copy_from(rec_field)
+    receivers_next_field.copy_from(rec_field)
+
+    for iteration in range(flowctx.logn):
+        flowctx.fill_h_epsilon(
+            z_field,
+            h_field,
+            receivers_work_field,
+            receivers_next_field,
+            iteration + 1,
+        )
+
+
+def fill_h_epsilon_inplace(flowctx, z, h, receivers):
+    """
+    Fill h (surface z+h) in place with pooled receivers buffers.
+
+    Author: B.G (07/2026)
+    """
+    receivers_work = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(flowctx.n_flat))
+    receivers_next = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(flowctx.n_flat))
+
+    try:
+        fill_h_epsilon_inplace_with_temps(
+            flowctx,
+            z,
+            h,
+            receivers,
+            receivers_work,
+            receivers_next,
+        )
+    finally:
+        receivers_work.release()
+        receivers_next.release()
+
+
 def fill_topography_delta_with_temps(
     flowctx,
     z,

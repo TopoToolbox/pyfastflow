@@ -9,6 +9,7 @@ import time
 import pyfastflow.constants as cte
 from pyfastflow import tp
 from pyfastflow.flow import FlowContext
+from pyfastflow.flow.runtime import fill_h_epsilon_inplace_with_temps
 from pyfastflow.flood import FloodContext
 from pyfastflow.grid import GridContext
 from pyfastflow.visu import VisuContext
@@ -23,11 +24,12 @@ ti.init(arch=ti.gpu, offline_cache=False)
 #   core()       — Manning divergence update on h (unsafe=True skips dh buffer)
 # ---------------------------------------------------------------------------
 
-# dem = ttb.load_dem("greenriver")
-dem = ttb.read_tif('/home/bgailleton/Desktop/data/Lidar_swiss/bettlach/DEM.tif')
+dem = ttb.load_dem("greenriver")
+# dem = ttb.read_tif('/home/bgailleton/Desktop/data/Lidar_swiss/bettlach/DEM.tif')
 NX, NY, DX = dem.columns, dem.rows, dem.cellsize
 N = NX * NY
 precrate = 100e-3 / 3600
+dt_hydro = 1e-3
 
 gridctx = GridContext(NX, NY, DX, boundary_mode="normal", topology="D8")
 flowctx = FlowContext(
@@ -35,14 +37,14 @@ flowctx = FlowContext(
     weight_mode="const",
     weight=1.0,
     min_slope_mode="const",
-    min_slope=1e-3,
+    min_slope=1e-2,
     diagonal_partition_correction=True,
 )
 floodctx = FloodContext(
     gridctx,
     flowctx=flowctx,
     dth_mode="const",
-    dth=1e-3,
+    dth=dt_hydro,
     source_w_mode="const",
     source_w=precrate,
     source_w_kind="precip",
@@ -59,6 +61,8 @@ logn = flowctx.logn
 z           = tp.get_tpfield(cte.FLOAT_TYPE_TI, N)
 h           = tp.get_tpfield(cte.FLOAT_TYPE_TI, N)
 receivers   = tp.get_tpfield(ti.i32, N)
+receivers_next = tp.get_tpfield(ti.i32, N)
+fill_rec_work  = tp.get_tpfield(ti.i32, N)
 Q           = tp.get_tpfield(cte.FLOAT_TYPE_TI, N)
 Q_next      = tp.get_tpfield(cte.FLOAT_TYPE_TI, N)
 surface     = tp.get_tpfield(cte.FLOAT_TYPE_TI, N)
@@ -146,47 +150,80 @@ def core(unsafe=False):
         floodctx.graphflood_core(z.field, h.field, Q.field, dh.field)
 
 
+def fill_h():
+    # uses receivers from last propagate() call
+    floodctx.make_surface(z.field, h.field, surface.field)
+    flowctx.compute_receivers(surface.field, receivers.field)
+    fill_h_epsilon_inplace_with_temps(flowctx, z.field, h.field, receivers.field,
+                                       fill_rec_work.field, receivers_next.field)
+
+
+def monitor_lm():
+    n = flowctx.monitor_lm_zh(z.field, h.field)
+    print('local minima (z+h):', n)
+
+
 # --- viz ---
+totime = [0]
+dhs = [np.nan]
 _dummy = np.zeros((NY, NX), dtype=np.float32)
-fig, ax = plt.subplots(1, 3, figsize=(15, 6), constrained_layout=True)
-for a in ax:
+fig, ax = plt.subplots(1, 4, figsize=(15, 6), constrained_layout=True)
+for a in ax[:-1]:
     a.imshow(hs, cmap="gray", vmin=0, vmax=1, interpolation="bilinear")
 imh  = ax[0].imshow(_dummy, cmap="Blues",  vmin=0,    vmax=2.0,  alpha=0.6)
 imQ  = ax[1].imshow(_dummy, cmap="Purples", vmin=-3,  vmax=1.0,  alpha=0.6)
 imdh = ax[2].imshow(_dummy, cmap="RdBu_r", vmin=-0.01, vmax=0.01, alpha=0.6)
+ax[3].plot(totime,dhs, color = 'k')
 ax[0].set_title("hw")
 ax[1].set_title("Q")
 ax[2].set_title("dh")
 fig.show()
+fig.canvas.draw_idle()
+fig.canvas.start_event_loop(0.01)
 
 # --- initial propagation ---
 propagate()
 
 # --- loop ---
+ttt = 0
+Ntt = 1000
 while True:
     hm1 = h.field.to_numpy().reshape(NY, NX)
     st = time.perf_counter()
     # propagate()# if i % 100 == 0 else 0
-    for i in range(1000):
-        # for j in range(10):
+    for i in range(Ntt):
+        # fill_h() if i % 100 == 0 else 0
+        # fill_h()
         distribute()
         core(unsafe=True)
     ti.sync()
+    ttt += dt_hydro * Ntt
+
     floodctx.sum_Q_at_outlets(Q.field, out_sum.field)
     tdh = (hm1 - h.field.to_numpy().reshape(NY, NX))
 
-    print('iteration took', time.perf_counter() - st, 's dh perc90:',np.percentile(np.abs(tdh), 90),' balance:', float(out_sum.field[None]), 'vs', precrate * NX * NY * DX**2, end='          \r')
+    totime.append(ttt)
+    dhs.append(np.percentile(np.abs(tdh), 90))
+
+    print('iteration took', time.perf_counter() - st, 's dh perc80:',np.percentile(np.abs(tdh), 80), 's dh perc85:',np.percentile(np.abs(tdh), 85), 's dh perc90:',np.percentile(np.abs(tdh), 90), 's dh perc98:',np.percentile(np.abs(tdh), 95), 's dh perc98:',np.percentile(np.abs(tdh), 98)
+        ,' balance:', float(out_sum.field[None]), 'vs', precrate * NX * NY * DX**2, end='          \r')
 
 
     imQ.set_data(np.log10(Q.field.to_numpy()).reshape(NY, NX))
     imh.set_data(h.field.to_numpy().reshape(NY, NX))
     imdh.set_data(tdh)
+
     hm1 = h.field.to_numpy().reshape(NY, NX)
+    
+    ax[3].cla()
+    ax[3].plot(totime, dhs, color = 'k')
+    ax[3].set_yscale('log')
+    
     fig.canvas.draw_idle()
     fig.canvas.start_event_loop(0.01)
 
 # --- cleanup ---
-for f in [z, h, receivers, Q, Q_next, surface, dh, out_sum,
+for f in [z, h, receivers, receivers_next, fill_rec_work, Q, Q_next, surface, dh, out_sum,
           bid, rec_work, rec_jump, z_prime, is_border, outlet,
           basin_saddle, basin_saddlenode, tag, tag_alt, rerouted,
           donors, ndonors, donors_alt, ndonors_alt, Q_alt, src]:

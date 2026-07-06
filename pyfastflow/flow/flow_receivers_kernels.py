@@ -45,7 +45,7 @@ def compute_sfd_receivers_kernel(z: ti.template(), receivers: ti.template()):
             valid = j != -1
             tsr = ti.cast(-1.0, cte.FLOAT_TYPE_TI)
             if valid:
-                tsr = flowctx.tfunc.slope_from_values_k(z[i], z[j], k)
+                tsr = flowctx.tfunc.slope_from_values_k(z[i], 0.0, z[j], 0.0, k)
 
             better = valid and tsr > sr
             sr = tsr if better else sr
@@ -75,7 +75,7 @@ def compute_sfd_receivers_stochastic_kernel(z: ti.template(), receivers: ti.temp
             valid = j != -1
             tsr = ti.cast(-1.0, cte.FLOAT_TYPE_TI)
             if valid:
-                tsr = flowctx.tfunc.slope_from_values_k(z[i], z[j], k)
+                tsr = flowctx.tfunc.slope_from_values_k(z[i], 0.0, z[j], 0.0, k)
                 if tsr > 0.0:
                     tsr = ti.random(dtype=cte.FLOAT_TYPE_TI) * ti.math.sqrt(tsr)
 

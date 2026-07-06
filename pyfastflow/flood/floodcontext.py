@@ -39,6 +39,7 @@ from .flood_graphflood_kernels import (
     graphflood_core_unsafe_kernel,
     localpass_kernel,
     make_surface_kernel,
+    sum_Q_at_outlets_kernel,
 )
 from .flood_ls_kernels import (
     ls_add_source_to_h_kernel,
@@ -295,6 +296,12 @@ class FloodContext:
                 },
                 {
                     "target": "kernels.graphflood",
+                    "name": "sum_Q_at_outlets",
+                    "template": sum_Q_at_outlets_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels.graphflood",
                     "name": "compute_Qo",
                     "template": compute_Qo_kernel,
                     "kind": "kernel",
@@ -383,6 +390,7 @@ class FloodContext:
                 "graphflood_core": "kernels.graphflood.core",
                 "graphflood_core_unsafe": "kernels.graphflood.core_unsafe",
                 "localpass": "kernels.graphflood.localpass",
+                "sum_Q_at_outlets": "kernels.graphflood.sum_Q_at_outlets",
                 "compute_Qo": "kernels.graphflood.compute_Qo",
                 "compute_u": "kernels.graphflood.compute_u",
                 "compute_tau": "kernels.graphflood.compute_tau",

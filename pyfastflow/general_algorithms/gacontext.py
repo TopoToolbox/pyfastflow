@@ -12,7 +12,7 @@ from .ga_kernels import (
     swap_flat_kernel,
     weighted_mean_into_flat_kernel,
 )
-from .math_utils import atan
+from .math_utils import atan, nextafter
 from .pingpong import getSrc, updateSrc
 
 
@@ -44,6 +44,7 @@ class GAContext:
         self._factory.compile_block(
             [
                 {"target": "tfunc", "name": "atan", "template": atan, "kind": "func"},
+                {"target": "tfunc", "name": "nextafter", "template": nextafter, "kind": "func"},
                 {"target": "tfunc", "name": "get_src", "template": getSrc, "kind": "func"},
                 {"target": "tfunc", "name": "update_src", "template": updateSrc, "kind": "func"},
             ]
