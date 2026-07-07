@@ -311,7 +311,7 @@ class FlowContext:
                     "name": "solve_lm_zh",
                     "template": solve_lm_zh_kernel,
                     "kind": "kernel",
-                    "bindings": {"nextafter": ContextRef("gactx.tfunc.nextafter")},
+                    "bindings": {"get_min_slope": ContextRef("tfunc.get_min_slope")},
                 },
                 {
                     "target": "kernels",

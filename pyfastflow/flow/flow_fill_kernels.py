@@ -123,10 +123,37 @@ def solve_lm_zh_kernel(z: ti.template(), h: ti.template()):
     Same as ``solve_lm_z_kernel`` but for the ``z+h`` hydraulic surface,
     raising ``h`` instead of ``z``. Neighbour comparisons use the decomposed
     (z[j]-z[i])+(h[j]-h[i]) form to avoid cancellation between the large z
-    and small h magnitudes, but the actual raise reconstructs the absolute
-    surface (z[i]+lowest_rel) before applying nextafter/jitter -- computing
-    the ULP step on the small relative h-offset instead of the absolute
-    surface makes the nudge too small to survive being added back to z[i].
+    and small h magnitudes.
+
+    ``has_down`` must use strict ``< 0.0`` (matching ``monitor_lm_zh``'s
+    strict comparison) -- using ``<= 0.0`` marks exact ties as "resolved"
+    without ever raising them, which desyncs from the monitor and looks
+    like a permanent stall (monitor keeps counting them, solve never
+    touches them again).
+
+    Exact ties (``rel == 0.0``) are broken deterministically by comparing
+    flat indices (``i`` vs the tied neighbour) instead of random jitter --
+    only the higher-index side of a tie ever rises, so the tie is resolved
+    in one pass instead of a random walk where both sides climb together
+    and never separate. Exception: if the tied neighbour is an outlet, it
+    is never touched by this kernel (skipped outright, see below), so an
+    index-based "wait for the other side" never resolves -- an interior
+    cell tied with a frozen outlet must always raise regardless of index,
+    or it deadlocks permanently against a reference that can never move.
+
+    The raise is computed entirely in h-space (``h[i] += lowest_rel +
+    increment``), never recombining z and h into an absolute surface value.
+    Reconstructing ``z[i] + h[i] + lowest_rel`` (magnitude ~DEM elevation)
+    and taking ``nextafter`` of that rounds away anything finer than z's own
+    ULP (~1e-4 at typical DEM elevations) *before* nextafter even runs --
+    exactly the cancellation the decomposed ``rel`` form exists to avoid,
+    just relocated to the raise step. In genuinely low-gradient terrain,
+    real inter-cell gaps are sub-ULP, so that reconstruction collapses whole
+    clusters onto the same coarse quantized value, re-tying cells that
+    aren't each other's tracked ``lowest_j`` and never resolving. Using a
+    fixed physical increment (``get_min_slope(i) * dx``, same pattern as
+    ``fill_h_epsilon_kernel`` above) keeps the raise in h's own precision
+    domain and needs no nextafter/ULP trick at all.
 
     Author: B.G (07/2026)
     """
@@ -137,19 +164,23 @@ def solve_lm_zh_kernel(z: ti.template(), h: ti.template()):
 
         has_down = False
         lowest_rel = ti.cast(1e18, cte.FLOAT_TYPE_TI)
+        lowest_j = -1
         for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and gridctx.tfunc.nodata_flat(j) == 0:
-                rel = (z[j] - z[i]) + h[j]
-                if ((z[j] - z[i]) + (h[j] - h[i])) < 0.0:
+                rel = (z[j] - z[i]) + (h[j] - h[i])
+                if rel < 0.0:
                     has_down = True
-                lowest_rel = ti.min(lowest_rel, rel)
+                if rel < lowest_rel:
+                    lowest_rel = rel
+                    lowest_j = j
 
         if not has_down:
-            target_abs = z[i] + lowest_rel
-            jitter = ti.random(dtype=cte.FLOAT_TYPE_TI) * ti.cast(1e-3, cte.FLOAT_TYPE_TI)
-            new_abs = nextafter(target_abs, target_abs + 1.0) + jitter
-            h[i] = ti.max(ti.cast(0.0, cte.FLOAT_TYPE_TI), new_abs - z[i])
+            ref_is_outlet = lowest_j != -1 and gridctx.tfunc.can_out_flat(lowest_j) == 1
+            raise_it = lowest_rel > 0.0 or i > lowest_j or ref_is_outlet
+            if raise_it:
+                increment = get_min_slope(i) * ti.cast(gridctx.dx, cte.FLOAT_TYPE_TI)
+                h[i] = h[i] + lowest_rel + increment
 
 
 @ti.kernel
