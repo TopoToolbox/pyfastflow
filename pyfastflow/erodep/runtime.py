@@ -74,6 +74,13 @@ def run_spl_with_fields(
     """
     Run uplift plus implicit SPL using caller-provided flat buffers.
 
+    Depressions are handled by the optimized single-launch carve
+    (``reroute_carve_optimized``; ``carve``/``tag``/``tag_alt``/``change``/
+    ``rerouted`` are kept for signature compatibility but unused) and
+    accumulation uses the exact push pointer-jumping scheme
+    (``accumulate_sfd_pointer_jump_push``; ``rec_work``/``rec_aux``/
+    ``z_aux`` double as its ping-pong buffers, they are scratch here).
+
     Author: B.G (03/2026)
     """
     validate_implicit_spl_support(lemctx)
@@ -99,10 +106,6 @@ def run_spl_with_fields(
                 outlet,
                 basin_saddle,
                 basin_saddlenode,
-                tag,
-                tag_alt,
-                change,
-                rerouted,
             )
         ):
             raise ValueError("reroute=True requires all reroute temp fields")
@@ -113,23 +116,17 @@ def run_spl_with_fields(
     for _ in range(int(n_iterations)):
         lemctx.flowctx.compute_receivers(z_field, rec_field)
         if reroute:
-            flow_runtime.reroute_flow_with_temps(
+            flow_runtime.reroute_carve_optimized(
                 lemctx.flowctx,
                 z_field,
                 rec_field,
-                bid,
-                rec_work_field,
-                receivers_jump,
-                z_prime,
-                is_border,
-                outlet,
-                basin_saddle,
-                basin_saddlenode,
-                tag,
-                tag_alt,
-                change,
-                rerouted,
-                carve=carve,
+                require_flat_field(receivers_jump, "receivers_jump"),
+                require_flat_field(bid, "bid"),
+                require_flat_field(is_border, "is_border"),
+                require_flat_field(z_prime, "z_prime"),
+                require_flat_field(basin_saddle, "basin_saddle"),
+                require_flat_field(basin_saddlenode, "basin_saddlenode"),
+                require_flat_field(outlet, "outlet"),
             )
         if fill:
             flow_runtime.fill_topography_inplace_with_temps(
@@ -140,7 +137,14 @@ def run_spl_with_fields(
                 fill_receivers_work,
                 fill_receivers_next,
             )
-        flow_runtime.accumulate_sfd(lemctx.flowctx, rec_field, area_field)
+        flow_runtime.accumulate_sfd_pointer_jump_push(
+            lemctx.flowctx,
+            rec_field,
+            rec_work_field,
+            rec_aux_field,
+            area_field,
+            z_aux_field,
+        )
         lemctx.tectonic_uplift(z_field)
         lemctx.init_erode_spl(
             z_field,
@@ -192,10 +196,6 @@ def run_spl(lemctx, z, *, n_iterations=1, reroute=False, fill=False, carve=True)
         outlet = ppool.taipool.get_tpfield(dtype=ti.i64, shape=(lemctx.n_flat))
         basin_saddle = ppool.taipool.get_tpfield(dtype=ti.i64, shape=(lemctx.n_flat))
         basin_saddlenode = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(lemctx.n_flat))
-        tag = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(lemctx.n_flat))
-        tag_alt = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(lemctx.n_flat))
-        change = ppool.taipool.get_tpfield(dtype=ti.i32, shape=())
-        rerouted = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(lemctx.n_flat))
 
     if fill:
         fill_z_work = ppool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(lemctx.n_flat))
@@ -225,10 +225,6 @@ def run_spl(lemctx, z, *, n_iterations=1, reroute=False, fill=False, carve=True)
             outlet=outlet,
             basin_saddle=basin_saddle,
             basin_saddlenode=basin_saddlenode,
-            tag=tag,
-            tag_alt=tag_alt,
-            change=change,
-            rerouted=rerouted,
             fill_z_work=fill_z_work,
             fill_receivers_work=fill_receivers_work,
             fill_receivers_next=fill_receivers_next,
@@ -250,10 +246,6 @@ def run_spl(lemctx, z, *, n_iterations=1, reroute=False, fill=False, carve=True)
             outlet.release()
             basin_saddle.release()
             basin_saddlenode.release()
-            tag.release()
-            tag_alt.release()
-            change.release()
-            rerouted.release()
         if fill:
             fill_z_work.release()
             fill_receivers_work.release()
@@ -403,10 +395,6 @@ def run_spl_hillslope(
         outlet = ppool.taipool.get_tpfield(dtype=ti.i64, shape=(lemctx.n_flat))
         basin_saddle = ppool.taipool.get_tpfield(dtype=ti.i64, shape=(lemctx.n_flat))
         basin_saddlenode = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(lemctx.n_flat))
-        tag = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(lemctx.n_flat))
-        tag_alt = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(lemctx.n_flat))
-        change = ppool.taipool.get_tpfield(dtype=ti.i32, shape=())
-        rerouted = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(lemctx.n_flat))
 
     if fill:
         fill_z_work = ppool.taipool.get_tpfield(dtype=cte.FLOAT_TYPE_TI, shape=(lemctx.n_flat))
@@ -489,10 +477,6 @@ def run_spl_hillslope(
                 outlet=outlet,
                 basin_saddle=basin_saddle,
                 basin_saddlenode=basin_saddlenode,
-                tag=tag,
-                tag_alt=tag_alt,
-                change=change,
-                rerouted=rerouted,
                 fill_z_work=fill_z_work,
                 fill_receivers_work=fill_receivers_work,
                 fill_receivers_next=fill_receivers_next,
@@ -536,10 +520,6 @@ def run_spl_hillslope(
             outlet.release()
             basin_saddle.release()
             basin_saddlenode.release()
-            tag.release()
-            tag_alt.release()
-            change.release()
-            rerouted.release()
         if fill:
             fill_z_work.release()
             fill_receivers_work.release()

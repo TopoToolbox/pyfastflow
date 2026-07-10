@@ -285,3 +285,65 @@ def finalise_reroute_carve_kernel(
             _, node = unpack_float_index(outlet[i])
             rec[saddlenode[i]] = node
             rerouted[saddlenode[i]] = True
+
+
+@ti.kernel
+def label_basins_walk_kernel(
+    rec: ti.template(), rec_jump: ti.template(), bid: ti.template()
+):
+    """
+    Basin labeling in a single launch.
+
+    Per-thread pointer jumping to the root with path halving on the shared
+    ``rec_jump`` array — races are benign because entries only ever move
+    toward the root, and each thread progresses at least one step per
+    iteration on its own. Then bid = 0 for outlet-rooted nodes, pit+1
+    otherwise. Replaces basin_id_init + (logn+1) propagate_basin_iter +
+    propagate_basin_final + the rec_jump copy.
+
+    Author: B.G (07/2026)
+    """
+    n = rec.shape[0]
+    for i in rec_jump:
+        rec_jump[i] = rec[i]
+    for i in rec_jump:
+        guard = 0
+        while rec_jump[i] != rec_jump[rec_jump[i]] and guard < n:
+            rec_jump[i] = rec_jump[rec_jump[i]]
+            guard += 1
+    for i in bid:
+        root = rec_jump[i]
+        bid[i] = 0 if gridctx.tfunc.can_out_flat(root) else root + 1
+
+
+@ti.kernel
+def carve_basins_serial_kernel(
+    rec: ti.template(),
+    basin_saddlenode: ti.template(),
+    outlet: ti.template(),
+):
+    """
+    Carve in a single launch.
+
+    One serial thread per resolvable basin walks the receiver chain from
+    the saddle node down to the pit, reversing links, then points the
+    saddle node to the outlet. Chains of distinct basins are node-disjoint
+    so writes never race. Replaces init_reroute_carve + (logn+1)
+    iteration_reroute_carve + finalise_reroute_carve + the field copies.
+
+    Author: B.G (07/2026)
+    """
+    invalid = _invalid_pack()
+    for b in basin_saddlenode:
+        s = basin_saddlenode[b]
+        if s == -1 or outlet[b] == invalid:
+            continue
+        _, out_node = unpack_float_index(outlet[b])
+        node = s
+        nxt = rec[node]
+        rec[node] = out_node
+        while nxt != node:
+            nnxt = rec[nxt]
+            rec[nxt] = node
+            node = nxt
+            nxt = nnxt

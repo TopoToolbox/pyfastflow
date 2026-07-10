@@ -37,16 +37,20 @@ from .flow_receivers_kernels import (
 )
 from .flow_reroute_kernels import (
     basin_id_init_kernel,
+    carve_basins_serial_kernel,
     depression_counter_kernel,
     finalise_reroute_carve_kernel,
     init_reroute_carve_kernel,
     iteration_reroute_carve_kernel,
+    label_basins_walk_kernel,
     propagate_basin_final_kernel,
     propagate_basin_iter_kernel,
     reroute_jump_kernel,
     saddlesort_kernel,
 )
 from .flow_sfd_accum_kernels import (
+    accum_downstream_atomic_kernel,
+    accum_pointer_jump_push_step_kernel,
     fuse_accum_buffers_kernel,
     init_weighted_source_kernel,
     rake_compress_accum_kernel,
@@ -196,6 +200,19 @@ class FlowContext:
                 },
                 {
                     "target": "kernels",
+                    "name": "accum_downstream_atomic",
+                    "template": accum_downstream_atomic_kernel,
+                    "kind": "kernel",
+                    "bindings": {"get_weight": ContextRef("tfunc.get_weight")},
+                },
+                {
+                    "target": "kernels",
+                    "name": "accum_pointer_jump_push_step",
+                    "template": accum_pointer_jump_push_step_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
                     "name": "init_mfd_source",
                     "template": init_mfd_source_kernel,
                     "kind": "kernel",
@@ -288,6 +305,18 @@ class FlowContext:
                 },
                 {
                     "target": "kernels",
+                    "name": "label_basins_walk",
+                    "template": label_basins_walk_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "carve_basins_serial",
+                    "template": carve_basins_serial_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
                     "name": "sum_at_can_out",
                     "template": sum_at_can_out_kernel,
                     "kind": "kernel",
@@ -336,6 +365,8 @@ class FlowContext:
                 "receivers_to_donors": "kernels.receivers_to_donors",
                 "rake_compress_accum": "kernels.rake_compress_accum",
                 "fuse_accum_buffers": "kernels.fuse_accum_buffers",
+                "accum_downstream_atomic": "kernels.accum_downstream_atomic",
+                "accum_pointer_jump_push_step": "kernels.accum_pointer_jump_push_step",
                 "init_mfd_source": "kernels.init_mfd_source",
                 "compute_mfd_routing_weights": "kernels.compute_mfd_routing_weights",
                 "mfd_power_iteration_step": "kernels.mfd_power_iteration_step",
@@ -351,6 +382,8 @@ class FlowContext:
                 "init_reroute_carve": "kernels.init_reroute_carve",
                 "iteration_reroute_carve": "kernels.iteration_reroute_carve",
                 "finalise_reroute_carve": "kernels.finalise_reroute_carve",
+                "label_basins_walk": "kernels.label_basins_walk",
+                "carve_basins_serial": "kernels.carve_basins_serial",
                 "sum_at_can_out": "kernels.sum_at_can_out",
                 "fill_h_epsilon": "kernels.fill_h_epsilon",
                 "solve_lm_z": "kernels.solve_lm_z",

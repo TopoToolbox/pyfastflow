@@ -1,3 +1,8 @@
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # repo pyfastflow, not site-packages
+
 import matplotlib.pyplot as plt
 import numpy as np
 import taichi as ti
@@ -17,11 +22,11 @@ NY = 1024
 DX = 50.0
 
 N_OUTER = 2000
-N_INNER = 50
+N_INNER = 500
 
+# depressions: optimized single-launch carve; accumulation: exact pj push
 REROUTE = True
 FILL = True
-CARVE = True
 
 UPLIFT_RATE = 1e-3
 DT = 1e4
@@ -86,7 +91,6 @@ for outer in range(N_OUTER):
         n_iterations=N_INNER,
         reroute=REROUTE,
         fill=FILL,
-        carve=CARVE,
     )
 
     terrain_np = z.field.to_numpy().reshape((NY, NX))

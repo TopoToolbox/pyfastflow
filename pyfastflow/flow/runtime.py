@@ -513,3 +513,69 @@ def reroute_flow(flowctx, z, receivers, *, carve=True):
         tag_alt.release()
 
     return rerouted
+
+
+def reroute_carve_optimized(
+    flowctx,
+    z,
+    receivers,
+    receivers_jump,
+    bid,
+    is_border,
+    z_prime,
+    basin_saddle,
+    basin_saddlenode,
+    outlet,
+):
+    """
+    Optimized full depression handling: single-launch basin labeling and
+    single-launch serial carve per pass, saddlesort unchanged. Modifies
+    ``receivers`` in place. All arguments after flowctx are raw ti fields,
+    caller-allocated. Returns the number of unresolved depressions.
+
+    Author: B.G (07/2026)
+    """
+    ndep = flowctx.depression_counter(receivers)
+    if ndep == 0:
+        return 0
+    for _ in range(ceil(log2(max(2, int(ndep)))) + 2):
+        flowctx.label_basins_walk(receivers, receivers_jump, bid)
+        flowctx.saddlesort(
+            bid, is_border, z_prime, basin_saddle, basin_saddlenode, outlet, z
+        )
+        flowctx.carve_basins_serial(receivers, basin_saddlenode, outlet)
+        ndep = flowctx.depression_counter(receivers)
+        if ndep == 0:
+            break
+    return int(ndep)
+
+
+def accumulate_sfd_atomic(flowctx, receivers, q):
+    """
+    SFD accumulation by direct atomic descent, result in ``q``. Raw ti
+    fields, no temporaries. Receiver graph must be acyclic.
+
+    Author: B.G (07/2026)
+    """
+    flowctx.accum_downstream_atomic(receivers, q)
+
+
+def accumulate_sfd_pointer_jump_push(
+    flowctx, receivers, receivers_work, receivers_work2, q, q_work
+):
+    """
+    Push pointer-jumping accumulation with retirement, logn+1 full
+    ping-pong rounds (rec and q buffers), result in ``q``. Exact. Raw ti
+    fields, caller-allocated; ``receivers`` itself is never written.
+
+    Author: B.G (07/2026)
+    """
+    flowctx.init_weighted_source(q)
+    rec_a, rec_b = receivers, receivers_work
+    q_a, q_b = q, q_work
+    for _ in range(flowctx.logn + 1):
+        flowctx.accum_pointer_jump_push_step(rec_a, rec_b, q_a, q_b)
+        rec_a, rec_b = rec_b, (receivers_work2 if rec_b is receivers_work else receivers_work)
+        q_a, q_b = q_b, q_a
+    if q_a is not q:
+        q.copy_from(q_a)

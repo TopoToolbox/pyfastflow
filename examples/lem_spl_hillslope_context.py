@@ -1,3 +1,8 @@
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # repo pyfastflow, not site-packages
+
 import matplotlib.pyplot as plt
 import numpy as np
 import taichi as ti
@@ -20,9 +25,9 @@ N_OUTER = 1000
 N_INNER = 100
 HILLSLOPE_SUBSTEPS = 1
 
+# depressions: optimized single-launch carve; accumulation: exact pj push
 REROUTE = True
 FILL = True
-CARVE = True
 
 UPLIFT_RATE = 1e-3
 DT = 5e3
@@ -91,7 +96,6 @@ for outer in range(N_OUTER):
         hillslope_substeps=HILLSLOPE_SUBSTEPS,
         reroute=REROUTE,
         fill=FILL,
-        carve=CARVE,
     )
 
     terrain_np = z.field.to_numpy().reshape((NY, NX))
