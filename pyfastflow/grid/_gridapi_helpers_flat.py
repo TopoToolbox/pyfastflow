@@ -1,7 +1,8 @@
-from types import SimpleNamespace
 import math
 
 import taichi as ti
+
+from ..context import APINamespace
 
 
 def build_flat_helpers(gridctx):
@@ -16,7 +17,7 @@ def build_flat_helpers(gridctx):
 
     Author: B.G (02/2026)
     """
-    helpers = SimpleNamespace()
+    helpers = APINamespace()
 
     # One capture point keeps all mode decisions fixed for the emitted Taichi helpers.
     nx = int(gridctx.nx)
@@ -92,7 +93,8 @@ def build_flat_helpers(gridctx):
     def _bc_code(i: ti.i32) -> ti.u8:
         """Return the optional internal boundary code for a node. Author: B.G (02/2026)"""
         if ti.static(has_bcs):
-            return bcs[i]
+            ret = 0 if i == -1 else bcs[i]
+            return ret
         return ti.u8(1)
 
     @ti.func

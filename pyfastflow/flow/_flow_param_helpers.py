@@ -82,14 +82,19 @@ def dist_between_nodes_corrected(i: ti.i32, j: ti.i32) -> cte.FLOAT_TYPE_TI:
 
 @ti.func
 def slope_from_values_k(
-    zi: cte.FLOAT_TYPE_TI, zj: cte.FLOAT_TYPE_TI, k: ti.i32
+    zi: cte.FLOAT_TYPE_TI, hi: cte.FLOAT_TYPE_TI,
+    zj: cte.FLOAT_TYPE_TI, hj: cte.FLOAT_TYPE_TI, k: ti.i32
 ) -> cte.FLOAT_TYPE_TI:
     """
     Return corrected slope between a node value and its ``k``th neighbour.
 
+    Computed as (zi-zj)+(hi-hj) rather than (zi+hi)-(zj+hj) to avoid float
+    cancellation when z dominates h in magnitude. Pass hi=hj=0 for a plain
+    z-only slope.
+
     Author: B.G (02/2026)
     """
-    return (zi - zj) / dist_from_k_corrected(k)
+    return ((zi - zj) + (hi - hj)) / dist_from_k_corrected(k)
 
 
 @ti.func

@@ -1,5 +1,4 @@
-from types import SimpleNamespace
-
+from ..context import ContextFactory
 from .ga_kernels import (
     add_to_flat_kernel,
     add_weighted_to_flat_kernel,
@@ -13,77 +12,112 @@ from .ga_kernels import (
     swap_flat_kernel,
     weighted_mean_into_flat_kernel,
 )
-from .math_utils import atan
+from .math_utils import atan, nextafter
 from .pingpong import getSrc, updateSrc
 
 
 class GAContext:
     """
-    Grid-bound context for general Taichi algorithms.
+    Grid-bound general-algorithm specialization context.
 
-    This context only exposes the final specialized API. The raw Taichi helper
-    funcs and kernels live in dedicated modules and are rebound here through
-    ``gridctx.make_func`` and ``gridctx.make_kernel``.
-
-    Author: B.G (02/2026)
+    Author: B.G (03/2026)
     """
 
     def __init__(self, gridctx):
-        """
-        Initialize the general-algorithm context for one GridContext.
-
-        Author: B.G (02/2026)
-        """
         self.gridctx = gridctx
-        self.n_flat = self.gridctx.nx * self.gridctx.ny
+        self.n_flat = self.gridctx.n_flat
         self.scan_work_size = 1
         while self.scan_work_size < self.n_flat:
             self.scan_work_size *= 2
 
-        # Make the scan-size metadata visible from the universal ``gridctx``
-        # entry point used by the generic scan kernels.
         self.gridctx.ga = self
 
-        self.tfunc = SimpleNamespace()
-        self.kernels = SimpleNamespace()
-        self._compile_helpers()
-        self._compile_kernels()
-
-    def _compile_helpers(self):
-        """
-        Bind reusable Taichi helper funcs to this context.
-
-        Author: B.G (02/2026)
-        """
-        self.tfunc.atan = self.gridctx.make_func(atan)
-        self.tfunc.get_src = self.gridctx.make_func(getSrc)
-        self.tfunc.update_src = self.gridctx.make_func(updateSrc)
-
-    def _compile_kernels(self):
-        """
-        Bind the flat kernel family to this context.
-
-        Author: B.G (02/2026)
-        """
-        self.kernels.swap_flat = self.gridctx.make_kernel(swap_flat_kernel)
-        self.kernels.add_to_flat = self.gridctx.make_kernel(add_to_flat_kernel)
-        self.kernels.add_weighted_to_flat = self.gridctx.make_kernel(add_weighted_to_flat_kernel)
-        self.kernels.weighted_mean_into_flat = self.gridctx.make_kernel(
-            weighted_mean_into_flat_kernel
-        )
-        self.kernels.init_flat_arange = self.gridctx.make_kernel(init_flat_arange_kernel)
-        self.kernels.multiply_flat_by_scalar = self.gridctx.make_kernel(
-            multiply_flat_by_scalar_kernel
+        self._factory = ContextFactory(
+            self,
+            bindings={
+                "gridctx": self.gridctx,
+                "gactx": self,
+            },
+            n_flat=self.n_flat,
         )
 
-        self.kernels.scan_copy_input_to_work = self.gridctx.make_kernel(
-            scan_copy_input_to_work_kernel
+        self._factory.compile_block(
+            [
+                {"target": "tfunc", "name": "atan", "template": atan, "kind": "func"},
+                {"target": "tfunc", "name": "nextafter", "template": nextafter, "kind": "func"},
+                {"target": "tfunc", "name": "get_src", "template": getSrc, "kind": "func"},
+                {"target": "tfunc", "name": "update_src", "template": updateSrc, "kind": "func"},
+            ]
         )
-        self.kernels.scan_upsweep_step = self.gridctx.make_kernel(scan_upsweep_step_kernel)
-        self.kernels.scan_downsweep_step = self.gridctx.make_kernel(scan_downsweep_step_kernel)
-        self.kernels.scan_set_root_zero = self.gridctx.make_kernel(scan_set_root_zero_kernel)
-        self.kernels.scan_make_inclusive_and_copy = self.gridctx.make_kernel(
-            scan_make_inclusive_and_copy_kernel
+        self._factory.compile_block(
+            [
+                {"target": "kernels", "name": "swap_flat", "template": swap_flat_kernel, "kind": "kernel"},
+                {"target": "kernels", "name": "add_to_flat", "template": add_to_flat_kernel, "kind": "kernel"},
+                {
+                    "target": "kernels",
+                    "name": "add_weighted_to_flat",
+                    "template": add_weighted_to_flat_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "weighted_mean_into_flat",
+                    "template": weighted_mean_into_flat_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "init_flat_arange",
+                    "template": init_flat_arange_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "multiply_flat_by_scalar",
+                    "template": multiply_flat_by_scalar_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "scan_copy_input_to_work",
+                    "template": scan_copy_input_to_work_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "scan_upsweep_step",
+                    "template": scan_upsweep_step_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "scan_downsweep_step",
+                    "template": scan_downsweep_step_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "scan_set_root_zero",
+                    "template": scan_set_root_zero_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "scan_make_inclusive_and_copy",
+                    "template": scan_make_inclusive_and_copy_kernel,
+                    "kind": "kernel",
+                },
+            ]
+        )
+        self._factory.export(
+            {
+                "swap_flat": "kernels.swap_flat",
+                "add_to_flat": "kernels.add_to_flat",
+                "add_weighted_to_flat": "kernels.add_weighted_to_flat",
+                "weighted_mean_into_flat": "kernels.weighted_mean_into_flat",
+                "init_flat_arange": "kernels.init_flat_arange",
+                "multiply_flat_by_scalar": "kernels.multiply_flat_by_scalar",
+            }
         )
 
     def inclusive_scan_flat(self, input_arr, output_arr, work_arr):
@@ -92,7 +126,7 @@ class GAContext:
 
         ``work_arr`` must have at least ``scan_work_size`` elements.
 
-        Author: B.G (02/2026)
+        Author: B.G (03/2026)
         """
         self.kernels.scan_copy_input_to_work(input_arr, work_arr)
 

@@ -127,3 +127,70 @@ def fuse_accum_buffers_kernel(
     for tid in q:
         if get_src(src, tid, iteration):
             q[tid] = q_alt[tid]
+
+
+@ti.kernel
+def accum_downstream_atomic_kernel(receivers: ti.template(), q: ti.template()):
+    """
+    SFD accumulation by direct atomic descent.
+
+    ``q`` is initialized from the weight getter, then every node walks its
+    receiver chain to the root and atomic_adds its weight into each
+    downstream node. One launch, no donor/ping-pong buffers; total work is
+    the sum of path lengths in atomic adds. Requires an acyclic receiver
+    graph (run after depression handling); the guard makes a cycle degrade
+    the result instead of hanging.
+
+    Author: B.G (07/2026)
+    """
+    n = receivers.shape[0]
+    for i in q:
+        q[i] = get_weight(i)
+    for i in receivers:
+        if receivers[i] == i:
+            continue
+        wi = get_weight(i)
+        j = receivers[i]
+        guard = 0
+        while j != receivers[j] and guard < n:
+            ti.atomic_add(q[j], wi)
+            j = receivers[j]
+            guard += 1
+        ti.atomic_add(q[j], wi)
+
+
+@ti.kernel
+def accum_pointer_jump_push_step_kernel(
+    rec_curr: ti.template(),
+    rec_next: ti.template(),
+    q_curr: ti.template(),
+    q_next: ti.template(),
+):
+    """
+    One push pointer-jumping accumulation round (full ping-pong).
+
+    q_next starts as a copy of q_curr; every live node pushes its q_curr
+    into its current receiver, then jumps to its grandparent. The key to
+    exactness is the retirement rule: when the parent is a sink in the
+    current jumped graph (grandparent == parent), the node pushes one
+    last time and then points to itself, so it never re-pushes a growing
+    sum into the sink. Each target then receives, from descendants at
+    exact power-of-two distances, the disjoint depth segments
+    [2^k, 2^{k+1}) of its subtree — exact accumulation in logn rounds,
+    no double counting.
+
+    Both the rec and q buffers must ping-pong between rounds.
+
+    Author: B.G (07/2026)
+    """
+    for i in q_next:
+        q_next[i] = q_curr[i]
+    for i in rec_curr:
+        parent = rec_curr[i]
+        rec_next[i] = parent
+        if parent != i:
+            wi = q_curr[i]
+            if wi != 0.0:
+                ti.atomic_add(q_next[parent], wi)
+            grandparent = rec_curr[parent]
+            rec_next[i] = i if grandparent == parent else grandparent

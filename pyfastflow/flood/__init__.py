@@ -8,8 +8,9 @@ Author: B.G (02/2026)
 """
 
 from .floodcontext import FloodContext
+from . import runtime
 
-__all__ = ["FloodContext"]
+__all__ = ["FloodContext", "runtime"]
 
 # LEGACY (moved):
 # - pyfastflow.flood.legacy.gf_fields

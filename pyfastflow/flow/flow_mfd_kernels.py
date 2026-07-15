@@ -52,7 +52,7 @@ def compute_mfd_routing_weights_kernel(
         for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(i, k)
             if j != -1 and not gridctx.tfunc.nodata_flat(j):
-                slope = flowctx.tfunc.slope_from_values_k(zi, z[j], k)
+                slope = flowctx.tfunc.slope_from_values_k(zi, 0.0, z[j], 0.0, k)
                 if slope > 0.0:
                     routing_weights[i, k] = slope
                     sum_s += slope

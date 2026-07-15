@@ -1,7 +1,8 @@
-from types import SimpleNamespace
 import math
 
 import taichi as ti
+
+from ..context import APINamespace
 
 
 def build_2d_helpers(gridctx):
@@ -16,7 +17,7 @@ def build_2d_helpers(gridctx):
 
     Author: B.G (02/2026)
     """
-    helpers = SimpleNamespace()
+    helpers = APINamespace()
 
     # Same capture logic as the flat helper set, but with row/col signatures.
     nx = int(gridctx.nx)
