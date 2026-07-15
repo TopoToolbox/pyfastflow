@@ -17,8 +17,8 @@ from pyfastflow.visu import VisuContext
 ti.init(arch=ti.gpu)
 
 
-NX = 1024
-NY = 1024
+NX = 2048
+NY = 2048
 DX = 50.0
 
 N_OUTER = 2000
