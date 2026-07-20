@@ -1,8 +1,8 @@
 """
 Backend-agnostic pool contracts.
 
-Defines the blueprint that every pool backend (Taichi fields, numpy arrays,
-future tree/sparse structures, ...) must implement. No allocation logic here
+Defines the blueprint that every pool backend (Taichi fields, ndarrays,
+quadrants, cupy, ...) must implement. No allocation logic here
 - this is the interface only.
 
 Author: B.G (07/2026)
