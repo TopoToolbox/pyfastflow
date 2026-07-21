@@ -1,5 +1,5 @@
 """
-Taichi backend implementation of Parameter and DeviceFunction.
+Taichi backend implementation of Parameter, DeviceFunction and Kernel.
 
 Author: B.G (07/2026)
 """
@@ -11,7 +11,34 @@ import numpy as np
 import taichi as ti
 
 from ..pool.base import Pool
-from .base import DeviceFunction, Parameter, resolve_binding
+from .base import DeviceFunction, Kernel, Parameter, resolve_binding
+
+
+def _specialize(template, bindings: dict[str, Any]):
+    """
+    Clone `template`'s code object with a globals dict where sentinels are
+    replaced by resolved bindings. Shared by DeviceFunction and Kernel -
+    they only differ in the ti.func/ti.kernel decorator applied on top.
+
+    Author: B.G (07/2026)
+    """
+    resolved = {name: resolve_binding(value) for name, value in bindings.items()}
+    source = getattr(template, "__wrapped__", template)
+    func_globals = dict(source.__globals__)
+    func_globals.update(resolved)
+
+    specialised = FunctionType(
+        source.__code__,
+        func_globals,
+        source.__name__,
+        source.__defaults__,
+        source.__closure__,
+    )
+    specialised.__kwdefaults__ = source.__kwdefaults__
+    specialised.__annotations__ = dict(source.__annotations__)
+    specialised.__doc__ = source.__doc__
+    specialised.__qualname__ = source.__qualname__
+    return specialised
 
 
 def _numpy_dtype(dtype):
@@ -111,24 +138,8 @@ class TaichiDeviceFunction(DeviceFunction):
         """
         Author: B.G (07/2026)
         """
-        resolved = {name: resolve_binding(value) for name, value in bindings.items()}
-        source = getattr(template, "__wrapped__", template)
-        func_globals = dict(source.__globals__)
-        func_globals.update(resolved)
-
-        specialised = FunctionType(
-            source.__code__,
-            func_globals,
-            source.__name__,
-            source.__defaults__,
-            source.__closure__,
-        )
-        specialised.__kwdefaults__ = source.__kwdefaults__
-        specialised.__annotations__ = dict(source.__annotations__)
-        specialised.__doc__ = source.__doc__
-        specialised.__qualname__ = source.__qualname__
-
-        return cls(source.__name__, ti.func(specialised))
+        specialised = _specialize(template, bindings)
+        return cls(specialised.__name__, ti.func(specialised))
 
     @property
     def compiled(self):
@@ -145,3 +156,43 @@ class TaichiDeviceFunction(DeviceFunction):
         Author: B.G (07/2026)
         """
         raise RuntimeError(f"DeviceFunction '{self.name}' is only callable from kernel/func scope, not host Python")
+
+
+class TaichiKernel(Kernel):
+    """
+    Kernel backed by a compiled ti.kernel.
+
+    The template's own signature should only declare data-field arguments
+    (e.g. `def template(out: ti.template()): ...`) - any params/helpers it
+    needs are resolved into the kernel body via `bindings`, so callers only
+    ever pass data fields at call time, never params/helpers.
+
+    Author: B.G (07/2026)
+    """
+
+    def __init__(self, name: str, compiled):
+        self.name = name
+        self._compiled = compiled
+
+    @classmethod
+    def compile(cls, template, *, bindings: dict[str, Any]) -> "TaichiKernel":
+        """
+        Author: B.G (07/2026)
+        """
+        specialised = _specialize(template, bindings)
+        return cls(specialised.__name__, ti.kernel(specialised))
+
+    @property
+    def compiled(self):
+        """
+        Author: B.G (07/2026)
+        """
+        return self._compiled
+
+    def __call__(self, *args, **kwargs):
+        """
+        Launches the compiled kernel. Args are data fields only.
+
+        Author: B.G (07/2026)
+        """
+        return self._compiled(*args, **kwargs)

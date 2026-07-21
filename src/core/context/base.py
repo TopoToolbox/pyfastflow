@@ -115,6 +115,19 @@ class DeviceFunction(Specializable):
     """
 
 
+class Kernel(Specializable):
+    """
+    Compiled entry point (e.g. a ti.kernel specialization).
+
+    Unlike DeviceFunction, __call__ is expected to work from host Python -
+    that's how the compute actually gets launched. Its template's own
+    parameters are data fields only; params/helpers arrive via bindings
+    and are resolved into the kernel body, not passed at call time.
+
+    Author: B.G (07/2026)
+    """
+
+
 def resolve_binding(value):
     """
     Unwrap a Parameter/Specializable to its backend-workable object.
