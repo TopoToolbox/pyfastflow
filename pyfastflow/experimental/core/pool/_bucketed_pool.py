@@ -1,24 +1,26 @@
 """
-Taichi backend implementation of Pool.
+Shared bucketed Pool implementation, parameterized by a DataHandle subclass.
 
 Author: B.G (07/2026)
 """
 
-from typing import Any
+from typing import Any, ClassVar
 
 from .base import DataHandle, Pool
-from .taichi_handle import TaichiDataHandle
 
 
-class TaichiPool(Pool):
+class BucketedPool(Pool):
     """
-    Pool manager for TaichiDataHandle, bucketed by (dtype, shape).
+    Pool manager bucketed by (dtype, shape). Subclasses only pin
+    `_handle_cls` to the DataHandle implementation they allocate.
 
     Author: B.G (07/2026)
     """
 
+    _handle_cls: ClassVar[type]
+
     def __init__(self):
-        self._buckets: dict[tuple[Any, tuple[int, ...]], list[TaichiDataHandle]] = {}
+        self._buckets: dict[tuple[Any, tuple[int, ...]], list[DataHandle]] = {}
 
     def get_data(self, dtype, shape) -> DataHandle:
         key = (dtype, tuple(shape))
@@ -27,7 +29,7 @@ class TaichiPool(Pool):
             if not handle.in_use:
                 handle.acquire()
                 return handle
-        handle = TaichiDataHandle(dtype, key[1])
+        handle = self._handle_cls(dtype, key[1])
         handle.acquire()
         bucket.append(handle)
         return handle
