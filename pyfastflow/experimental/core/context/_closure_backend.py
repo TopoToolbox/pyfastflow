@@ -4,7 +4,7 @@ Taichi and Quadrants.
 
 Specialization works by rebuilding the template function around a globals dict
 that carries the bound objects, so a name like `phys` in the template body
-resolves to the bound ParamBag when the backend traces it. The rebuilt function
+resolves to the bound Bag when the backend traces it. The rebuilt function
 is then decorated with ti.func/qd.func or ti.kernel/qd.kernel.
 
 The two backends can share all of this because the pieces used here - func,

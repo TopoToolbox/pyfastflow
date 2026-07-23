@@ -31,9 +31,9 @@ DeviceFunction  A compiled device-side helper: a small routine callable only
                 from other device code (ti.func, qd.func, CUDA __device__).
 Kernel          A compiled entry point - what the host launches (ti.kernel,
                 qd.kernel, CUDA __global__).
-Bag             A named collection of Parameters (ParamBag) or DeviceFunctions
-                (HelperBag), so a group travels as one object and is read
-                in-kernel by dotted path: phys.dx.get(i).
+Bag             A named collection of any of the above, mixed freely, so a
+                group travels as one object and is reached in-kernel by dotted
+                path: phys.dx.get(i), ops.neighbour(i).
 
 A "context" is any concrete class - GridContext, FlowContext, ... - that groups
 Parameters and registers DeviceFunctions. There is deliberately no base Context
@@ -45,8 +45,8 @@ Compiling something
 Templates are written once, generically, and specialized by a builder:
 
     kernel = (TaichiKernelBuilder()
-              .bind("phys", phys)        # a ParamBag
-              .bind("ops", ops)          # a HelperBag
+              .bind("phys", phys)        # a Bag of parameters
+              .bind("ops", ops)          # a Bag of device helpers
               .ingest(update_height)     # the template
               .compile())
     kernel(h_new, h_old)                 # bulk data passed at call time
@@ -467,18 +467,22 @@ class Bag:
     """
     A named collection that can be handed to a builder in one go.
 
-    Two ways to use one: bind it whole - bind("grid", bag) - and reach its
-    members by dotted path in the template body, or bind_bag(bag) to merge
-    every member in at top level under its own name.
+    A bag holds whatever a template might want to reach under one name -
+    Parameters, DeviceFunctions, further Bags, plain python values - mixed
+    freely. Nothing dispatches on what a bag contains: each member is resolved
+    on its own type when the template is specialized, so a bag grouping a
+    quantity with the helpers that act on it works exactly like one holding
+    parameters alone.
 
-    A subclass sets `_member_type` to restrict what it will hold. Bags are
-    always accepted whatever that restriction says, since bags nest: a ParamBag
-    may legitimately group its parameters into sub-bags.
+    Two ways to use one: bind it whole - bind("grid", bag) - and reach its
+    members by dotted path in the template body (grid.nx.get(i), grid.nbr(i)),
+    or bind_bag(bag) to merge every member in at top level under its own name.
+
+    Build it, grow it, bind it. There is no removal or reassignment: to change
+    the contents, build another bag.
 
     Author: B.G (07/2026)
     """
-
-    _member_type: ClassVar[type | None] = None
 
     def __init__(self, items: dict[str, Any] | None = None):
         self._items: dict[str, Any] = {}
@@ -487,19 +491,12 @@ class Bag:
 
     def add(self, name: str, item: Any) -> None:
         """
-        Register `item` under `name`. Raises if `name` is already registered
-        or if `item` doesn't match this bag's `_member_type` (a nested Bag is
-        always accepted).
+        Register `item` under `name`. Raises if `name` is already taken.
 
         Author: B.G (07/2026)
         """
         if name in self._items:
             raise KeyError(f"'{name}' is already registered in this bag")
-        if self._member_type is not None and not isinstance(item, (self._member_type, Bag)):
-            raise TypeError(
-                f"{type(self).__name__}: member '{name}' must be a {self._member_type.__name__} "
-                f"(or a Bag), got {type(item).__name__}"
-            )
         self._items[name] = item
 
     def __getattr__(self, name: str) -> Any:
@@ -519,23 +516,3 @@ class Bag:
 
     def items(self):
         return self._items.items()
-
-
-class ParamBag(Bag):
-    """
-    Named collection of Parameter objects.
-
-    Author: B.G (07/2026)
-    """
-
-    _member_type = Parameter
-
-
-class HelperBag(Bag):
-    """
-    Named collection of DeviceFunction objects.
-
-    Author: B.G (07/2026)
-    """
-
-    _member_type = DeviceFunction
