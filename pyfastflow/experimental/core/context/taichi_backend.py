@@ -9,9 +9,7 @@ import taichi as ti
 
 from ._closure_backend import (
     ClosureBackendParameter,
-    ClosureDeviceFunction,
     ClosureDeviceFunctionBuilder,
-    ClosureKernel,
     ClosureKernelBuilder,
 )
 
@@ -26,25 +24,9 @@ class TaichiParameter(ClosureBackendParameter):
     _backend = ti
 
 
-class TaichiDeviceFunction(ClosureDeviceFunction):
-    """
-    DeviceFunction backed by a compiled ti.func. Built by TaichiDeviceFunctionBuilder.
-
-    Author: B.G (07/2026)
-    """
-
-
-class TaichiKernel(ClosureKernel):
-    """
-    Kernel backed by a compiled ti.kernel. Built by TaichiKernelBuilder.
-
-    Author: B.G (07/2026)
-    """
-
-
 class TaichiDeviceFunctionBuilder(ClosureDeviceFunctionBuilder):
     """
-    Builds a TaichiDeviceFunction: specialize the ingested def with bound
+    Builds a ClosureDeviceFunction: specialize the ingested def with bound
     globals, decorate with ti.func.
 
     Author: B.G (07/2026)
@@ -55,7 +37,7 @@ class TaichiDeviceFunctionBuilder(ClosureDeviceFunctionBuilder):
 
 class TaichiKernelBuilder(ClosureKernelBuilder):
     """
-    Builds a TaichiKernel: specialize the ingested def with bound globals,
+    Builds a ClosureKernel: specialize the ingested def with bound globals,
     decorate with ti.kernel.
 
     Author: B.G (07/2026)

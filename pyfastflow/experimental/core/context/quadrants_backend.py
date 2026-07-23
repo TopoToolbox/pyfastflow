@@ -17,9 +17,7 @@ import quadrants as qd
 
 from ._closure_backend import (
     ClosureBackendParameter,
-    ClosureDeviceFunction,
     ClosureDeviceFunctionBuilder,
-    ClosureKernel,
     ClosureKernelBuilder,
 )
 
@@ -34,34 +32,12 @@ class QuadrantsParameter(ClosureBackendParameter):
     _backend = qd
 
 
-class QuadrantsDeviceFunction(ClosureDeviceFunction):
-    """
-    DeviceFunction backed by a compiled qd.func. Built by QuadrantsDeviceFunctionBuilder.
-
-    Only field-backed Parameters/DeviceFunctions can be resolved into a
-    template this way - Quadrants rejects ndarrays referenced as globals.
-
-    Author: B.G (07/2026)
-    """
-
-
-class QuadrantsKernel(ClosureKernel):
-    """
-    Kernel backed by a compiled qd.kernel. Built by QuadrantsKernelBuilder.
-
-    The template's own data-field arguments should be typed `qd.Tensor` - a
-    single qd.Tensor-typed template accepts either a field- or ndarray-backed
-    value at call time. Params/helpers arrive via bind() and are resolved into
-    the kernel body; callers pass data fields only.
-
-    Author: B.G (07/2026)
-    """
-
-
 class QuadrantsDeviceFunctionBuilder(ClosureDeviceFunctionBuilder):
     """
-    Builds a QuadrantsDeviceFunction: specialize the ingested def with bound
-    globals, decorate with qd.func.
+    Builds a ClosureDeviceFunction: specialize the ingested def with bound
+    globals, decorate with qd.func. Only field-backed Parameters/DeviceFunctions
+    can be resolved into a template this way - Quadrants rejects ndarrays
+    referenced as globals.
 
     Author: B.G (07/2026)
     """
@@ -71,8 +47,10 @@ class QuadrantsDeviceFunctionBuilder(ClosureDeviceFunctionBuilder):
 
 class QuadrantsKernelBuilder(ClosureKernelBuilder):
     """
-    Builds a QuadrantsKernel: specialize the ingested def with bound globals,
-    decorate with qd.kernel.
+    Builds a ClosureKernel: specialize the ingested def with bound globals,
+    decorate with qd.kernel. The template's own data-field arguments should be
+    typed `qd.Tensor` - a single qd.Tensor-typed template accepts either a
+    field- or ndarray-backed value at call time.
 
     Author: B.G (07/2026)
     """
