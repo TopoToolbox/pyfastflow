@@ -1,7 +1,19 @@
 """
-Shared machinery for backends that compile python function templates by
-patching globals on a cloned code object (Taichi, Quadrants). Not used by
-backends without that mechanism (e.g. the cupy/RawKernel backend).
+Machinery shared by the two backends whose templates are python functions:
+Taichi and Quadrants.
+
+Specialization works by rebuilding the template function around a globals dict
+that carries the bound objects, so a name like `phys` in the template body
+resolves to the bound ParamBag when the backend traces it. The rebuilt function
+is then decorated with ti.func/qd.func or ti.kernel/qd.kernel.
+
+The two backends can share all of this because the pieces used here - func,
+kernel, static, u8, i32, i64 - carry the same names and the same behaviour in
+both modules. A backend subclass therefore only pins `_backend` to the ti or qd
+module; nothing else varies.
+
+cupy does not appear here: CUDA source text has no globals to patch, and that
+backend substitutes into the source directly instead.
 
 Author: B.G (07/2026)
 """
@@ -26,8 +38,13 @@ from .base import (
 
 def specialize_closure(template, bindings: dict[str, Any]) -> FunctionType:
     """
-    Clone `template`'s code object with a globals dict where sentinels are
-    replaced by resolved bindings.
+    Rebuild `template` as a new function whose globals carry the resolved
+    bindings, leaving the original untouched.
+
+    The code object is reused as-is; only the globals differ, which is what
+    makes a name in the template body resolve to a bound object. Defaults,
+    annotations and the rest are copied over so the result still introspects
+    like the template it came from.
 
     Author: B.G (07/2026)
     """
@@ -52,11 +69,12 @@ def specialize_closure(template, bindings: dict[str, Any]) -> FunctionType:
 
 class ClosureParamDeviceView:
     """
-    Device-facing view of a Parameter for closure backends: `.get` and (unless
-    const) `.set_node` are the raw compiled device funcs (ti.func / qd.func),
-    so a template body traces `p.get(i)` / `p.set_node(i, v)` as plain
-    attribute lookups + func calls, uniform across modes. Const params expose
-    no `.set_node` (read-only), so touching it in a kernel raises at trace time.
+    What a Parameter looks like from inside device code.
+
+    `.get` and `.set_node` are compiled device funcs, so a template body reads
+    `p.get(i)` and writes `p.set_node(i, v)` the same way whatever the
+    parameter's mode. A const parameter is read-only and carries no `.set_node`
+    at all, which turns a write to one into a trace-time error.
 
     Author: B.G (07/2026)
     """
@@ -70,12 +88,11 @@ class ClosureParamDeviceView:
 
 class ClosureBackendParameter(Parameter):
     """
-    Parameter backed by a const value or a pooled DataHandle, for backends
-    sharing the closure-specialization mechanism (Taichi, Quadrants).
-    Subclasses pin `_backend` (the `ti`/`qd` module) - `_numpy_dtype` and
-    `_build_device_view` are shared here since `ti.u8/i32/i64`,
-    `ti.func`/`ti.static` and their `qd.` equivalents are identical in name
-    and behaviour across both modules.
+    Parameter backed by a const python value or by pooled device storage.
+
+    Concrete backends subclass this and pin `_backend` to their module; the
+    dtype mapping and the device view are written once here against the names
+    both modules share.
 
     Author: B.G (07/2026)
     """
@@ -85,10 +102,12 @@ class ClosureBackendParameter(Parameter):
 
     def __init__(self, name: str, *, dtype, mode: str, value, pool, n_flat: int | None = None, solo: bool = False):
         """
-        Declare and initialize one parameter. "scalar"/"field" modes allocate
-        pooled storage immediately via `pool`; "const" stays a plain python
-        value. solo=True (const only) lets the parameter be read bare in a
-        template body (no .get()) - it resolves to a compile-time literal.
+        Declare one parameter and give it its initial value.
+
+        scalar and field take pooled storage straight away; const stays a plain
+        python value. solo=True, available on const only, lets the parameter be
+        read bare in a template body - written `p` rather than `p.get(i)` -
+        because it resolves to a compile-time literal.
 
         Author: B.G (07/2026)
         """
@@ -183,14 +202,15 @@ class ClosureBackendParameter(Parameter):
 
     def device_view(self) -> ClosureParamDeviceView:
         """
-        Cached uniform device accessor for this parameter. Built once via
-        `_build_device_view` (backend-specific) and memoized on the instance:
-        rebuilding it per compile is pointless python work at O(params x
-        kernels) since the ti.func/qd.func objects are identical every time.
-        Invalidated (not refreshed) by set() on const mode and by destroy(),
-        the two places the baked literal/handle a cached view depends on can
-        change; scalar/field set() writes through the handle a cached view
-        already points at, so no invalidation is needed there.
+        This parameter's device accessor, built on first use and kept.
+
+        The compiled funcs come out identical every time, so one view serves
+        every kernel that binds this parameter. Two things can invalidate it -
+        set() on a const mode, which changes the literal baked into the getter,
+        and destroy(), which releases the storage it reads. Both drop the view
+        so the next caller rebuilds; neither reaches kernels compiled earlier
+        (see base.py, "Lifetime of a compiled object"). A scalar or field set()
+        needs no invalidation, writing through the very storage the view reads.
 
         Author: B.G (07/2026)
         """
@@ -200,19 +220,13 @@ class ClosureBackendParameter(Parameter):
 
     def _build_device_view(self) -> ClosureParamDeviceView:
         """
-        Compile this parameter's uniform device accessors as backend funcs
-        (ti.func / qd.func).
+        Compile this parameter's device accessors as backend funcs.
 
-        get(node) dispatches on mode at trace time via `_backend.static`, so
-        only the taken arm compiles: const returns a baked literal, scalar
-        reads HANDLE[None], field reads HANDLE[node]. set_node(node, val) is
-        built only for scalar/field (const is read-only, exposes no setter).
-        MODE/VALUE/HANDLE are plain python values, not backend values.
-
-        Const getters bake VALUE as a compile-time literal: a later .set()
-        needs the view (and anything binding it) rebuilt to take effect.
-
-        Called at most once per instance, memoized by device_view().
+        get(node) branches on the mode through `_backend.static`, which
+        resolves at trace time, so only one arm survives into the generated
+        code: a baked literal for const, HANDLE[None] for scalar, HANDLE[node]
+        for field. set_node is built for scalar and field only. MODE, VALUE and
+        HANDLE are ordinary python values spliced in as globals.
 
         Author: B.G (07/2026)
         """
@@ -251,8 +265,7 @@ class ClosureBackendParameter(Parameter):
 
 class ClosureDeviceFunction(DeviceFunction):
     """
-    DeviceFunction backed by a compiled closure-backend func (ti.func /
-    qd.func). Built by ClosureDeviceFunctionBuilder subclasses.
+    A device helper compiled to a ti.func or qd.func.
 
     Author: B.G (07/2026)
     """
@@ -282,11 +295,11 @@ class ClosureDeviceFunction(DeviceFunction):
 
 class ClosureKernel(Kernel):
     """
-    Kernel backed by a compiled closure-backend kernel (ti.kernel /
-    qd.kernel). Built by ClosureKernelBuilder subclasses.
+    A launchable kernel compiled to a ti.kernel or qd.kernel.
 
-    The template's own signature declares data-field arguments only, e.g.
-    `def template(out: ti.template()): ...` - see base.py's module docstring.
+    Its call signature is the template's own, which declares data arguments
+    only - `def template(out: ti.template()): ...` - since bound objects reach
+    the body through globals instead. See base.py.
 
     Author: B.G (07/2026)
     """
@@ -315,10 +328,12 @@ class ClosureKernel(Kernel):
 
 def _check_const_only(bindings: dict[str, Any]) -> None:
     """
-    Enforce the framework rule (base.py module docstring): a device helper
-    only ever binds const-mode Parameters - any data it needs is passed to it
-    as an explicit argument by the calling kernel instead. Recurses into
-    bound Bags so a scalar/field param nested inside one is also caught.
+    Raise unless every Parameter reachable in `bindings` is const mode.
+
+    This enforces the rule in base.py that a device helper binds const
+    parameters only, passing any data through explicit arguments instead.
+    Bound Bags are searched too, so a scalar or field parameter tucked inside
+    one does not slip past.
 
     Author: B.G (07/2026)
     """
@@ -336,8 +351,7 @@ def _check_const_only(bindings: dict[str, Any]) -> None:
 
 class ClosureDeviceFunctionBuilder(DeviceFunctionBuilder):
     """
-    Builds a ClosureDeviceFunction: specialize the ingested def with bound
-    globals, decorate with `_backend.func`. Subclasses pin `_backend`.
+    Compiles an ingested def into a device helper. Subclasses pin `_backend`.
 
     Author: B.G (07/2026)
     """
@@ -346,8 +360,8 @@ class ClosureDeviceFunctionBuilder(DeviceFunctionBuilder):
 
     def compile(self) -> ClosureDeviceFunction:
         """
-        Check the const-only rule, inject the referenced bindings into the
-        template's globals, decorate the result as a device func.
+        Check the const-only rule, splice the referenced bindings into the
+        template's globals, and compile the result as a device func.
 
         Author: B.G (07/2026)
         """
@@ -360,8 +374,8 @@ class ClosureDeviceFunctionBuilder(DeviceFunctionBuilder):
 
 class ClosureKernelBuilder(KernelBuilder):
     """
-    Builds a ClosureKernel: specialize the ingested def with bound globals,
-    decorate with `_backend.kernel`. Subclasses pin `_backend`.
+    Compiles an ingested def into a launchable kernel. Subclasses pin
+    `_backend`.
 
     Author: B.G (07/2026)
     """
@@ -370,8 +384,8 @@ class ClosureKernelBuilder(KernelBuilder):
 
     def compile(self) -> ClosureKernel:
         """
-        Inject the referenced bindings into the template's globals and
-        decorate the result as a launchable kernel.
+        Splice the referenced bindings into the template's globals and compile
+        the result as a launchable kernel.
 
         Author: B.G (07/2026)
         """

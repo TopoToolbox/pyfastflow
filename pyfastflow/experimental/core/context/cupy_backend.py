@@ -1,34 +1,34 @@
 """
-Cupy backend implementation of Parameter, DeviceFunction, Kernel and their
-builders.
+cupy implementations of Parameter, DeviceFunction, Kernel and their builders.
 
-Templates are raw CUDA source text, not python callables - there is no
-closure mechanism for cp.RawKernel. Params/helpers are referenced inside the
-source through `$...$` spans holding a dotted path, uniform with the closure
-backends' in-kernel API:
+Here a template is CUDA source text rather than a python function, since
+cp.RawKernel compiles source and there is no function whose globals could be
+patched. Bound objects are written into that source as `$...$` spans holding a
+dotted path, which keeps the in-kernel spelling the same as on the other
+backends:
 
-    $p.get(i)$        -> read param p at flat index i
-    $p.set_node(i,v)$ -> write param p at flat index i (device-side)
-    $grid.nx.get(i)$  -> bag member access (dotted head)
-    $helper(a, b)$    -> call a bound CupyDeviceFunction
+    $p.get(i)$        read parameter p at flat index i
+    $p.set_node(i,v)$ write parameter p at flat index i
+    $grid.nx.get(i)$  reach a bag member
+    $helper(a, b)$    call a bound device helper
 
-The parser expands each span AND, for scalar/field params, auto-generates the
-matching pointer argument into the __global__ signature plus the launch-time
-array - the source never hand-declares those. Expansion by mode:
-  - const  -> a CUDA literal (and a `#define NAME literal` for bare use of a
-              top-level const param outside any span)
-  - scalar -> NAME[0]  (a 0-d device pointer)
-  - field  -> NAME[i]
-set_node on a const is a compile error; a param read only -> `const T*`, a
-param written anywhere in the kernel -> non-const `T*`.
+Compiling substitutes each span according to the parameter's mode - a CUDA
+literal for const, NAME[0] for scalar, NAME[i] for field - and, for scalar and
+field, also generates the pointer argument that expansion implies. Those
+arguments are appended to the __global__ signature and their arrays supplied at
+launch, so a template never declares them by hand. A parameter only read is
+declared `const T*`; one written anywhere in the kernel is declared `T*`.
+Writing to a const parameter is an error.
 
-Device functions may only reference const params / other device functions
-inside spans - a spliced __device__ function has no way to receive an extra
-pointer argument. This isn't a cupy quirk: it's the backend-agnostic rule
-(see base.py's module docstring) that a device helper only ever binds const
-params, with any data it needs passed in as an explicit argument by the
-calling kernel - the closure backends (Taichi, Quadrants) enforce the same
-rule in ClosureDeviceFunctionBuilder.compile().
+A const parameter can also be used bare, outside any span, in which case it
+arrives as a `#define`. Only names the source actually mentions are defined,
+which keeps macros for common identifiers - N, DIM, EPS, min - from silently
+rewriting unrelated code in the translation unit.
+
+Spans inside a device function may only reach const parameters and other
+device helpers. That is the framework rule from base.py rather than anything
+specific to cupy: a helper is spliced into its caller and cannot take on a
+pointer argument of its own.
 
 Author: B.G (07/2026)
 """
@@ -130,9 +130,13 @@ def _walk(path: list[str], bindings: dict[str, Any]):
 
 class _SpanParser:
     """
-    Expands `$...$` spans in a CUDA template body, accumulating the pointer
-    params and helper sources they imply. allow_arrays=False (device
-    functions) rejects scalar/field params and set_node.
+    Expands the `$...$` spans in a CUDA template body.
+
+    Expansion has side effects the builder needs afterwards: `ptr_params`
+    collects the pointer arguments the spans implied, and `helper_srcs` the
+    source of every device helper they called. Set allow_arrays=False when
+    parsing a device function, which may not reach scalar or field parameters
+    and so has no use for either.
 
     Author: B.G (07/2026)
     """
@@ -205,13 +209,14 @@ class _SpanParser:
 
 def _const_defines(bindings: dict[str, Any], body: str) -> list[str]:
     """
-    `#define NAME literal` for each top-level const Parameter whose identifier
-    actually appears (word-boundary match) in `body` - `body` must be the
-    already span-expanded text, so a span like `$phys.dx.get(0)$` has already
-    become a numeric literal and correctly does not count as a bare use of a
-    top-level const name. Skipping unused names avoids pasting unhygienic
-    macros (a const named N, I, DIM, EPS, min, ...) into the translation unit
-    where they'd silently rewrite unrelated identifiers.
+    A `#define NAME literal` for each top-level const Parameter whose name
+    appears in `body`, matched on word boundaries.
+
+    Pass the span-expanded text, not the raw template: by then a span such as
+    `$phys.dx.get(0)$` is a numeric literal and no longer reads as a bare
+    mention of a const name. Names the source never mentions
+    are left undefined, keeping macros for identifiers like N, DIM, EPS or min
+    out of the translation unit, where they would rewrite unrelated code.
 
     Author: B.G (07/2026)
     """
@@ -248,8 +253,9 @@ class CupyParameter(Parameter):
     """
     Parameter backed by a const python value or a pooled CupyDataHandle.
 
-    Cupy dtypes are numpy dtypes already, so no dtype-mapping hook is needed.
-    Resolved into templates by the `$...$` parser (not device_view).
+    dtypes are numpy dtypes throughout, so they need no translation. There is
+    no device_view() either: a parameter reaches device code when the span
+    parser substitutes it into the source.
 
     Author: B.G (07/2026)
     """
@@ -337,11 +343,11 @@ class CupyParameter(Parameter):
 
 class CupyDeviceFunction(DeviceFunction):
     """
-    DeviceFunction backed by a CUDA `__device__` function's source text.
+    A device helper, held as CUDA `__device__` source text.
 
-    There's no separately-compiled device function in the RawKernel model -
-    `.compiled` returns source, spliced into whatever kernel/device function
-    binds it. Never callable from host Python.
+    Nothing is compiled at this stage: RawKernel compiles whole translation
+    units, so `.compiled` hands back source, and the helper is compiled as part
+    of each kernel that splices it in.
 
     Author: B.G (07/2026)
     """
@@ -376,13 +382,15 @@ class CupyDeviceFunction(DeviceFunction):
 
 class CupyKernel(Kernel):
     """
-    Kernel backed by a compiled cp.RawKernel.
+    A launchable kernel, backed by a compiled cp.RawKernel.
 
-    __call__ requires explicit grid/block launch dims - cp.RawKernel has no
-    auto-ranging. Call-time positional args are the kernel's own data-field
-    arguments; the parser-generated pointer arrays are appended after them.
+    Launch dimensions are explicit: RawKernel has nothing like Taichi's
+    auto-ranging, so __call__ takes grid and block. The positional arguments
+    are the template's own data arguments, and the arrays behind the generated
+    pointer parameters follow them.
 
-    compile() caches the RawKernel by final spliced source text.
+    Compiled kernels are cached on the class by final source text, which is
+    what the whole specialization reduces to and therefore a sound key.
 
     Author: B.G (07/2026)
     """

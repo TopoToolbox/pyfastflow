@@ -1,46 +1,78 @@
 """
-Backend-agnostic context building blocks.
+Backend-agnostic building blocks for describing GPU work once and compiling it
+against Taichi, Quadrants or cupy (or any future one).
 
-No "Context" class here on purpose: a context is just whatever concrete class
-(GridContext, FlowContext, ...) groups a set of Parameters and registers
-DeviceFunctions. Cross-context references are plain explicit bindings passed
-at bind() time, not a stored connection registry.
+Jargon
+----------
+Parameter       One named, typed value. Its `mode` says where the value lives:
+                "const" (compile-time constant, non modifiable mid-run),
+                "scalar" (single value modifiable) or "field" (a device array).
+DeviceFunction  A compiled device-side helper: a small routine callable only
+                from other device code (ti.func, qd.func, CUDA __device__).
+Kernel          A compiled entry point - what the host launches (ti.kernel,
+                qd.kernel, CUDA __global__).
+Bag             A named collection of Parameters (ParamBag) or DeviceFunctions
+                (HelperBag), so a group travels as one object and is read
+                in-kernel by dotted path: phys.dx.get(i).
 
-Load-bearing rule: data flows at call time (a template's own explicit
-arguments); configuration flows at compile time (bind()ed Parameters/helpers/
-bags, resolved into the template body).
+A "context" is any concrete class - GridContext, FlowContext, ... - that groups
+Parameters and registers DeviceFunctions. There is deliberately no base Context
+class: a context needing another context's parameters binds them explicitly,
+rather than reaching through a registry of stored connections.
 
-A device helper (DeviceFunction) may only bind const-mode Parameters. Any
-data it needs (scalar/field buffers) is passed to it as an explicit argument
-by the calling kernel, not bound in - a device helper has no way to receive
-an extra pointer argument once spliced into a caller, so this holds across
-all three backends alike. Kernels are unrestricted: they may bind params of
-any mode.
+Compiling something
+-------------------
+Templates are written once, generically, and specialized by a builder:
 
-Staleness contract: compile() freezes its bindings. A const-mode Parameter is
-baked into the compiled body (as a literal when solo, as a device view holding
-a literal otherwise), and a scalar/field Parameter is baked as its DataHandle's
-backing storage. Nothing propagates a later change back into an already
-compiled Kernel/DeviceFunction:
+    kernel = (TaichiKernelBuilder()
+              .bind("phys", phys)        # a ParamBag
+              .bind("ops", ops)          # a HelperBag
+              .ingest(update_height)     # the template
+              .compile())
+    kernel(h_new, h_old)                 # bulk data passed at call time
 
-  - set() on a const param, and destroy() on any param, drop that param's
-    cached device_view so the *next* compile() sees the change. Kernels
-    compiled before it keep the old value - recompile them to pick it up.
-  - destroy() also returns the handle to the pool, which may hand the same
-    buffer to another parameter, while kernels compiled earlier still write
-    through it. Do not destroy() a parameter that any live kernel binds.
-  - set() on scalar/field writes through the handle a compiled kernel already
-    points at, so those stay live and need no recompile - that is the normal
-    way to feed changing data without recompiling.
+bind(name, obj) makes `obj` visible inside the template body under `name`.
+ingest() takes the template - a python def for Taichi/Quadrants, a CUDA source
+string for cupy. compile() returns a Kernel or DeviceFunction. Only the
+abstract DeviceFunctionBuilder / KernelBuilder live here; the concrete
+Taichi*, Quadrants* and Cupy* builders sit alongside this module.
 
-None of this is checked at runtime: it is a convention, not an enforcement.
+Data at call time, configuration at compile time
+------------------------------------------------
+Bound objects are injected into the template body and never appear in the call
+signature. A compiled Kernel takes exactly the arguments its template declares,
+and that is where bulk data travels - the buffers read and written each step.
+Everything that *describes* the problem rather than *being* it - grid spacing,
+timestep, gravity, which helper implements the neighbour lookup - is bound.
 
-The compile surface is a two-layer builder: an abstract DeviceFunctionBuilder /
-KernelBuilder here, backend variants (Taichi*/Quadrants*/Cupy*) elsewhere. A
-builder collects bind()ed dependencies + one ingest()ed template and produces a
-compiled DeviceFunction/Kernel. Bound Parameters/helpers/bags are injected into
-the template body (never passed at call time); only a template's own explicit
-data-field arguments are passed to the front callable.
+Reading a Parameter in device code is uniform across modes: p.get(node) to
+read, p.set_node(node, value) to write. A const Parameter declared solo=True
+is the exception: it resolves to a bare compile-time literal, read as `p` with
+no call.
+
+Device helpers bind const parameters only
+-----------------------------------------
+A DeviceFunction may only bind const-mode Parameters; any data it needs is
+passed to it as an explicit argument by the calling kernel. A helper is
+spliced into its caller and has no way to acquire a pointer argument of its
+own, so this holds on all three backends alike. It is checked at compile time.
+Kernels carry no such restriction and may bind any mode.
+
+Lifetime of a compiled object
+-----------------------------
+compile() freezes what it was given: const Parameters are baked in as literals,
+scalar and field Parameters as the storage behind their DataHandle. So:
+
+  - Writing to a scalar or field Parameter *is* visible to already-compiled
+    kernels, which hold that same storage. This is the normal way to feed
+    changing data.
+  - set() on a const Parameter is not. It drops the parameter's cached device
+    view so the next compile() picks the new value up, but kernels compiled
+    before it keep the old literal. Recompile them.
+  - destroy() returns storage to the pool, which may hand the same buffer out
+    again. Never destroy a Parameter that a live kernel still binds.
+
+None of this is enforced at runtime.
 
 Author: B.G (07/2026)
 """
@@ -59,14 +91,16 @@ class Parameter(ABC):
     """
     One named, typed value owned by a context.
 
-    REQUIRED_MODES is the baseline every backend must support; a backend
-    widens SUPPORTED_MODES to add more storage kinds. Enforced at subclass
-    definition time via __init_subclass__, not at instantiation.
+    `mode` decides where the value lives - "const" in the generated code,
+    "scalar" in a single device cell, "field" in a device array - and every
+    backend must offer all three (REQUIRED_MODES). A backend may widen
+    SUPPORTED_MODES with further storage kinds; the check runs when the
+    subclass is defined, so an incomplete backend fails at import.
 
-    Host surface: get() / set(value) / set_node(node, value). Device surface:
-    device_view(), returning a backend object whose .get(node) / .set_node(
-    node, val) are usable from inside device code - the uniform accessor that
-    lets one kernel read/write a Parameter identically no matter its mode.
+    Two surfaces. From the host: get(), set(value), set_node(node, value).
+    From device code: device_view(), which returns a backend object whose
+    .get(node) / .set_node(node, val) let a kernel read and write the
+    parameter identically whatever its mode.
 
     Author: B.G (07/2026)
     """
@@ -97,9 +131,9 @@ class Parameter(ABC):
     @abstractmethod
     def set(self, value) -> None:
         """
-        Update the whole parameter value in place, according to its mode.
-        On const mode this does not reach already-compiled kernels - see the
-        module docstring's staleness contract.
+        Update the whole parameter value in place, according to its mode. On
+        const mode this does not reach already-compiled kernels - see the
+        module docstring, "Lifetime of a compiled object".
 
         Author: B.G (07/2026)
         """
@@ -117,9 +151,10 @@ class Parameter(ABC):
 
     def device_view(self):
         """
-        Return a backend device-view object (get/set_node usable in device
-        code). Implemented per backend; closure backends compile ti/qd funcs,
-        cupy returns parser metadata.
+        An object whose .get(node) / .set_node(node, val) work inside device
+        code. Taichi and Quadrants compile one out of ti/qd funcs. cupy leaves
+        this unimplemented, having no use for it: its parser substitutes
+        parameters into the source directly.
 
         Author: B.G (07/2026)
         """
@@ -128,9 +163,9 @@ class Parameter(ABC):
     @abstractmethod
     def destroy(self) -> None:
         """
-        Release any backing storage owned by this parameter. Unsafe while any
-        compiled kernel still binds it - see the module docstring's staleness
-        contract.
+        Release any backing storage owned by this parameter. Unsafe while a
+        compiled kernel still binds it - see the module docstring, "Lifetime
+        of a compiled object".
 
         Author: B.G (07/2026)
         """
@@ -139,9 +174,12 @@ class Parameter(ABC):
 
 class Specializable(ABC):
     """
-    Shared call contract for DeviceFunction and Kernel, plus the hidden raw
-    material (source text, AST, dependency manifest) a later fusion/graph
-    compiler can reuse. Built by a *Builder, not by a classmethod.
+    Anything a builder can compile: DeviceFunction or Kernel.
+
+    Beyond the call contract, each instance keeps the raw material it was made
+    from - source text, AST, and a manifest of what it bound. Nothing in this
+    module reads those back; they are here so a higher layer (kernel fusion, a
+    graph compiler) can work from the originals instead of re-deriving them.
 
     Author: B.G (07/2026)
     """
@@ -181,9 +219,9 @@ class Kernel(Specializable):
     """
     Compiled entry point (e.g. a ti.kernel specialization).
 
-    Unlike DeviceFunction, __call__ works from host Python - that's how the
-    compute gets launched. Call-time arguments are data fields only, per the
-    module docstring's call-time/compile-time rule.
+    Unlike DeviceFunction, __call__ works from host Python - that is how
+    compute gets launched. Its arguments are the template's own declared data
+    arguments; see the module docstring on data at call time.
 
     Author: B.G (07/2026)
     """
@@ -191,13 +229,15 @@ class Kernel(Specializable):
 
 class _LazyBagView:
     """
-    Lazy stand-in for a Bag in a template body: `phys.g` resolves `g` only on
-    first attribute access (via resolve_binding), then caches it in the
-    instance dict so later lookups bypass __getattr__ entirely. Avoids
-    filter_bindings' top-level-only reach: binding one large bag no longer
-    eagerly resolves (and device_view()-compiles) every member, only the ones
-    a template actually touches. Nested Bag members resolve to another
-    _LazyBagView, so nesting stays lazy all the way down.
+    What a Bag looks like from inside a template body.
+
+    `phys.g` resolves member `g` on first access and caches the result in the
+    instance dict, so later lookups skip __getattr__ altogether. Resolving a
+    member is not free - for a Parameter it compiles a device view - and a
+    template usually touches only a few members of the bag it binds, so
+    resolution is deferred to the members actually named. Members that are
+    themselves Bags resolve to another _LazyBagView, keeping nested bags lazy
+    all the way down.
 
     Author: B.G (07/2026)
     """
@@ -217,15 +257,14 @@ class _LazyBagView:
 
 def resolve_binding(value):
     """
-    Unwrap a bound object to what a closure-backend template body should see.
+    Turn a bound object into what a template body should see in its place.
 
-    Parameter -> literal if solo (const), else device_view() (a .get/.set_node
-        carrier for uniform in-kernel access).
-    Specializable (DeviceFunction/Kernel) -> .compiled.
-    Bag -> a _LazyBagView resolving each member on first attribute access, so
-        dotted paths (grid.nx.get(i)) trace as plain attribute lookups without
-        forcing every other member in the bag to resolve too.
-    Anything else passes through unchanged.
+    Parameter      a bare literal when solo, otherwise device_view() - the
+                   carrier of .get / .set_node for in-kernel access.
+    Specializable  its .compiled backend callable or source.
+    Bag            a _LazyBagView, so a dotted path like grid.nx.get(i) traces
+                   as plain attribute lookups.
+    anything else  passed through untouched.
 
     Author: B.G (07/2026)
     """
@@ -244,19 +283,18 @@ def resolve_binding(value):
 @lru_cache(maxsize=256)
 def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
     """
-    Return (source_text, ast) for a template. A python def is introspected;
-    a raw string (CUDA source) is kept verbatim with no AST (not python).
+    Return (source_text, ast) for a template. A python def is introspected; a
+    raw string (CUDA source) is kept verbatim and has no AST.
 
-    Cached per template: every compile() asks twice (once to filter bindings,
-    once for attach_meta), and each miss costs an inspect.getsource + a parse.
-    The returned tree is therefore SHARED by every Specializable built from
-    that template - treat it as read-only.
+    Cached because every compile() asks twice - once to filter bindings, once
+    for attach_meta - and a miss costs an inspect.getsource plus a parse. The
+    tree handed back is therefore shared by every Specializable built from that
+    template: treat it as read-only.
 
-    Bounded on purpose: the key is the template object itself, so an unbounded
-    cache would pin every dynamically generated template (and every CUDA source
-    string) for the process lifetime. 256 is far above any realistic count of
-    distinct templates alive at once, and this is a pure derived-value cache -
-    an eviction only costs one re-parse.
+    The cache key is the template object itself, so the bound size matters -
+    unbounded, it would pin every dynamically generated template and every CUDA
+    source string for the life of the process. An eviction only costs one
+    re-parse.
 
     Author: B.G (07/2026)
     """
@@ -275,12 +313,14 @@ def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
 
 def _used_bindings(template, bindings: dict[str, Any]) -> dict[str, Any]:
     """
-    Subset of `bindings` whose key is actually referenced by `template`'s
-    body (by name - an attribute chain's root, e.g. `phys` in
-    `phys.g.get(0)`, is itself an `ast.Name`, so collecting every `ast.Name`
-    id in the tree is sufficient). Falls back to returning `bindings`
-    unchanged whenever the AST isn't available (non-python template, source
-    unavailable) - never silently drop a binding we cannot prove is unused.
+    The subset of `bindings` whose name appears in the template body.
+
+    Collecting every ast.Name id in the tree is enough: the root of an
+    attribute chain - `phys` in `phys.g.get(0)` - is itself an ast.Name.
+
+    With no AST to consult (a CUDA source string, or a def whose source cannot
+    be recovered) this returns `bindings` unchanged, rather than dropping a
+    binding it cannot prove is unused.
 
     Author: B.G (07/2026)
     """
@@ -293,11 +333,12 @@ def _used_bindings(template, bindings: dict[str, Any]) -> dict[str, Any]:
 
 def filter_bindings(template, bindings: dict[str, Any]) -> dict[str, Any]:
     """
-    Bindings the template actually references (see _used_bindings), plus one
-    warning per compile listing everything bound but never referenced - catches
-    typos in a large context. Backend-agnostic: the closure builders feed the
-    result to their specializer. No warning when the AST isn't available
-    (_used_bindings then returns `bindings` unchanged, so nothing looks unused).
+    The bindings a template actually references, ready to inject.
+
+    Anything bound but never referenced is reported in a single warning per
+    compile, which is what catches a misspelled bind() name in a context with
+    many parameters. Nothing is reported when there is no AST to check
+    against, since _used_bindings then treats every binding as used.
 
     Author: B.G (07/2026)
     """
@@ -314,8 +355,8 @@ def filter_bindings(template, bindings: dict[str, Any]) -> dict[str, Any]:
 
 def attach_meta(obj: Specializable, template, bindings: dict[str, Any]) -> None:
     """
-    Stash hidden raw material on a freshly built Specializable for later reuse
-    by a higher-level compiler (kernel fusion / graph building).
+    Record on a freshly built Specializable what it was made from: its source,
+    its AST, and the type name of each thing it bound. See Specializable.
 
     Author: B.G (07/2026)
     """
@@ -325,11 +366,16 @@ def attach_meta(obj: Specializable, template, bindings: dict[str, Any]) -> None:
 
 class CompileBuilder(ABC):
     """
-    Two-layer compile surface: collect bind()ed dependencies + one ingest()ed
-    template, then compile() to a backend Specializable. bind() detects the
-    kind of each object at resolution time (Parameter / DeviceFunction / Bag /
-    handle / plain value); backends implement compile() (and may override
-    ingest()) their own way.
+    Collects dependencies and a template, and compiles them into one
+    Specializable.
+
+    A builder is used once, as a chain: any number of bind() calls, one
+    ingest(), then compile(). Bound objects are not inspected as they arrive -
+    what each one is (Parameter, DeviceFunction, Bag, handle, plain value) is
+    worked out when the template is specialized, so bind() accepts anything.
+
+    Everything here is backend-independent. A backend supplies compile(), and
+    may override ingest() if its templates need different handling.
 
     Author: B.G (07/2026)
     """
@@ -399,12 +445,15 @@ class KernelBuilder(CompileBuilder):
 
 class Bag:
     """
-    Simple named collection, mergeable into a builder via bind_bag() or bound
-    whole (bind('grid', bag)) for dotted-path access in the template body.
+    A named collection that can be handed to a builder in one go.
 
-    `_member_type` (None on the base class) restricts what a subclass's
-    members may be; a nested Bag is always accepted regardless, since bags
-    nest (a ParamBag may legitimately contain another bag of params).
+    Two ways to use one: bind it whole - bind("grid", bag) - and reach its
+    members by dotted path in the template body, or bind_bag(bag) to merge
+    every member in at top level under its own name.
+
+    A subclass sets `_member_type` to restrict what it will hold. Bags are
+    always accepted whatever that restriction says, since bags nest: a ParamBag
+    may legitimately group its parameters into sub-bags.
 
     Author: B.G (07/2026)
     """
