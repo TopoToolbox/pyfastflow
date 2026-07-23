@@ -17,6 +17,24 @@ an extra pointer argument once spliced into a caller, so this holds across
 all three backends alike. Kernels are unrestricted: they may bind params of
 any mode.
 
+Staleness contract: compile() freezes its bindings. A const-mode Parameter is
+baked into the compiled body (as a literal when solo, as a device view holding
+a literal otherwise), and a scalar/field Parameter is baked as its DataHandle's
+backing storage. Nothing propagates a later change back into an already
+compiled Kernel/DeviceFunction:
+
+  - set() on a const param, and destroy() on any param, drop that param's
+    cached device_view so the *next* compile() sees the change. Kernels
+    compiled before it keep the old value - recompile them to pick it up.
+  - destroy() also returns the handle to the pool, which may hand the same
+    buffer to another parameter, while kernels compiled earlier still write
+    through it. Do not destroy() a parameter that any live kernel binds.
+  - set() on scalar/field writes through the handle a compiled kernel already
+    points at, so those stay live and need no recompile - that is the normal
+    way to feed changing data without recompiling.
+
+None of this is checked at runtime: it is a convention, not an enforcement.
+
 The compile surface is a two-layer builder: an abstract DeviceFunctionBuilder /
 KernelBuilder here, backend variants (Taichi*/Quadrants*/Cupy*) elsewhere. A
 builder collects bind()ed dependencies + one ingest()ed template and produces a
@@ -80,6 +98,8 @@ class Parameter(ABC):
     def set(self, value) -> None:
         """
         Update the whole parameter value in place, according to its mode.
+        On const mode this does not reach already-compiled kernels - see the
+        module docstring's staleness contract.
 
         Author: B.G (07/2026)
         """
@@ -108,7 +128,9 @@ class Parameter(ABC):
     @abstractmethod
     def destroy(self) -> None:
         """
-        Release any backing storage owned by this parameter.
+        Release any backing storage owned by this parameter. Unsafe while any
+        compiled kernel still binds it - see the module docstring's staleness
+        contract.
 
         Author: B.G (07/2026)
         """
@@ -219,7 +241,7 @@ def resolve_binding(value):
     return value
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=256)
 def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
     """
     Return (source_text, ast) for a template. A python def is introspected;
@@ -229,6 +251,12 @@ def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
     once for attach_meta), and each miss costs an inspect.getsource + a parse.
     The returned tree is therefore SHARED by every Specializable built from
     that template - treat it as read-only.
+
+    Bounded on purpose: the key is the template object itself, so an unbounded
+    cache would pin every dynamically generated template (and every CUDA source
+    string) for the process lifetime. 256 is far above any realistic count of
+    distinct templates alive at once, and this is a pure derived-value cache -
+    an eviction only costs one re-parse.
 
     Author: B.G (07/2026)
     """
