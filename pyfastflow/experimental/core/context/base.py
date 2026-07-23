@@ -2,11 +2,31 @@
 Backend-agnostic building blocks for describing GPU work once and compiling it
 against Taichi, Quadrants or cupy (or any future one).
 
+What this is for
+----------------
+A physics model rarely needs a new numerical scheme just because one of its
+parameters changed shape. Take heat diffusion: the update is identical whether
+the diffusion coefficient K is a spatially variable field, a single value the
+host retunes between steps, or a constant fixed for the whole run. That choice
+matters enormously on a GPU - a compile-time constant costs no memory traffic
+and can be folded into the generated code, a field costs a fetch per node - but
+it does not change the maths. Boundary conditions and stencils behave the same
+way: making a grid periodic alters the neighbour logic, not the scheme built on
+top of it.
+
+Writing one kernel per combination is the obvious way to handle this, and it
+becomes unmanageable fast. So instead a template reads a Parameter the same way
+whatever its mode, and calls a neighbour helper without knowing which topology
+implements it. Which mode, and which helper, is settled at compile time - where
+it can still turn into a literal or a specialised routine - and the kernel code
+never changes.
+
 Jargon
 ----------
 Parameter       One named, typed value. Its `mode` says where the value lives:
-                "const" (compile-time constant, non modifiable mid-run),
-                "scalar" (single value modifiable) or "field" (a device array).
+                "const" (a compile-time constant, not modifiable mid-run),
+                "scalar" (a single value, modifiable) or "field" (a device
+                array, one value per node).
 DeviceFunction  A compiled device-side helper: a small routine callable only
                 from other device code (ti.func, qd.func, CUDA __device__).
 Kernel          A compiled entry point - what the host launches (ti.kernel,
