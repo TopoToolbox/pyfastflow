@@ -6,6 +6,17 @@ No "Context" class here on purpose: a context is just whatever concrete class
 DeviceFunctions. Cross-context references are plain explicit bindings passed
 at bind() time, not a stored connection registry.
 
+Load-bearing rule: data flows at call time (a template's own explicit
+arguments); configuration flows at compile time (bind()ed Parameters/helpers/
+bags, resolved into the template body).
+
+A device helper (DeviceFunction) may only bind const-mode Parameters. Any
+data it needs (scalar/field buffers) is passed to it as an explicit argument
+by the calling kernel, not bound in - a device helper has no way to receive
+an extra pointer argument once spliced into a caller, so this holds across
+all three backends alike. Kernels are unrestricted: they may bind params of
+any mode.
+
 The compile surface is a two-layer builder: an abstract DeviceFunctionBuilder /
 KernelBuilder here, backend variants (Taichi*/Quadrants*/Cupy*) elsewhere. A
 builder collects bind()ed dependencies + one ingest()ed template and produces a
@@ -18,8 +29,9 @@ Author: B.G (07/2026)
 
 import ast
 import inspect
+import warnings
 from abc import ABC, abstractmethod
-from types import SimpleNamespace
+from functools import lru_cache
 from typing import Any, ClassVar
 
 from ..pool.base import DataHandle
@@ -155,6 +167,32 @@ class Kernel(Specializable):
     """
 
 
+class _LazyBagView:
+    """
+    Lazy stand-in for a Bag in a template body: `phys.g` resolves `g` only on
+    first attribute access (via resolve_binding), then caches it in the
+    instance dict so later lookups bypass __getattr__ entirely. Avoids
+    filter_bindings' top-level-only reach: binding one large bag no longer
+    eagerly resolves (and device_view()-compiles) every member, only the ones
+    a template actually touches. Nested Bag members resolve to another
+    _LazyBagView, so nesting stays lazy all the way down.
+
+    Author: B.G (07/2026)
+    """
+
+    def __init__(self, bag: "Bag"):
+        object.__setattr__(self, "_bag", bag)
+
+    def __getattr__(self, name: str) -> Any:
+        # only called on a genuine miss (cached hits never reach here)
+        bag = object.__getattribute__(self, "_bag")
+        if name not in bag:
+            raise AttributeError(name)
+        resolved = resolve_binding(bag[name])
+        self.__dict__[name] = resolved
+        return resolved
+
+
 def resolve_binding(value):
     """
     Unwrap a bound object to what a closure-backend template body should see.
@@ -162,8 +200,9 @@ def resolve_binding(value):
     Parameter -> literal if solo (const), else device_view() (a .get/.set_node
         carrier for uniform in-kernel access).
     Specializable (DeviceFunction/Kernel) -> .compiled.
-    Bag -> a namespace whose attributes are each member resolved the same way,
-        so dotted paths (grid.nx.get(i)) trace as plain attribute lookups.
+    Bag -> a _LazyBagView resolving each member on first attribute access, so
+        dotted paths (grid.nx.get(i)) trace as plain attribute lookups without
+        forcing every other member in the bag to resolve too.
     Anything else passes through unchanged.
 
     Author: B.G (07/2026)
@@ -176,14 +215,20 @@ def resolve_binding(value):
     if isinstance(value, Specializable):
         return value.compiled
     if isinstance(value, Bag):
-        return SimpleNamespace(**{name: resolve_binding(item) for name, item in value.items()})
+        return _LazyBagView(value)
     return value
 
 
+@lru_cache(maxsize=None)
 def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
     """
     Return (source_text, ast) for a template. A python def is introspected;
     a raw string (CUDA source) is kept verbatim with no AST (not python).
+
+    Cached per template: every compile() asks twice (once to filter bindings,
+    once for attach_meta), and each miss costs an inspect.getsource + a parse.
+    The returned tree is therefore SHARED by every Specializable built from
+    that template - treat it as read-only.
 
     Author: B.G (07/2026)
     """
@@ -198,6 +243,45 @@ def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
     except SyntaxError:
         tree = None
     return source, tree
+
+
+def used_bindings(template, bindings: dict[str, Any]) -> dict[str, Any]:
+    """
+    Subset of `bindings` whose key is actually referenced by `template`'s
+    body (by name - an attribute chain's root, e.g. `phys` in
+    `phys.g.get(0)`, is itself an `ast.Name`, so collecting every `ast.Name`
+    id in the tree is sufficient). Falls back to returning `bindings`
+    unchanged whenever the AST isn't available (non-python template, source
+    unavailable) - never silently drop a binding we cannot prove is unused.
+
+    Author: B.G (07/2026)
+    """
+    _, tree = capture_template_meta(template)
+    if tree is None:
+        return bindings
+    used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    return {name: value for name, value in bindings.items() if name in used}
+
+
+def filter_bindings(template, bindings: dict[str, Any]) -> dict[str, Any]:
+    """
+    used_bindings(), plus one warning per compile listing everything bound but
+    never referenced - catches typos in a large context. Backend-agnostic: the
+    closure builders feed the result to their specializer. No warning when the
+    AST isn't available (used_bindings then returns `bindings` unchanged, so
+    nothing looks unused).
+
+    Author: B.G (07/2026)
+    """
+    filtered = used_bindings(template, bindings)
+    unused = sorted(set(bindings) - set(filtered))
+    if unused:
+        warnings.warn(
+            f"template '{getattr(template, '__name__', '?')}': bound but unused: {unused}",
+            UserWarning,
+            stacklevel=3,
+        )
+    return filtered
 
 
 def attach_meta(obj: Specializable, template, bindings: dict[str, Any]) -> None:
@@ -290,20 +374,35 @@ class Bag:
     Simple named collection, mergeable into a builder via bind_bag() or bound
     whole (bind('grid', bag)) for dotted-path access in the template body.
 
+    `_member_type` (None on the base class) restricts what a subclass's
+    members may be; a nested Bag is always accepted regardless, since bags
+    nest (a ParamBag may legitimately contain another bag of params).
+
     Author: B.G (07/2026)
     """
 
+    _member_type: ClassVar[type | None] = None
+
     def __init__(self, items: dict[str, Any] | None = None):
-        self._items: dict[str, Any] = dict(items or {})
+        self._items: dict[str, Any] = {}
+        for name, item in (items or {}).items():
+            self.add(name, item)
 
     def add(self, name: str, item: Any) -> None:
         """
-        Register `item` under `name`. Raises if `name` is already registered.
+        Register `item` under `name`. Raises if `name` is already registered
+        or if `item` doesn't match this bag's `_member_type` (a nested Bag is
+        always accepted).
 
         Author: B.G (07/2026)
         """
         if name in self._items:
             raise KeyError(f"'{name}' is already registered in this bag")
+        if self._member_type is not None and not isinstance(item, (self._member_type, Bag)):
+            raise TypeError(
+                f"{type(self).__name__}: member '{name}' must be a {self._member_type.__name__} "
+                f"(or a Bag), got {type(item).__name__}"
+            )
         self._items[name] = item
 
     def __getattr__(self, name: str) -> Any:
@@ -340,6 +439,8 @@ class ParamBag(Bag):
     Author: B.G (07/2026)
     """
 
+    _member_type = Parameter
+
 
 class HelperBag(Bag):
     """
@@ -347,3 +448,5 @@ class HelperBag(Bag):
 
     Author: B.G (07/2026)
     """
+
+    _member_type = DeviceFunction

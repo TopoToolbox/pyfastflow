@@ -7,11 +7,21 @@ Author: B.G (07/2026)
 """
 
 from types import FunctionType
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
-from .base import Parameter, resolve_binding
+from .base import (
+    Bag,
+    DeviceFunction,
+    DeviceFunctionBuilder,
+    Kernel,
+    KernelBuilder,
+    Parameter,
+    attach_meta,
+    filter_bindings,
+    resolve_binding,
+)
 
 
 def specialize_closure(template, bindings: dict[str, Any]) -> FunctionType:
@@ -61,13 +71,17 @@ class ClosureParamDeviceView:
 class ClosureBackendParameter(Parameter):
     """
     Parameter backed by a const value or a pooled DataHandle, for backends
-    sharing the closure-specialization mechanism. Subclasses pin `_numpy_dtype`
-    and implement `device_view` with their own func decorator.
+    sharing the closure-specialization mechanism (Taichi, Quadrants).
+    Subclasses pin `_backend` (the `ti`/`qd` module) - `_numpy_dtype` and
+    `_build_device_view` are shared here since `ti.u8/i32/i64`,
+    `ti.func`/`ti.static` and their `qd.` equivalents are identical in name
+    and behaviour across both modules.
 
     Author: B.G (07/2026)
     """
 
     SUPPORTED_MODES = frozenset({"const", "scalar", "field"})
+    _backend: ClassVar[Any]
 
     def __init__(self, name: str, *, dtype, mode: str, value, pool, n_flat: int | None = None, solo: bool = False):
         """
@@ -90,6 +104,7 @@ class ClosureBackendParameter(Parameter):
         self._pool = pool
         self._const_value: Any = None
         self._handle = None
+        self._device_view: "ClosureParamDeviceView | None" = None
 
         if mode == "scalar":
             self._handle = pool.get_data(dtype, ())
@@ -100,15 +115,22 @@ class ClosureBackendParameter(Parameter):
 
         self.set(value)
 
-    @staticmethod
-    def _numpy_dtype(dtype):
+    @classmethod
+    def _numpy_dtype(cls, dtype):
         """
-        Map a backend dtype to the numpy dtype used for host-side (de)serialization.
-        Overridden per backend.
+        Map a backend dtype (`ti.*`/`qd.*`) to the numpy dtype used for
+        host-side (de)serialization.
 
         Author: B.G (07/2026)
         """
-        raise NotImplementedError
+        backend = cls._backend
+        if dtype == backend.u8:
+            return np.uint8
+        if dtype == backend.i32:
+            return np.int32
+        if dtype == backend.i64:
+            return np.int64
+        return np.float32
 
     def get(self):
         """
@@ -122,6 +144,7 @@ class ClosureBackendParameter(Parameter):
         """
         if self.mode == "const":
             self._const_value = self._numpy_dtype(self.dtype)(value).item()
+            self._device_view = None  # a cached view would bake the stale literal
         elif self.mode == "scalar":
             self._handle.data[None] = value
         else:  # field
@@ -148,3 +171,194 @@ class ClosureBackendParameter(Parameter):
         if self._handle is not None:
             self._pool.release_data(self._handle)
             self._handle = None
+            self._device_view = None  # a cached view closes over the released handle
+
+    def device_view(self) -> ClosureParamDeviceView:
+        """
+        Cached uniform device accessor for this parameter. Built once via
+        `_build_device_view` (backend-specific) and memoized on the instance:
+        rebuilding it per compile is pointless python work at O(params x
+        kernels) since the ti.func/qd.func objects are identical every time.
+        Invalidated (not refreshed) by set() on const mode and by destroy(),
+        the two places the baked literal/handle a cached view depends on can
+        change; scalar/field set() writes through the handle a cached view
+        already points at, so no invalidation is needed there.
+
+        Author: B.G (07/2026)
+        """
+        if self._device_view is None:
+            self._device_view = self._build_device_view()
+        return self._device_view
+
+    def _build_device_view(self) -> ClosureParamDeviceView:
+        """
+        Compile this parameter's uniform device accessors as backend funcs
+        (ti.func / qd.func).
+
+        get(node) dispatches on mode at trace time via `_backend.static`, so
+        only the taken arm compiles: const returns a baked literal, scalar
+        reads HANDLE[None], field reads HANDLE[node]. set_node(node, val) is
+        built only for scalar/field (const is read-only, exposes no setter).
+        MODE/VALUE/HANDLE are plain python values, not backend values.
+
+        Const getters bake VALUE as a compile-time literal: a later .set()
+        needs the view (and anything binding it) rebuilt to take effect.
+
+        Called at most once per instance, memoized by device_view().
+
+        Author: B.G (07/2026)
+        """
+        backend = self._backend
+        mode = self.mode
+        value = self._const_value
+        handle = self._handle.data if self._handle is not None else None
+
+        def get_template(node):
+            if STATIC(MODE == "const"):
+                return VALUE
+            elif STATIC(MODE == "scalar"):
+                return HANDLE[None]
+            else:
+                return HANDLE[node]
+
+        get_fn = backend.func(
+            specialize_closure(get_template, {"MODE": mode, "VALUE": value, "HANDLE": handle, "STATIC": backend.static})
+        )
+
+        set_fn = None
+        if mode != "const":
+
+            def set_node_template(node, val):
+                if STATIC(MODE == "scalar"):
+                    HANDLE[None] = val
+                else:
+                    HANDLE[node] = val
+
+            set_fn = backend.func(
+                specialize_closure(set_node_template, {"MODE": mode, "HANDLE": handle, "STATIC": backend.static})
+            )
+
+        return ClosureParamDeviceView(self.name, get_fn, set_fn)
+
+
+class ClosureDeviceFunction(DeviceFunction):
+    """
+    DeviceFunction backed by a compiled closure-backend func (ti.func /
+    qd.func). Built by ClosureDeviceFunctionBuilder subclasses.
+
+    Author: B.G (07/2026)
+    """
+
+    def __init__(self, name: str, compiled):
+        self.name = name
+        self._compiled = compiled
+
+    @property
+    def compiled(self):
+        """
+        Author: B.G (07/2026)
+        """
+        return self._compiled
+
+    def __call__(self, *args, **kwargs):
+        """
+        A ti.func/qd.func only runs inside kernel/func scope; callers use
+        `.compiled` there.
+
+        Author: B.G (07/2026)
+        """
+        raise RuntimeError(f"DeviceFunction '{self.name}' is only callable from kernel/func scope, not host Python")
+
+
+class ClosureKernel(Kernel):
+    """
+    Kernel backed by a compiled closure-backend kernel (ti.kernel /
+    qd.kernel). Built by ClosureKernelBuilder subclasses.
+
+    The template's own signature declares data-field arguments only (e.g.
+    `def template(out: ti.template()): ...`); params/helpers arrive via bind()
+    and are resolved into the kernel body, so callers pass data fields only.
+
+    Author: B.G (07/2026)
+    """
+
+    def __init__(self, name: str, compiled):
+        self.name = name
+        self._compiled = compiled
+
+    @property
+    def compiled(self):
+        """
+        Author: B.G (07/2026)
+        """
+        return self._compiled
+
+    def __call__(self, *args, **kwargs):
+        """
+        Launches the compiled kernel. Args are data fields only.
+
+        Author: B.G (07/2026)
+        """
+        return self._compiled(*args, **kwargs)
+
+
+def _check_const_only(bindings: dict[str, Any]) -> None:
+    """
+    Enforce the framework rule (base.py module docstring): a device helper
+    only ever binds const-mode Parameters - any data it needs is passed to it
+    as an explicit argument by the calling kernel instead. Recurses into
+    bound Bags so a scalar/field param nested inside one is also caught.
+
+    Author: B.G (07/2026)
+    """
+    for name, value in bindings.items():
+        if isinstance(value, Parameter):
+            if value.mode != "const":
+                raise ValueError(
+                    f"device helper: bound parameter '{name}' has mode {value.mode!r}, but a device "
+                    "helper may only bind const parameters - pass the data as an explicit argument to "
+                    "the helper instead"
+                )
+        elif isinstance(value, Bag):
+            _check_const_only(dict(value.items()))
+
+
+class ClosureDeviceFunctionBuilder(DeviceFunctionBuilder):
+    """
+    Builds a ClosureDeviceFunction: specialize the ingested def with bound
+    globals, decorate with `_backend.func`. Subclasses pin `_backend`.
+
+    Author: B.G (07/2026)
+    """
+
+    _backend: ClassVar[Any]
+
+    def compile(self) -> ClosureDeviceFunction:
+        """
+        Author: B.G (07/2026)
+        """
+        _check_const_only(self._bindings)
+        specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings))
+        fn = ClosureDeviceFunction(specialised.__name__, self._backend.func(specialised))
+        attach_meta(fn, self._template, self._bindings)
+        return fn
+
+
+class ClosureKernelBuilder(KernelBuilder):
+    """
+    Builds a ClosureKernel: specialize the ingested def with bound globals,
+    decorate with `_backend.kernel`. Subclasses pin `_backend`.
+
+    Author: B.G (07/2026)
+    """
+
+    _backend: ClassVar[Any]
+
+    def compile(self) -> ClosureKernel:
+        """
+        Author: B.G (07/2026)
+        """
+        specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings))
+        krn = ClosureKernel(specialised.__name__, self._backend.kernel(specialised))
+        attach_meta(krn, self._template, self._bindings)
+        return krn

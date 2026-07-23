@@ -24,7 +24,11 @@ param written anywhere in the kernel -> non-const `T*`.
 
 Device functions may only reference const params / other device functions
 inside spans - a spliced __device__ function has no way to receive an extra
-pointer argument.
+pointer argument. This isn't a cupy quirk: it's the backend-agnostic rule
+(see base.py's module docstring) that a device helper only ever binds const
+params, with any data it needs passed in as an explicit argument by the
+calling kernel - the closure backends (Taichi, Quadrants) enforce the same
+rule in ClosureDeviceFunctionBuilder.compile().
 
 Author: B.G (07/2026)
 """
@@ -193,17 +197,22 @@ class _SpanParser:
         return _SPAN_RE.sub(self._repl, body)
 
 
-def _const_defines(bindings: dict[str, Any]) -> list[str]:
+def _const_defines(bindings: dict[str, Any], body: str) -> list[str]:
     """
-    `#define NAME literal` for each top-level const Parameter, so bare uses of
-    a const param (outside any span) compile.
+    `#define NAME literal` for each top-level const Parameter whose identifier
+    actually appears (word-boundary match) in `body` - `body` must be the
+    already span-expanded text, so a span like `$phys.dx.get(0)$` has already
+    become a numeric literal and correctly does not count as a bare use of a
+    top-level const name. Skipping unused names avoids pasting unhygienic
+    macros (a const named N, I, DIM, EPS, min, ...) into the translation unit
+    where they'd silently rewrite unrelated identifiers.
 
     Author: B.G (07/2026)
     """
     return [
         f"#define {name} {_cuda_literal(obj.get())}"
         for name, obj in bindings.items()
-        if isinstance(obj, Parameter) and obj.mode == "const"
+        if isinstance(obj, Parameter) and obj.mode == "const" and re.search(rf"\b{re.escape(name)}\b", body)
     ]
 
 
@@ -395,7 +404,7 @@ class CupyDeviceFunctionBuilder(DeviceFunctionBuilder):
         name = _extract_name(_DEVICE_NAME_RE, template, "__device__")
         parser = _SpanParser(self._bindings, allow_arrays=False)
         body = parser.parse(template)
-        source = "\n".join(list(parser.helper_srcs.values()) + _const_defines(self._bindings) + [body])
+        source = "\n".join(list(parser.helper_srcs.values()) + _const_defines(self._bindings, body) + [body])
         fn = CupyDeviceFunction(name, source)
         attach_meta(fn, template, self._bindings)
         return fn
@@ -424,7 +433,7 @@ class CupyKernelBuilder(KernelBuilder):
         # link fine within the same translation unit.
         if 'extern "C"' not in body:
             body = body.replace("__global__", 'extern "C" __global__', 1)
-        source = "\n".join(list(parser.helper_srcs.values()) + _const_defines(self._bindings) + [body])
+        source = "\n".join(list(parser.helper_srcs.values()) + _const_defines(self._bindings, body) + [body])
         bound_arrays = [e["array"] for e in parser.ptr_params.values()]
 
         raw = CupyKernel._raw_cache.get(source)
