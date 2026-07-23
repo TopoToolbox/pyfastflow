@@ -160,8 +160,8 @@ class Kernel(Specializable):
     Compiled entry point (e.g. a ti.kernel specialization).
 
     Unlike DeviceFunction, __call__ works from host Python - that's how the
-    compute gets launched. Its template's own parameters are data fields only;
-    params/helpers arrive via bindings and are resolved into the kernel body.
+    compute gets launched. Call-time arguments are data fields only, per the
+    module docstring's call-time/compile-time rule.
 
     Author: B.G (07/2026)
     """
@@ -245,7 +245,7 @@ def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
     return source, tree
 
 
-def used_bindings(template, bindings: dict[str, Any]) -> dict[str, Any]:
+def _used_bindings(template, bindings: dict[str, Any]) -> dict[str, Any]:
     """
     Subset of `bindings` whose key is actually referenced by `template`'s
     body (by name - an attribute chain's root, e.g. `phys` in
@@ -265,15 +265,15 @@ def used_bindings(template, bindings: dict[str, Any]) -> dict[str, Any]:
 
 def filter_bindings(template, bindings: dict[str, Any]) -> dict[str, Any]:
     """
-    used_bindings(), plus one warning per compile listing everything bound but
-    never referenced - catches typos in a large context. Backend-agnostic: the
-    closure builders feed the result to their specializer. No warning when the
-    AST isn't available (used_bindings then returns `bindings` unchanged, so
-    nothing looks unused).
+    Bindings the template actually references (see _used_bindings), plus one
+    warning per compile listing everything bound but never referenced - catches
+    typos in a large context. Backend-agnostic: the closure builders feed the
+    result to their specializer. No warning when the AST isn't available
+    (_used_bindings then returns `bindings` unchanged, so nothing looks unused).
 
     Author: B.G (07/2026)
     """
-    filtered = used_bindings(template, bindings)
+    filtered = _used_bindings(template, bindings)
     unused = sorted(set(bindings) - set(filtered))
     if unused:
         warnings.warn(
@@ -422,14 +422,6 @@ class Bag:
 
     def items(self):
         return self._items.items()
-
-    def as_bindings(self) -> dict[str, Any]:
-        """
-        Return {name: item} for merging into a builder's bindings.
-
-        Author: B.G (07/2026)
-        """
-        return dict(self._items)
 
 
 class ParamBag(Bag):

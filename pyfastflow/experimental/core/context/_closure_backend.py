@@ -134,12 +134,17 @@ class ClosureBackendParameter(Parameter):
 
     def get(self):
         """
+        The python value for const mode, the backing DataHandle otherwise.
+
         Author: B.G (07/2026)
         """
         return self._const_value if self.mode == "const" else self._handle
 
     def set(self, value) -> None:
         """
+        Overwrite the whole value: a cast python scalar for const, a device
+        write for scalar, a full host->device copy for field.
+
         Author: B.G (07/2026)
         """
         if self.mode == "const":
@@ -166,6 +171,9 @@ class ClosureBackendParameter(Parameter):
 
     def destroy(self) -> None:
         """
+        Return any pooled storage to the pool. const mode owns none, so this
+        is a no-op there.
+
         Author: B.G (07/2026)
         """
         if self._handle is not None:
@@ -256,6 +264,8 @@ class ClosureDeviceFunction(DeviceFunction):
     @property
     def compiled(self):
         """
+        The raw ti.func/qd.func, for binding into another template's body.
+
         Author: B.G (07/2026)
         """
         return self._compiled
@@ -275,9 +285,8 @@ class ClosureKernel(Kernel):
     Kernel backed by a compiled closure-backend kernel (ti.kernel /
     qd.kernel). Built by ClosureKernelBuilder subclasses.
 
-    The template's own signature declares data-field arguments only (e.g.
-    `def template(out: ti.template()): ...`); params/helpers arrive via bind()
-    and are resolved into the kernel body, so callers pass data fields only.
+    The template's own signature declares data-field arguments only, e.g.
+    `def template(out: ti.template()): ...` - see base.py's module docstring.
 
     Author: B.G (07/2026)
     """
@@ -289,6 +298,8 @@ class ClosureKernel(Kernel):
     @property
     def compiled(self):
         """
+        The raw ti.kernel/qd.kernel behind this Kernel's __call__.
+
         Author: B.G (07/2026)
         """
         return self._compiled
@@ -335,6 +346,9 @@ class ClosureDeviceFunctionBuilder(DeviceFunctionBuilder):
 
     def compile(self) -> ClosureDeviceFunction:
         """
+        Check the const-only rule, inject the referenced bindings into the
+        template's globals, decorate the result as a device func.
+
         Author: B.G (07/2026)
         """
         _check_const_only(self._bindings)
@@ -356,6 +370,9 @@ class ClosureKernelBuilder(KernelBuilder):
 
     def compile(self) -> ClosureKernel:
         """
+        Inject the referenced bindings into the template's globals and
+        decorate the result as a launchable kernel.
+
         Author: B.G (07/2026)
         """
         specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings))

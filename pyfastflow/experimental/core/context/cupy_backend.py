@@ -83,6 +83,9 @@ def _cuda_literal(value) -> str:
 
 def _extract_name(pattern: re.Pattern, template: str, kind: str) -> str:
     """
+    The `__global__`/`__device__` function's own name, read out of the source
+    text - that is the entry point cp.RawKernel is looked up by.
+
     Author: B.G (07/2026)
     """
     match = pattern.search(template)
@@ -192,6 +195,9 @@ class _SpanParser:
 
     def parse(self, body: str) -> str:
         """
+        Expand every `$...$` span in `body`, accumulating ptr_params and
+        helper_srcs as a side effect.
+
         Author: B.G (07/2026)
         """
         return _SPAN_RE.sub(self._repl, body)
@@ -252,6 +258,11 @@ class CupyParameter(Parameter):
 
     def __init__(self, name: str, *, dtype, mode: str, value, pool, n_flat: int | None = None, solo: bool = False):
         """
+        Declare and initialize one parameter. "scalar"/"field" modes allocate
+        pooled storage immediately via `pool`; "const" stays a plain python
+        value. solo=True (const only) lets the parameter be read bare in a
+        template body - it becomes a #define rather than a span expansion.
+
         Author: B.G (07/2026)
         """
         if mode not in self.SUPPORTED_MODES:
@@ -278,12 +289,17 @@ class CupyParameter(Parameter):
 
     def get(self):
         """
+        The python value for const mode, the backing CupyDataHandle otherwise.
+
         Author: B.G (07/2026)
         """
         return self._const_value if self.mode == "const" else self._handle
 
     def set(self, value) -> None:
         """
+        Overwrite the whole value: a cast python scalar for const, a device
+        write for scalar, a full host->device copy for field.
+
         Author: B.G (07/2026)
         """
         if self.mode == "const":
@@ -309,6 +325,9 @@ class CupyParameter(Parameter):
 
     def destroy(self) -> None:
         """
+        Return any pooled storage to the pool. const mode owns none, so this
+        is a no-op there.
+
         Author: B.G (07/2026)
         """
         if self._handle is not None:
@@ -336,12 +355,18 @@ class CupyDeviceFunction(DeviceFunction):
     @property
     def compiled(self):
         """
+        The spliced `__device__` source text, for pasting into whatever
+        kernel or device function binds this helper.
+
         Author: B.G (07/2026)
         """
         return self._compiled_source
 
     def __call__(self, *args, **kwargs):
         """
+        CUDA source is not a python callable - a helper only runs inside a
+        compiled kernel's device code.
+
         Author: B.G (07/2026)
         """
         raise RuntimeError(
@@ -372,6 +397,8 @@ class CupyKernel(Kernel):
     @property
     def compiled(self):
         """
+        The underlying cp.RawKernel this Kernel's __call__ launches.
+
         Author: B.G (07/2026)
         """
         return self._compiled
@@ -398,6 +425,9 @@ class CupyDeviceFunctionBuilder(DeviceFunctionBuilder):
 
     def compile(self) -> CupyDeviceFunction:
         """
+        Expand the template's spans and prepend the helper sources and const
+        #defines it turned out to need, giving the final `__device__` text.
+
         Author: B.G (07/2026)
         """
         template = self._template
@@ -421,6 +451,10 @@ class CupyKernelBuilder(KernelBuilder):
 
     def compile(self) -> CupyKernel:
         """
+        Expand the template's spans, inject the pointer args they implied into
+        the __global__ signature, prepend helpers + const #defines, then build
+        (or reuse, keyed by final source text) the cp.RawKernel.
+
         Author: B.G (07/2026)
         """
         template = self._template
