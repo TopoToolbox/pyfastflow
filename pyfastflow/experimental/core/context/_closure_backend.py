@@ -25,18 +25,19 @@ import numpy as np
 
 from .base import (
     Bag,
-    DeviceFunction,
-    DeviceFunctionBuilder,
+    HelperBuilder,
     Kernel,
     KernelBuilder,
     Parameter,
+    _SpecializedHelper,
+    _SpecializeCtx,
     attach_meta,
     filter_bindings,
     resolve_binding,
 )
 
 
-def specialize_closure(template, bindings: dict[str, Any]) -> FunctionType:
+def specialize_closure(template, bindings: dict[str, Any], ctx: _SpecializeCtx) -> FunctionType:
     """
     Rebuild `template` as a new function whose globals carry the resolved
     bindings, leaving the original untouched.
@@ -44,11 +45,13 @@ def specialize_closure(template, bindings: dict[str, Any]) -> FunctionType:
     The code object is reused as-is; only the globals differ, which is what
     makes a name in the template body resolve to a bound object. Defaults,
     annotations and the rest are copied over so the result still introspects
-    like the template it came from.
+    like the template it came from. `ctx` is the compile this specialization
+    belongs to - it is what lets a bound HelperBuilder be specialized here,
+    against these same bindings, rather than standing for a stale one.
 
     Author: B.G (07/2026)
     """
-    resolved = {name: resolve_binding(value) for name, value in bindings.items()}
+    resolved = {name: resolve_binding(value, ctx) for name, value in bindings.items()}
     source = getattr(template, "__wrapped__", template)
     func_globals = dict(source.__globals__)
     func_globals.update(resolved)
@@ -244,8 +247,13 @@ class ClosureBackendParameter(Parameter):
             else:
                 return HANDLE[node]
 
+        # No Parameter/HelperBuilder/Bag ever appears in these two bindings
+        # dicts, so the ctx each specialize_closure call needs is never
+        # actually consulted; a throwaway one per call is enough.
         get_fn = backend.func(
-            specialize_closure(get_template, {"MODE": mode, "VALUE": value, "HANDLE": handle, "STATIC": backend.static})
+            specialize_closure(
+                get_template, {"MODE": mode, "VALUE": value, "HANDLE": handle, "STATIC": backend.static}, _SpecializeCtx()
+            )
         )
 
         set_fn = None
@@ -258,15 +266,17 @@ class ClosureBackendParameter(Parameter):
                     HANDLE[node] = val
 
             set_fn = backend.func(
-                specialize_closure(set_node_template, {"MODE": mode, "HANDLE": handle, "STATIC": backend.static})
+                specialize_closure(set_node_template, {"MODE": mode, "HANDLE": handle, "STATIC": backend.static}, _SpecializeCtx())
             )
 
         return ClosureParamDeviceView(self.name, get_fn, set_fn)
 
 
-class ClosureDeviceFunction(DeviceFunction):
+class ClosureHelper(_SpecializedHelper):
     """
-    A device helper compiled to a ti.func or qd.func.
+    A device helper's specialization, compiled to a ti.func or qd.func.
+    Produced by a ClosureHelperBuilder as part of an enclosing kernel's
+    compile(); see HelperBuilder.
 
     Author: B.G (07/2026)
     """
@@ -292,7 +302,7 @@ class ClosureDeviceFunction(DeviceFunction):
 
         Author: B.G (07/2026)
         """
-        raise RuntimeError(f"DeviceFunction '{self.name}' is only callable from kernel/func scope, not host Python")
+        raise RuntimeError(f"Helper '{self.name}' is only callable from kernel/func scope, not host Python")
 
 
 class ClosureKernel(Kernel):
@@ -307,6 +317,7 @@ class ClosureKernel(Kernel):
     """
 
     def __init__(self, name: str, compiled):
+        super().__init__()
         self.name = name
         self._compiled = compiled
 
@@ -351,25 +362,28 @@ def _check_const_only(bindings: dict[str, Any]) -> None:
             _check_const_only(dict(value.items()))
 
 
-class ClosureDeviceFunctionBuilder(DeviceFunctionBuilder):
+class ClosureHelperBuilder(HelperBuilder):
     """
-    Compiles an ingested def into a device helper. Subclasses pin `_backend`.
+    Recipe for a device helper compiled to a ti.func/qd.func. Subclasses pin
+    `_backend`. Specialized only as part of an enclosing kernel's compile()
+    - see HelperBuilder; compile() itself raises.
 
     Author: B.G (07/2026)
     """
 
     _backend: ClassVar[Any]
 
-    def compile(self) -> ClosureDeviceFunction:
+    def _specialize(self, ctx: _SpecializeCtx) -> ClosureHelper:
         """
         Check the const-only rule, splice the referenced bindings into the
-        template's globals, and compile the result as a device func.
+        template's globals against `ctx`, and compile the result as a device
+        func.
 
         Author: B.G (07/2026)
         """
         _check_const_only(self._bindings)
-        specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings))
-        fn = ClosureDeviceFunction(specialised.__name__, self._backend.func(specialised))
+        specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings), ctx)
+        fn = ClosureHelper(specialised.__name__, self._backend.func(specialised))
         attach_meta(fn, self._template, self._bindings)
         return fn
 
@@ -386,12 +400,15 @@ class ClosureKernelBuilder(KernelBuilder):
 
     def compile(self) -> ClosureKernel:
         """
-        Splice the referenced bindings into the template's globals and compile
-        the result as a launchable kernel.
+        Splice the referenced bindings into the template's globals - each
+        compile() opening a fresh _SpecializeCtx, so every HelperBuilder
+        reachable from this kernel's bindings is specialized once, against
+        these bindings - and compile the result as a launchable kernel.
 
         Author: B.G (07/2026)
         """
-        specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings))
+        ctx = _SpecializeCtx()
+        specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings), ctx)
         krn = ClosureKernel(specialised.__name__, self._backend.kernel(specialised))
         attach_meta(krn, self._template, self._bindings)
         return krn

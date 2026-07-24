@@ -34,7 +34,7 @@ import quadrants as qd
 
 from ._closure_backend import (
     ClosureBackendParameter,
-    ClosureDeviceFunctionBuilder,
+    ClosureHelperBuilder,
     ClosureKernelBuilder,
 )
 
@@ -49,7 +49,7 @@ class QuadrantsParameter(ClosureBackendParameter):
     _backend = qd
 
 
-class QuadrantsDeviceFunctionBuilder(ClosureDeviceFunctionBuilder):
+class QuadrantsHelperBuilder(ClosureHelperBuilder):
     """
     Compiles a device helper with qd.func. Parameters bound into it must be
     field-backed, since Quadrants rejects an ndarray referenced as a global.

@@ -27,7 +27,7 @@ class CupyDataHandle(DataHandle):
         Author: B.G (07/2026)
         """
         CupyDataHandle._next_id += 1
-        self.id = CupyDataHandle._next_id
+        self.alloc_id = CupyDataHandle._next_id
         self._uid = new_uid()
         self.dtype = dtype
         self.shape = tuple(shape)

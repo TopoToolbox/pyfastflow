@@ -36,7 +36,7 @@ class FieldsBuilderDataHandle(DataHandle):
         """
         cls = type(self)
         cls._next_id += 1
-        self.id = cls._next_id
+        self.alloc_id = cls._next_id
         self._uid = new_uid()
         self.dtype = dtype
         self.shape = tuple(shape)

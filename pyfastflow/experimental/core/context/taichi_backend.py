@@ -16,7 +16,7 @@ import taichi as ti
 
 from ._closure_backend import (
     ClosureBackendParameter,
-    ClosureDeviceFunctionBuilder,
+    ClosureHelperBuilder,
     ClosureKernelBuilder,
 )
 
@@ -31,7 +31,7 @@ class TaichiParameter(ClosureBackendParameter):
     _backend = ti
 
 
-class TaichiDeviceFunctionBuilder(ClosureDeviceFunctionBuilder):
+class TaichiHelperBuilder(ClosureHelperBuilder):
     """
     Compiles a device helper with ti.func.
 

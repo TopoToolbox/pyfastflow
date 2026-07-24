@@ -39,8 +39,8 @@ class DataHandle(ABC):
     pool for reuse without freeing memory; `destroy()` actually frees it.
 
     Attributes:
-        id: Per-backend allocation counter, assigned by the backend - used for
-            pool bookkeeping and not unique across backends.
+        alloc_id: Per-backend allocation counter, assigned by the backend - used
+            for pool bookkeeping and not unique across backends.
         uid: Process-wide identity from the shared counter (new_uid()) - unique
             across every Parameter, Bag, Helper and DataHandle regardless of
             backend. Concrete handles set self._uid in their own __init__.
@@ -48,10 +48,13 @@ class DataHandle(ABC):
         shape: Resource dimensions. () for a scalar.
         in_use: True between acquire() and release().
 
+    Two handles from different pools can share an alloc_id; only uid identifies
+    a handle on its own.
+
     Author: B.G (07/2026)
     """
 
-    id: int
+    alloc_id: int
     dtype: Any
     shape: tuple[int, ...]
     in_use: bool

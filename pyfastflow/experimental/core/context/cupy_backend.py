@@ -1,5 +1,7 @@
 """
-cupy implementations of Parameter, DeviceFunction, Kernel and their builders.
+cupy implementations of Parameter, Kernel and their builders, plus
+CupyHelperBuilder - the recipe for a device helper, specialized as part of
+whichever kernel binds it (see base.py, HelperBuilder).
 
 Here a template is CUDA source text rather than a python function, since
 cp.RawKernel compiles source and there is no function whose globals could be
@@ -25,7 +27,7 @@ arrives as a `#define`. Only names the source actually mentions are defined,
 which keeps macros for common identifiers - N, DIM, EPS, min - from silently
 rewriting unrelated code in the translation unit.
 
-Spans inside a device function may only reach const parameters and other
+Spans inside a device helper may only reach const parameters and other
 device helpers. That is the framework rule from base.py rather than anything
 specific to cupy: a helper is spliced into its caller and cannot take on a
 pointer argument of its own.
@@ -39,7 +41,7 @@ from typing import Any
 import cupy as cp
 import numpy as np
 
-from .base import DeviceFunction, DeviceFunctionBuilder, Kernel, KernelBuilder, Parameter, attach_meta
+from .base import HelperBuilder, Kernel, KernelBuilder, Parameter, _SpecializedHelper, _SpecializeCtx, attach_meta
 from .base import Bag
 
 _KERNEL_NAME_RE = re.compile(r"__global__\s+void\s+(\w+)\s*\(")
@@ -135,15 +137,19 @@ class _SpanParser:
     Expansion has side effects the builder needs afterwards: `ptr_params`
     collects the pointer arguments the spans implied, and `helper_srcs` the
     source of every device helper they called. Set allow_arrays=False when
-    parsing a device function, which may not reach scalar or field parameters
-    and so has no use for either.
+    parsing a device helper, which may not reach scalar or field parameters
+    and so has no use for either. `ctx` is the compile this parse belongs to
+    - a span reaching a CupyHelperBuilder specializes it against `ctx`
+    (memoized there - see _SpecializeCtx), so a helper reached twice in one
+    compile is specialized once.
 
     Author: B.G (07/2026)
     """
 
-    def __init__(self, bindings: dict[str, Any], *, allow_arrays: bool):
+    def __init__(self, bindings: dict[str, Any], *, allow_arrays: bool, ctx: _SpecializeCtx):
         self.bindings = bindings
         self.allow_arrays = allow_arrays
+        self.ctx = ctx
         self.ptr_params: dict[str, dict] = {}   # argname -> {ctype, write, array}
         self.helper_srcs: dict[str, str] = {}   # name -> source
 
@@ -159,7 +165,7 @@ class _SpanParser:
             if param.mode == "const":
                 return _cuda_literal(param.get())
             if not self.allow_arrays:
-                raise ValueError(f"{param.name}: scalar/field param cannot be used in a device function (no pointer arg)")
+                raise ValueError(f"{param.name}: scalar/field param cannot be used in a device helper (no pointer arg)")
             self._register_ptr(argname, param, write=False)
             if param.mode == "scalar":
                 return f"{argname}[0]"
@@ -169,7 +175,7 @@ class _SpanParser:
         if param.mode == "const":
             raise ValueError(f"{param.name}: const parameter is read-only")
         if not self.allow_arrays:
-            raise ValueError(f"{param.name}: set_node cannot be used in a device function (no pointer arg)")
+            raise ValueError(f"{param.name}: set_node cannot be used in a device helper (no pointer arg)")
         if len(call_args) != 2:
             raise ValueError(f"{param.name}: set_node(node, value) takes two arguments")
         self._register_ptr(argname, param, write=True)
@@ -190,7 +196,9 @@ class _SpanParser:
                 return self._expand_param(target, path[-1], "_".join(path[:-1]), call_args)
 
         target = _walk(path, self.bindings)
-        if isinstance(target, CupyDeviceFunction):
+        if isinstance(target, CupyHelperBuilder):
+            target = self.ctx.specialize(target)
+        if isinstance(target, CupyHelper):
             self.helper_srcs[target.name] = target.compiled
             return f"{target.name}({argstr if argstr is not None else ''})"
         if isinstance(target, Parameter):
@@ -342,9 +350,11 @@ class CupyParameter(Parameter):
             self._handle = None
 
 
-class CupyDeviceFunction(DeviceFunction):
+class CupyHelper(_SpecializedHelper):
     """
-    A device helper, held as CUDA `__device__` source text.
+    A device helper's specialization, held as CUDA `__device__` source text.
+    Produced by a CupyHelperBuilder as part of an enclosing kernel's
+    compile(); see HelperBuilder.
 
     Nothing is compiled at this stage: RawKernel compiles whole translation
     units, so `.compiled` hands back source, and the helper is compiled as part
@@ -364,7 +374,7 @@ class CupyDeviceFunction(DeviceFunction):
     def compiled(self):
         """
         The spliced `__device__` source text, for pasting into whatever
-        kernel or device function binds this helper.
+        kernel or helper binds this one.
 
         Author: B.G (07/2026)
         """
@@ -378,7 +388,7 @@ class CupyDeviceFunction(DeviceFunction):
         Author: B.G (07/2026)
         """
         raise RuntimeError(
-            f"DeviceFunction '{self.name}' is CUDA source, only callable from a compiled kernel's device code"
+            f"Helper '{self.name}' is CUDA source, only callable from a compiled kernel's device code"
         )
 
 
@@ -400,6 +410,7 @@ class CupyKernel(Kernel):
     _raw_cache: dict[str, "cp.RawKernel"] = {}
 
     def __init__(self, name: str, compiled, bound_arrays: list):
+        super().__init__()
         self.name = name
         self._compiled = compiled
         self._bound_arrays = bound_arrays
@@ -425,27 +436,30 @@ class CupyKernel(Kernel):
         return self._compiled(grid, block, tuple(args) + tuple(self._bound_arrays))
 
 
-class CupyDeviceFunctionBuilder(DeviceFunctionBuilder):
+class CupyHelperBuilder(HelperBuilder):
     """
-    Builds a CupyDeviceFunction from CUDA `__device__` source. Spans may only
-    reference const params / other device functions (no pointer args).
+    Recipe for a device helper compiled from CUDA `__device__` source. Spans
+    may only reference const params / other device helpers (no pointer
+    args). Specialized only as part of an enclosing kernel's compile() - see
+    HelperBuilder; compile() itself raises.
 
     Author: B.G (07/2026)
     """
 
-    def compile(self) -> CupyDeviceFunction:
+    def _specialize(self, ctx: _SpecializeCtx) -> CupyHelper:
         """
-        Expand the template's spans and prepend the helper sources and const
-        #defines it turned out to need, giving the final `__device__` text.
+        Expand the template's spans against `ctx` and prepend the helper
+        sources and const #defines it turned out to need, giving the final
+        `__device__` text.
 
         Author: B.G (07/2026)
         """
         template = self._template
         name = _extract_name(_DEVICE_NAME_RE, template, "__device__")
-        parser = _SpanParser(self._bindings, allow_arrays=False)
+        parser = _SpanParser(self._bindings, allow_arrays=False, ctx=ctx)
         body = parser.parse(template)
         source = "\n".join(list(parser.helper_srcs.values()) + _const_defines(self._bindings, body) + [body])
-        fn = CupyDeviceFunction(name, source)
+        fn = CupyHelper(name, source)
         attach_meta(fn, template, self._bindings)
         return fn
 
@@ -465,11 +479,16 @@ class CupyKernelBuilder(KernelBuilder):
         the __global__ signature, prepend helpers + const #defines, then build
         (or reuse, keyed by final source text) the cp.RawKernel.
 
+        Opens a fresh _SpecializeCtx for this compile, so every
+        CupyHelperBuilder this kernel's spans reach is specialized once,
+        against these bindings.
+
         Author: B.G (07/2026)
         """
+        ctx = _SpecializeCtx()
         template = self._template
         name = _extract_name(_KERNEL_NAME_RE, template, "__global__")
-        parser = _SpanParser(self._bindings, allow_arrays=True)
+        parser = _SpanParser(self._bindings, allow_arrays=True, ctx=ctx)
         body = parser.parse(template)
         body = _inject_signature(body, parser.ptr_params)
         # extern "C" linkage so cp.RawKernel finds the entry by its plain name
