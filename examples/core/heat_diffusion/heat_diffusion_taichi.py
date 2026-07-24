@@ -1,0 +1,336 @@
+"""
+Heat diffusion through a procedurally-generated floor plan (air + walls),
+heated by a single stove, built on pyfastflow's backend-agnostic core
+(Parameter/Helper/Kernel/Pool), Taichi backend.
+
+Pipeline:
+  - generate_walls: pointwise kernel, carves a grid of rooms with doors into
+    a wall mask (field-mode Parameter `wall`, written device-side via
+    wall.set_node), using a deterministic hash device helper instead of
+    per-cell RNG so wall/door layout is reproducible from SEED.
+  - set_alpha: seeds a per-cell diffusivity field (`alpha`, field mode) from
+    `wall` - air diffuses fast, walls slow.
+  - init_temperature: fills T with the background temperature.
+  - apply_source: clamps a disc of cells around the stove to `stove.temp`
+    (scalar-mode Parameter, updated from the host every substep -> a gently
+    pulsing stove).
+  - diffuse: explicit FTCS heat equation dT/dt = alpha(i,j) * lap(T), with a
+    clamped (Neumann / no-flux) boundary Laplacian.
+
+Uniform device surface: `wall`, `alpha` and `stove` are read with p.get(node)
+and written with p.set_node(node, val) regardless of const/scalar/field mode -
+the kernels never branch on mode, so re-declaring `alpha` as a single const
+(uniform room, no walls) needs no kernel-body change. Structural constants
+(N, ROOM, ...) are declared solo=True and used bare as compile-time literals.
+
+Binding styles, all three visible in one file:
+  - flat, one bind() per object (most kernels here);
+  - a Bag bound whole and reached by dotted path - `stove` in apply_source,
+    which nests a sub-bag for the position, and `heat` in diffuse, which mixes
+    a Parameter, a device helper and two consts under one name;
+  - bind_bag(), merging a bag's members in flat under their own names, so the
+    kernel still sees plain names - `alpha_seeds` in set_alpha.
+
+Compilation is the two-layer builder: TaichiKernelBuilder / TaichiHelperBuilder
+collect bind()ed params + helper builders and one ingest()ed template. A
+HelperBuilder (clamp_fn, laplacian_fn, whash_fn below) is a recipe, not a
+compiled object - it has no compile() of its own. Binding one into a kernel,
+flat or through a Bag, is what specializes it: TaichiKernelBuilder.compile()
+specializes every HelperBuilder the kernel reaches, against that kernel's own
+bindings, before compiling the kernel body. Recompiling the kernel after
+rebinding a const the helper reads picks up the new value without touching
+the helper builder itself.
+
+Author: B.G (07/2026)
+"""
+
+import math
+import time
+
+import matplotlib.pyplot as plt
+import numpy as np
+import taichi as ti
+
+from pyfastflow.experimental.core.context.base import Bag
+from pyfastflow.experimental.core.context.taichi_backend import (
+    TaichiHelperBuilder,
+    TaichiKernelBuilder,
+    TaichiParameter,
+)
+from pyfastflow.experimental.core.pool.taichi_pool import TaichiPool
+
+ti.init(arch=ti.gpu)
+
+# ---------------------------------------------------------------------------
+# host-side constants (grid size, loop/timing counts - never used as kernel globals)
+# ---------------------------------------------------------------------------
+GRID_N = 512
+STEPS_PER_FRAME = 10000
+PULSE_FREQ = 0.0  # stove temperature oscillation speed, rad/s (0 = steady stove)
+
+# Physical grounding: without a cell size, DT/ALPHA are just numbers tuned by
+# feel - here they're derived from a real room size and real diffusivities so
+# "seconds" and "m^2/s" mean what they say.
+ROOM_M = 3.0  # room span, meters (rooms are GRID_N//4 cells across)
+DX_M = ROOM_M / (GRID_N // 4)  # meters per cell
+
+# Air's real molecular thermal diffusivity (~2.2e-5 m^2/s) would take DAYS to
+# spread heat by pure conduction - rooms actually heat by convective mixing.
+# ALPHA_AIR below is an effective/turbulent diffusivity standing in for that
+# mixing, not molecular diffusion - otherwise a stove would need real hours.
+ALPHA_AIR_VAL = 0.015  # m^2/s, effective convective air diffusivity
+ALPHA_WALL_VAL = 1.0e-6  # m^2/s, real solid (drywall/brick-like) diffusivity
+
+# Explicit FTCS stability limit is dt <= dx^2 / (4*alpha); stay well under it.
+CFL_SAFETY = 0.4
+DT_VAL = CFL_SAFETY * DX_M**2 / (4.0 * ALPHA_AIR_VAL)  # seconds
+
+pool = TaichiPool()
+
+# Structural constants: solo=True -> read bare in kernel bodies as compile-time
+# literals (no .get()), since they are never going to vary at runtime.
+n_p = TaichiParameter("N", dtype=ti.i32, mode="const", value=GRID_N, pool=pool, solo=True)
+room_p = TaichiParameter("ROOM", dtype=ti.i32, mode="const", value=GRID_N // 4, pool=pool, solo=True)
+wall_thick_p = TaichiParameter("WALL_THICK", dtype=ti.i32, mode="const", value=8, pool=pool, solo=True)
+door_p = TaichiParameter("DOOR", dtype=ti.i32, mode="const", value=6, pool=pool, solo=True)
+seed_p = TaichiParameter("SEED", dtype=ti.f32, mode="const", value=17.0, pool=pool, solo=True)
+
+dt_p = TaichiParameter("DT", dtype=ti.f32, mode="const", value=DT_VAL, pool=pool, solo=True)  # seconds
+dx2_p = TaichiParameter("DX2", dtype=ti.f32, mode="const", value=DX_M**2, pool=pool, solo=True)  # meters^2
+
+# Seed values for the alpha field - used bare inside set_alpha.
+alpha_air_seed_p = TaichiParameter("ALPHA_AIR_SEED", dtype=ti.f32, mode="const", value=ALPHA_AIR_VAL, pool=pool, solo=True)
+alpha_wall_seed_p = TaichiParameter("ALPHA_WALL_SEED", dtype=ti.f32, mode="const", value=ALPHA_WALL_VAL, pool=pool, solo=True)
+t_bg_p = TaichiParameter("T_BG", dtype=ti.f32, mode="const", value=15.0, pool=pool, solo=True)
+
+src_i_p = TaichiParameter("SRC_I", dtype=ti.i32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool, solo=True)
+src_j_p = TaichiParameter("SRC_J", dtype=ti.i32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool, solo=True)
+src_r_p = TaichiParameter("SRC_R", dtype=ti.i32, mode="const", value=10, pool=pool, solo=True)  # stove radius, cells
+
+# scalar mode: a 0-d field, host-settable every frame -> a pulsing stove
+# temperature. Reached in-kernel as stove.temp.get(0) (see the stove Bag).
+OG_stove = 70
+stove_p = TaichiParameter("STOVE_T", dtype=ti.f32, mode="scalar", value=OG_stove, pool=pool)
+
+# field mode: per-cell wall/air mask, written device-side via wall.set_node,
+# read via wall.get.
+wall_p = TaichiParameter("WALL", dtype=ti.i32, mode="field", value=np.zeros(GRID_N * GRID_N), pool=pool, n_flat=GRID_N * GRID_N)
+
+# field mode: per-cell thermal diffusivity, read in diffuse via alpha.get - so
+# switching this Parameter to const/scalar mode later needs no kernel edits.
+alpha_p = TaichiParameter("ALPHA", dtype=ti.f32, mode="field", value=np.zeros(GRID_N * GRID_N), pool=pool, n_flat=GRID_N * GRID_N)
+
+# ---------------------------------------------------------------------------
+# device helpers
+# ---------------------------------------------------------------------------
+
+
+def clamp(i):
+    return min(max(i, 0), N - 1)
+
+
+clamp_fn = TaichiHelperBuilder().bind("N", n_p).ingest(clamp)
+
+
+def laplacian(field_, i, j):
+    ip = clamp(i + 1)
+    im = clamp(i - 1)
+    jp = clamp(j + 1)
+    jm = clamp(j - 1)
+    return field_[ip, j] + field_[im, j] + field_[i, jp] + field_[i, jm] - 4.0 * field_[i, j]
+
+
+laplacian_fn = TaichiHelperBuilder().bind("clamp", clamp_fn).ingest(laplacian)
+
+
+def whash(a, b):
+    """Deterministic pseudo-random value in [0, 1) for two integer indices."""
+    x = ti.cast(a, ti.f32) * 12.9898 + ti.cast(b, ti.f32) * 78.233 + SEED
+    s = ti.sin(x) * 43758.5453
+    return s - ti.floor(s)
+
+
+whash_fn = TaichiHelperBuilder().bind("SEED", seed_p).ingest(whash)
+
+# ---------------------------------------------------------------------------
+# kernels
+# ---------------------------------------------------------------------------
+
+
+def generate_walls_template():
+    for i, j in ti.ndrange(N, N):
+        is_wall = 0
+        if i < WALL_THICK or i >= N - WALL_THICK or j < WALL_THICK or j >= N - WALL_THICK:
+            is_wall = 1
+        elif i % ROOM < WALL_THICK:
+            vline = i // ROOM
+            seg = j // ROOM
+            door = ti.cast(whash(vline, seg) * ROOM, ti.i32)
+            gap = (j % ROOM) >= door and (j % ROOM) < door + DOOR
+            if not gap:
+                is_wall = 1
+        elif j % ROOM < WALL_THICK:
+            hline = j // ROOM
+            seg = i // ROOM
+            door = ti.cast(whash(hline + 7919, seg) * ROOM, ti.i32)
+            gap = (i % ROOM) >= door and (i % ROOM) < door + DOOR
+            if not gap:
+                is_wall = 1
+        wall.set_node(i * N + j, is_wall)
+
+
+generate_walls_kernel = (
+    TaichiKernelBuilder()
+    .bind("N", n_p)
+    .bind("ROOM", room_p)
+    .bind("WALL_THICK", wall_thick_p)
+    .bind("DOOR", door_p)
+    .bind("wall", wall_p)
+    .bind("whash", whash_fn)
+    .ingest(generate_walls_template)
+    .compile()
+)
+
+
+def set_alpha_template():
+    for i, j in ti.ndrange(N, N):
+        idx = i * N + j
+        if wall.get(idx) == 1:
+            alpha.set_node(idx, ALPHA_WALL_SEED)
+        else:
+            alpha.set_node(idx, ALPHA_AIR_SEED)
+
+
+# The two seed values are grouped on the host for tidiness, then merged in with
+# bind_bag() - which binds each member flat, under its own name. The template
+# above is unaware: it still reads ALPHA_WALL_SEED / ALPHA_AIR_SEED bare. Use
+# this when a bag is a convenient way to carry things around but the kernel
+# wants plain names; bind() the bag whole instead when you want a dotted path.
+alpha_seeds = Bag({"ALPHA_WALL_SEED": alpha_wall_seed_p, "ALPHA_AIR_SEED": alpha_air_seed_p})
+
+set_alpha_kernel = (
+    TaichiKernelBuilder()
+    .bind("N", n_p)
+    .bind("wall", wall_p)
+    .bind("alpha", alpha_p)
+    .bind_bag(alpha_seeds)
+    .ingest(set_alpha_template)
+    .compile()
+)
+
+
+def init_temperature_template(T: ti.template()):
+    for i, j in T:
+        T[i, j] = T_BG
+
+
+init_temperature_kernel = TaichiKernelBuilder().bind("T_BG", t_bg_p).ingest(init_temperature_template).compile()
+
+
+# The stove travels as ONE nested Bag rather than four flat binds: its position
+# is grouped into an `at` sub-bag, and members of either level resolve on their
+# own type - the solo consts become compile-time literals (read bare), the
+# scalar Parameter keeps its .get(0). Everything else here still binds flat, so
+# the two styles sit side by side in one file.
+stove = Bag(
+    {
+        "at": Bag({"i": src_i_p, "j": src_j_p}),
+        "r": src_r_p,
+        "temp": stove_p,
+    }
+)
+
+
+def apply_source_template(T: ti.template()):
+    for i, j in T:
+        dx = i - stove.at.i
+        dy = j - stove.at.j
+        if dx * dx + dy * dy <= stove.r * stove.r:
+            T[i, j] = stove.temp.get(0)
+
+
+apply_source_kernel = TaichiKernelBuilder().bind("stove", stove).ingest(apply_source_template).compile()
+
+
+# A MIXED Bag: everything the diffusion step needs, whatever kind it is - a
+# field Parameter, a device helper, two solo consts - under one name. A bag has
+# no member type; each is resolved on its own at compile time, so `heat.alpha`
+# becomes a device accessor, `heat.lap` a compiled func, `heat.dx2` a literal.
+heat = Bag({"alpha": alpha_p, "lap": laplacian_fn, "dt": dt_p, "dx2": dx2_p})
+
+
+def diffuse_template(T_out: ti.template(), T_in: ti.template()):
+    for i, j in T_in:
+        idx = i * N + j
+        a = heat.alpha.get(idx)
+        lap = heat.lap(T_in, i, j) / heat.dx2
+        T_out[i, j] = T_in[i, j] + heat.dt * a * lap
+
+diffuse_kernel = TaichiKernelBuilder().bind("N", n_p).bind("heat", heat).ingest(diffuse_template).compile()
+
+# ---------------------------------------------------------------------------
+# fields (pooled - two buffers for ping-pong)
+# ---------------------------------------------------------------------------
+T0 = pool.get_data(ti.f32, (GRID_N, GRID_N))
+T1 = pool.get_data(ti.f32, (GRID_N, GRID_N))
+
+generate_walls_kernel()
+set_alpha_kernel()
+init_temperature_kernel(T0.data)
+apply_source_kernel(T0.data)
+
+# ---------------------------------------------------------------------------
+# live view
+# ---------------------------------------------------------------------------
+fig, ax = plt.subplots()
+im = ax.imshow(T0.to_numpy(), cmap="inferno", vmin=20.0, vmax=OG_stove)
+fig.colorbar(im, ax=ax, label="Temperature (deg C)")
+
+wall_mask = wall_p.get().to_numpy().reshape(GRID_N, GRID_N)
+wall_overlay = np.where(wall_mask == 1, 1.0, np.nan)
+ax.imshow(wall_overlay, cmap="gray", vmin=0.0, vmax=1.0, alpha=0.35)
+
+ax.set_title("Heat diffusion in a floor plan (Taichi backend)")
+time_text = ax.text(
+    0.02, 0.98, "", transform=ax.transAxes, va="top", ha="left",
+    color="white", fontsize=9, bbox=dict(facecolor="black", alpha=0.4, pad=2),
+)
+fig.show()
+
+clock = 0.0
+sim_time = 0.0
+try:
+    while True:
+        t_start = time.perf_counter()
+        for _ in range(STEPS_PER_FRAME):
+            clock += PULSE_FREQ * DT_VAL
+            stove_p.set(OG_stove + 20.0 * math.sin(clock))
+
+            diffuse_kernel(T1.data, T0.data)
+            apply_source_kernel(T1.data)
+            T0, T1 = T1, T0
+            sim_time += dt_p.get()
+
+        ti.sync()  # GPU is async; sync before stopping the timer
+        frame_ms = (time.perf_counter() - t_start) * 1e3
+        print(f"{STEPS_PER_FRAME} steps: {frame_ms:8.1f} ms  ({frame_ms / STEPS_PER_FRAME * 1e3:6.1f} us/step)")
+
+        time_text.set_text(f"t = {sim_time:.0f} s")
+        im.set_data(T0.to_numpy())
+        fig.canvas.draw_idle()
+        fig.canvas.start_event_loop(0.1)
+except KeyboardInterrupt:
+    pass
+
+# ---------------------------------------------------------------------------
+# teardown
+# ---------------------------------------------------------------------------
+# destroy() hands a Parameter's storage back to the pool; it is a no-op on a
+# const, which owns none. Safe only because nothing will launch again - the
+# pool may reissue these buffers, while the compiled kernels above still point
+# at them (see base.py, "Lifetime of a compiled object").
+for param in (stove_p, wall_p, alpha_p):
+    param.destroy()
+pool.release_data(T0)
+pool.release_data(T1)
+print("pooled storage released")
