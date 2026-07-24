@@ -18,6 +18,7 @@ from ._closure_backend import (
     ClosureBackendParameter,
     ClosureHelperBuilder,
     ClosureKernelBuilder,
+    ClosureRoutineBuilder,
 )
 
 
@@ -49,3 +50,12 @@ class TaichiKernelBuilder(ClosureKernelBuilder):
     """
 
     _backend = ti
+
+
+class TaichiRoutineBuilder(ClosureRoutineBuilder):
+    """
+    Compiles an ordered sequence of Taichi kernels sharing one bag into a
+    Routine.
+
+    Author: B.G (07/2026)
+    """

@@ -18,6 +18,7 @@ backend substitutes into the source directly instead.
 Author: B.G (07/2026)
 """
 
+import inspect
 from types import FunctionType
 from typing import Any, ClassVar
 
@@ -35,6 +36,7 @@ from .base import (
     filter_bindings,
     resolve_binding,
 )
+from .routine import RoutineBuilder
 
 
 def specialize_closure(template, bindings: dict[str, Any], ctx: _SpecializeCtx) -> FunctionType:
@@ -412,3 +414,27 @@ class ClosureKernelBuilder(KernelBuilder):
         krn = ClosureKernel(specialised.__name__, self._backend.kernel(specialised))
         attach_meta(krn, self._template, self._bindings)
         return krn
+
+
+class ClosureRoutineBuilder(RoutineBuilder):
+    """
+    Compiles a linear sequence of Taichi/Quadrants kernels sharing one bag.
+
+    A step's data arity is read straight off its template's own python
+    signature - `def diffuse(T_out, T_in)` declares two - since bound objects
+    never appear there. Launching a compiled step is just calling it: Taichi
+    and Quadrants kernels derive their own launch range from the template, so
+    `grid`/`block` (cupy-only - see CupyRoutineBuilder) are accepted and
+    ignored.
+
+    Author: B.G (07/2026)
+    """
+
+    def _data_arity(self, kernel_builder: KernelBuilder) -> int:
+        template = kernel_builder.template
+        if template is None:
+            raise ValueError("add_kernel: kernel_builder has no ingested template")
+        return len(inspect.signature(template).parameters)
+
+    def _make_caller(self, compiled_kernel, grid, block):
+        return compiled_kernel

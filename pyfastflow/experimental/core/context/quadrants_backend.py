@@ -36,6 +36,7 @@ from ._closure_backend import (
     ClosureBackendParameter,
     ClosureHelperBuilder,
     ClosureKernelBuilder,
+    ClosureRoutineBuilder,
 )
 
 
@@ -69,3 +70,12 @@ class QuadrantsKernelBuilder(ClosureKernelBuilder):
     """
 
     _backend = qd
+
+
+class QuadrantsRoutineBuilder(ClosureRoutineBuilder):
+    """
+    Compiles an ordered sequence of Quadrants kernels sharing one bag into a
+    Routine.
+
+    Author: B.G (07/2026)
+    """

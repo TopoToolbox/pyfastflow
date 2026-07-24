@@ -43,6 +43,7 @@ import numpy as np
 
 from .base import HelperBuilder, Kernel, KernelBuilder, Parameter, _SpecializedHelper, _SpecializeCtx, attach_meta
 from .base import Bag
+from .routine import RoutineBuilder
 
 _KERNEL_NAME_RE = re.compile(r"__global__\s+void\s+(\w+)\s*\(")
 _DEVICE_NAME_RE = re.compile(r"__device__\s+[\w:\*&]+\s+(\w+)\s*\(")
@@ -507,3 +508,52 @@ class CupyKernelBuilder(KernelBuilder):
         krn._final_source = source
         attach_meta(krn, template, self._bindings)
         return krn
+
+
+class CupyRoutineBuilder(RoutineBuilder):
+    """
+    Compiles an ordered sequence of cp.RawKernel launches sharing one bag
+    into a Routine.
+
+    A step's data arity is read off the `__global__` signature as written in
+    the ingested source, before compile() appends the pointer arguments
+    spans imply - so it counts exactly the arguments the template author
+    declared, the same ones data_handle_ref maps onto.
+
+    `grid`/`block` have no auto-ranging equivalent on cupy the way Taichi and
+    Quadrants derive one from the template, so they are resolved once per
+    step: whatever add_kernel(..., grid=..., block=...) gave that step, else
+    the default passed to this builder's own constructor. Neither given
+    raises at compile time, naming the step.
+
+    Author: B.G (07/2026)
+    """
+
+    def __init__(self, *, grid=None, block=None):
+        super().__init__()
+        self._default_grid = grid
+        self._default_block = block
+
+    def _data_arity(self, kernel_builder: KernelBuilder) -> int:
+        template = kernel_builder.template
+        if template is None:
+            raise ValueError("add_kernel: kernel_builder has no ingested template")
+        match = _KERNEL_SIG_RE.search(template)
+        if not match:
+            raise ValueError("add_kernel: could not find a __global__ signature in template source")
+        argstr = match.group(2).strip()
+        return len(_split_args(argstr)) if argstr else 0
+
+    def _make_caller(self, compiled_kernel, grid, block):
+        grid = grid if grid is not None else self._default_grid
+        block = block if block is not None else self._default_block
+        if grid is None or block is None:
+            raise ValueError(
+                f"CupyRoutineBuilder: no grid/block for step '{compiled_kernel.name}' - "
+                "pass grid=/block= to the builder or to this step's add_kernel"
+            )
+
+        def caller(*args):
+            return compiled_kernel(*args, grid=grid, block=block)
+
+        return caller
