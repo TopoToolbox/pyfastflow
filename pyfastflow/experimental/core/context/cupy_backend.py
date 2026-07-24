@@ -4,7 +4,7 @@ CupyHelperBuilder - the recipe for a device helper, specialized as part of
 whichever kernel binds it (see base.py, HelperBuilder).
 
 Here a template is CUDA source text rather than a python function, since
-cp.RawKernel compiles source and there is no function whose globals could be
+cp.RawModule compiles source and there is no function whose globals could be
 patched. Bound objects are written into that source as `$...$` spans holding a
 dotted path, which keeps the in-kernel spelling the same as on the other
 backends:
@@ -15,22 +15,44 @@ backends:
     $helper(a, b)$    call a bound device helper
 
 Compiling substitutes each span according to the parameter's mode - a CUDA
-literal for const, NAME[0] for scalar, NAME[i] for field - and, for scalar and
-field, also generates the pointer argument that expansion implies. Those
-arguments are appended to the __global__ signature and their arrays supplied at
-launch, so a template never declares them by hand. A parameter only read is
-declared `const T*`; one written anywhere in the kernel is declared `T*`.
-Writing to a const parameter is an error.
+literal for const, or a read/write through a pointer for scalar and field.
+That pointer never travels as a kernel argument: every scalar/field Parameter
+a compilation unit reaches - the kernel's own bindings plus, recursively, its
+helpers' - is collected once, deduplicated by uid, into a module-scope
+constant block:
+
+    struct pf_params_t { float* p_<uid>; const float* p_<uid2>; ... };
+    __constant__ pf_params_t pf_params;
+
+uploaded once per compile() via cp.RawModule.get_global. A member is `const`
+when nothing in the unit writes that parameter, `T*` otherwise. Every
+`__global__` and `__device__` function in the module sees the same block, so a
+helper reaches a bound Parameter exactly the way its caller does - there is no
+argument to thread through and no call site to rewrite. At the top of each
+function body one local is declared per pointer that function's own spans
+reference:
+
+    const float* __restrict__ p_<uid> = pf_params.p_<uid>;
+
+read (or written, dropping `const`) through for the rest of that body. This is
+what keeps a function's own accesses provably non-aliasing to the compiler,
+the same guarantee a `__restrict__` kernel argument used to carry - reading
+`pf_params.p_<uid>` directly, span by span, would lose it.
 
 A const parameter can also be used bare, outside any span, in which case it
 arrives as a `#define`. Only names the source actually mentions are defined,
 which keeps macros for common identifiers - N, DIM, EPS, min - from silently
 rewriting unrelated code in the translation unit.
 
-Spans inside a device helper may only reach const parameters and other
-device helpers. That is the framework rule from base.py rather than anything
-specific to cupy: a helper is spliced into its caller and cannot take on a
-pointer argument of its own.
+One `cp.RawModule` is built per compilation unit: the constant block, every
+`__device__` helper the unit reaches (each emitted once, however many call
+sites share it - see _SpecializeCtx), and the unit's `__global__` kernel.
+`CupyKernel._raw_cache` keys the module on its final source text, same as the
+single-kernel cache did before - the whole specialization still reduces to
+that text, uid-qualified struct members included, so it remains a sound key.
+A cache hit skips recompilation but the constant block is re-uploaded
+regardless, since the pointers a compile's bindings currently resolve to are
+not part of what the cache key captures.
 
 Author: B.G (07/2026)
 """
@@ -87,7 +109,7 @@ def _cuda_literal(value) -> str:
 def _extract_name(pattern: re.Pattern, template: str, kind: str) -> str:
     """
     The `__global__`/`__device__` function's own name, read out of the source
-    text - that is the entry point cp.RawKernel is looked up by.
+    text - that is the entry point cp.RawModule.get_function is looked up by.
 
     Author: B.G (07/2026)
     """
@@ -131,43 +153,69 @@ def _walk(path: list[str], bindings: dict[str, Any]):
     return obj
 
 
+def _param_argname(param: Parameter) -> str:
+    """
+    The struct member / local variable name a Parameter's pointer is reached
+    through - stable for the object's whole lifetime since it is derived from
+    `uid`, not from whatever name(s) it happens to be bound under. This is
+    what makes dedup by uid automatic: two spans reaching the same Parameter
+    under two different handles compute the same argname and therefore the
+    same struct member.
+
+    Author: B.G (07/2026)
+    """
+    return f"p_{param.uid}"
+
+
 class _SpanParser:
     """
     Expands the `$...$` spans in a CUDA template body.
 
-    Expansion has side effects the builder needs afterwards: `ptr_params`
-    collects the pointer arguments the spans implied, and `helper_srcs` the
-    source of every device helper they called. Set allow_arrays=False when
-    parsing a device helper, which may not reach scalar or field parameters
-    and so has no use for either. `ctx` is the compile this parse belongs to
-    - a span reaching a CupyHelperBuilder specializes it against `ctx`
-    (memoized there - see _SpecializeCtx), so a helper reached twice in one
-    compile is specialized once.
+    A span reaching a scalar or field Parameter registers it into `ctx`'s
+    shared pointer registry (`ctx.cupy_ptr_registry`, one dict per compile()
+    - see CupyKernelBuilder.compile) rather than generating a call argument:
+    the registry is what becomes the module's `pf_params` constant block.
+    `local_ptrs` tracks, separately, only the pointers *this* body actually
+    used - CupyKernelBuilder.compile and CupyHelperBuilder._specialize use it
+    to prepend that function's own `__restrict__` locals, so a function
+    declares locals for what it reads or writes and nothing else. `ctx` is the
+    compile this parse belongs to - a span reaching a CupyHelperBuilder
+    specializes it against `ctx` (memoized there - see _SpecializeCtx), so a
+    helper reached twice in one compile is specialized once, and any pointer
+    it registers lands in the same shared registry as the kernel's own.
 
     Author: B.G (07/2026)
     """
 
-    def __init__(self, bindings: dict[str, Any], *, allow_arrays: bool, ctx: _SpecializeCtx):
+    def __init__(self, bindings: dict[str, Any], *, ctx: _SpecializeCtx):
         self.bindings = bindings
-        self.allow_arrays = allow_arrays
         self.ctx = ctx
-        self.ptr_params: dict[str, dict] = {}   # argname -> {ctype, write, array}
+        self.local_ptrs: dict[int, dict] = {}   # uid -> {ctype, write}
         self.helper_srcs: dict[str, str] = {}   # name -> source
 
-    def _register_ptr(self, argname: str, param: Parameter, write: bool) -> None:
-        entry = self.ptr_params.get(argname)
+    def _register_ptr(self, param: Parameter, write: bool) -> str:
+        registry = getattr(self.ctx, "cupy_ptr_registry", None)
+        if registry is None:
+            registry = self.ctx.cupy_ptr_registry = {}
+        uid = param.uid
+        entry = registry.get(uid)
         if entry is None:
-            self.ptr_params[argname] = {"ctype": _ctype(param.dtype), "write": write, "array": param.get().data}
-        elif write:
+            entry = {"ctype": _ctype(param.dtype), "write": False, "array": param.get().data}
+            registry[uid] = entry
+        if write:
             entry["write"] = True
+        local = self.local_ptrs.get(uid)
+        if local is None:
+            self.local_ptrs[uid] = {"ctype": entry["ctype"], "write": write}
+        elif write:
+            local["write"] = True
+        return _param_argname(param)
 
-    def _expand_param(self, param: Parameter, method: str, argname: str, call_args: list[str]) -> str:
+    def _expand_param(self, param: Parameter, method: str, call_args: list[str]) -> str:
         if method == "get":
             if param.mode == "const":
                 return _cuda_literal(param.get())
-            if not self.allow_arrays:
-                raise ValueError(f"{param.name}: scalar/field param cannot be used in a device helper (no pointer arg)")
-            self._register_ptr(argname, param, write=False)
+            argname = self._register_ptr(param, write=False)
             if param.mode == "scalar":
                 return f"{argname}[0]"
             idx = call_args[0] if call_args else "0"
@@ -175,11 +223,9 @@ class _SpanParser:
         # set_node
         if param.mode == "const":
             raise ValueError(f"{param.name}: const parameter is read-only")
-        if not self.allow_arrays:
-            raise ValueError(f"{param.name}: set_node cannot be used in a device helper (no pointer arg)")
         if len(call_args) != 2:
             raise ValueError(f"{param.name}: set_node(node, value) takes two arguments")
-        self._register_ptr(argname, param, write=True)
+        argname = self._register_ptr(param, write=True)
         node, val = call_args
         return f"{argname}[0] = {val}" if param.mode == "scalar" else f"{argname}[{node}] = {val}"
 
@@ -194,7 +240,7 @@ class _SpanParser:
         if path[-1] in ("get", "set_node"):
             target = _walk(path[:-1], self.bindings)
             if isinstance(target, Parameter):
-                return self._expand_param(target, path[-1], "_".join(path[:-1]), call_args)
+                return self._expand_param(target, path[-1], call_args)
 
         target = _walk(path, self.bindings)
         if isinstance(target, CupyHelperBuilder):
@@ -203,17 +249,55 @@ class _SpanParser:
             self.helper_srcs[target.name] = target.compiled
             return f"{target.name}({argstr if argstr is not None else ''})"
         if isinstance(target, Parameter):
-            return self._expand_param(target, "get", "_".join(path), ["0"])
+            return self._expand_param(target, "get", ["0"])
         return _cuda_literal(target)
 
     def parse(self, body: str) -> str:
         """
-        Expand every `$...$` span in `body`, accumulating ptr_params and
-        helper_srcs as a side effect.
+        Expand every `$...$` span in `body`, accumulating local_ptrs and
+        helper_srcs as a side effect, then prepend the `__restrict__` locals
+        this body's own spans implied - see _insert_locals.
 
         Author: B.G (07/2026)
         """
-        return _SPAN_RE.sub(self._repl, body)
+        expanded = _SPAN_RE.sub(self._repl, body)
+        return _insert_locals(expanded, self.local_ptrs)
+
+
+def _insert_locals(body: str, local_ptrs: dict[int, dict]) -> str:
+    """
+    Prepend one `__restrict__` local per pointer `body` itself references,
+    reading through the module's `pf_params` constant block, right after the
+    function's opening brace.
+
+    Declared `const` unless this body writes that parameter anywhere - kept
+    per function rather than read off the struct member (which is `const`
+    only when *no* function in the whole unit writes it), so a function that
+    only reads a parameter another function in the same unit writes still
+    gets the non-aliasing benefit of a const-qualified local.
+
+    Author: B.G (07/2026)
+    """
+    if not local_ptrs:
+        return body
+    idx = body.find("{")
+    if idx == -1:
+        raise ValueError("could not find a function body to insert parameter locals into")
+    decls = "".join(
+        f"    {'' if e['write'] else 'const '}{e['ctype']}* __restrict__ {_argname_for(uid)} = pf_params.{_argname_for(uid)};\n"
+        for uid, e in sorted(local_ptrs.items())
+    )
+    return f"{body[: idx + 1]}\n{decls}{body[idx + 1 :]}"
+
+
+def _argname_for(uid: int) -> str:
+    """
+    The struct member / local name for a pointer already registered under
+    `uid` - see _param_argname, which this must stay in lockstep with.
+
+    Author: B.G (07/2026)
+    """
+    return f"p_{uid}"
 
 
 def _const_defines(bindings: dict[str, Any], body: str) -> list[str]:
@@ -236,26 +320,46 @@ def _const_defines(bindings: dict[str, Any], body: str) -> list[str]:
     ]
 
 
-def _inject_signature(kernel_src: str, ptr_params: dict[str, dict]) -> str:
+def _param_block_source(registry: dict[int, dict]) -> str:
     """
-    Append the generated pointer params to the __global__ signature.
+    The `pf_params_t` struct and its `__constant__` instance for one
+    compilation unit's pointer registry - empty when the unit reaches no
+    scalar/field Parameter, so a unit with only consts and bare helpers emits
+    no block at all.
+
+    Member order is by uid, ascending - arbitrary but fixed, so it agrees with
+    the upload order _upload_param_block writes in.
 
     Author: B.G (07/2026)
     """
-    if not ptr_params:
-        return kernel_src
-    decls = [
-        f"{'' if e['write'] else 'const '}{e['ctype']}* {name}"
-        for name, e in ptr_params.items()
-    ]
-    joined = ", ".join(decls)
+    if not registry:
+        return ""
+    members = "".join(
+        f"    {'' if e['write'] else 'const '}{e['ctype']}* {_argname_for(uid)};\n"
+        for uid, e in sorted(registry.items())
+    )
+    return f"struct pf_params_t {{\n{members}}};\n__constant__ pf_params_t pf_params;\n"
 
-    def _sub(m: re.Match) -> str:
-        existing = m.group(2).strip()
-        sep = ", " if existing else ""
-        return f"{m.group(1)}{m.group(2)}{sep}{joined}{m.group(3)}"
 
-    return _KERNEL_SIG_RE.sub(_sub, kernel_src, count=1)
+def _upload_param_block(module: "cp.RawModule", registry: dict[int, dict]) -> None:
+    """
+    Copy the current pointer for every registered Parameter into the module's
+    `pf_params` constant block, in the same uid order the struct was emitted
+    in.
+
+    Runs once per compile(), synchronously - safe as an ordinary host->device
+    copy anywhere a kernel launch would be, but not inside CUDA graph capture
+    (see CupyRoutineBuilder.compile, which compiles every step - and so
+    performs every upload - before capture starts).
+
+    Author: B.G (07/2026)
+    """
+    if not registry:
+        return
+    global_ptr = module.get_global("pf_params")
+    ptrs = np.array([e["array"].data.ptr for _, e in sorted(registry.items())], dtype=np.uint64)
+    view = cp.ndarray(ptrs.shape, dtype=np.uint64, memptr=global_ptr)
+    view.set(ptrs)
 
 
 class CupyParameter(Parameter):
@@ -357,7 +461,7 @@ class CupyHelper(_SpecializedHelper):
     Produced by a CupyHelperBuilder as part of an enclosing kernel's
     compile(); see HelperBuilder.
 
-    Nothing is compiled at this stage: RawKernel compiles whole translation
+    Nothing is compiled at this stage: RawModule compiles whole translation
     units, so `.compiled` hands back source, and the helper is compiled as part
     of each kernel that splices it in.
 
@@ -395,53 +499,65 @@ class CupyHelper(_SpecializedHelper):
 
 class CupyKernel(Kernel):
     """
-    A launchable kernel, backed by a compiled cp.RawKernel.
+    A launchable kernel, backed by a function pulled from a compiled
+    cp.RawModule (see CupyKernelBuilder.compile).
 
-    Launch dimensions are explicit: RawKernel has nothing like Taichi's
-    auto-ranging, so __call__ takes grid and block. The positional arguments
-    are the template's own data arguments, and the arrays behind the generated
-    pointer parameters follow them.
-
-    Compiled kernels are cached on the class by final source text, which is
-    what the whole specialization reduces to and therefore a sound key.
+    Launch dimensions are explicit: a RawModule function has nothing like
+    Taichi's auto-ranging, so __call__ takes grid and block. The positional
+    arguments are exactly the template's own declared data arguments - every
+    bound scalar/field Parameter reaches this kernel through the module's
+    constant block instead of a launch argument, so there is nothing else to
+    append here the way an earlier version of this class needed to.
 
     Author: B.G (07/2026)
     """
 
-    _raw_cache: dict[str, "cp.RawKernel"] = {}
+    _raw_cache: dict[str, "cp.RawModule"] = {}
 
-    def __init__(self, name: str, compiled, bound_arrays: list):
+    def __init__(self, name: str, compiled, module: "cp.RawModule"):
         super().__init__()
         self.name = name
         self._compiled = compiled
-        self._bound_arrays = bound_arrays
+        self._module = module
 
     @property
     def compiled(self):
         """
-        The underlying cp.RawKernel this Kernel's __call__ launches.
+        The underlying RawModule function this Kernel's __call__ launches.
 
         Author: B.G (07/2026)
         """
         return self._compiled
 
+    @property
+    def module(self) -> "cp.RawModule":
+        """
+        The cp.RawModule this kernel's function was pulled from - shared with
+        every other kernel compiled from the same final source text (see
+        CupyKernel._raw_cache).
+
+        Author: B.G (07/2026)
+        """
+        return self._module
+
     def __call__(self, *args, grid, block, **kwargs):
         """
         Launches the compiled kernel. `grid`/`block` are int or tuple launch
-        dims, required since RawKernel has no default range.
+        dims, required since a RawModule function has no default range.
 
         Author: B.G (07/2026)
         """
         grid = (grid,) if isinstance(grid, int) else tuple(grid)
         block = (block,) if isinstance(block, int) else tuple(block)
-        return self._compiled(grid, block, tuple(args) + tuple(self._bound_arrays))
+        return self._compiled(grid, block, tuple(args))
 
 
 class CupyHelperBuilder(HelperBuilder):
     """
-    Recipe for a device helper compiled from CUDA `__device__` source. Spans
-    may only reference const params / other device helpers (no pointer
-    args). Specialized only as part of an enclosing kernel's compile() - see
+    Recipe for a device helper compiled from CUDA `__device__` source. A span
+    inside one may reach any Parameter mode and any other device helper,
+    exactly like a kernel's own spans - see the module docstring's constant
+    block. Specialized only as part of an enclosing kernel's compile() - see
     HelperBuilder; compile() itself raises.
 
     Author: B.G (07/2026)
@@ -451,13 +567,17 @@ class CupyHelperBuilder(HelperBuilder):
         """
         Expand the template's spans against `ctx` and prepend the helper
         sources and const #defines it turned out to need, giving the final
-        `__device__` text.
+        `__device__` text. Any scalar/field Parameter a span here reaches is
+        registered into `ctx.cupy_ptr_registry` exactly as one reached from
+        the enclosing kernel would be (see _SpanParser) - the block that
+        results is shared, so this helper and its caller read the same
+        pointer.
 
         Author: B.G (07/2026)
         """
         template = self._template
         name = _extract_name(_DEVICE_NAME_RE, template, "__device__")
-        parser = _SpanParser(self._bindings, allow_arrays=False, ctx=ctx)
+        parser = _SpanParser(self._bindings, ctx=ctx)
         body = parser.parse(template)
         source = "\n".join(list(parser.helper_srcs.values()) + _const_defines(self._bindings, body) + [body])
         fn = CupyHelper(name, source)
@@ -476,35 +596,53 @@ class CupyKernelBuilder(KernelBuilder):
 
     def compile(self) -> CupyKernel:
         """
-        Expand the template's spans, inject the pointer args they implied into
-        the __global__ signature, prepend helpers + const #defines, then build
-        (or reuse, keyed by final source text) the cp.RawKernel.
+        Expand the template's spans - the kernel's own and, recursively,
+        every CupyHelperBuilder they reach - prepend the helpers' source,
+        const #defines, and the `pf_params` constant block the whole unit's
+        scalar/field Parameters collected into, then build (or reuse, keyed
+        by final source text) the cp.RawModule and pull this kernel's
+        function out of it.
 
         Opens a fresh _SpecializeCtx for this compile, so every
         CupyHelperBuilder this kernel's spans reach is specialized once,
-        against these bindings.
+        against these bindings, and every scalar/field Parameter any of them
+        binds lands in one shared pointer registry
+        (`ctx.cupy_ptr_registry`) - see _SpanParser and _param_block_source.
+
+        The registry - and so the set of pointers to upload - is rebuilt by
+        parsing on every call, cache hit or not, since the final source text
+        (the cache key) does not capture what a Parameter's storage currently
+        points at. A cache hit therefore skips recompilation but never skips
+        the upload; see _upload_param_block.
 
         Author: B.G (07/2026)
         """
         ctx = _SpecializeCtx()
+        ctx.cupy_ptr_registry = {}
         template = self._template
         name = _extract_name(_KERNEL_NAME_RE, template, "__global__")
-        parser = _SpanParser(self._bindings, allow_arrays=True, ctx=ctx)
+        parser = _SpanParser(self._bindings, ctx=ctx)
         body = parser.parse(template)
-        body = _inject_signature(body, parser.ptr_params)
-        # extern "C" linkage so cp.RawKernel finds the entry by its plain name
+        # extern "C" linkage so cp.RawModule finds the entry by its plain name
         # (C++ would name-mangle it); helper __device__ funcs stay mangled and
         # link fine within the same translation unit.
         if 'extern "C"' not in body:
             body = body.replace("__global__", 'extern "C" __global__', 1)
-        source = "\n".join(list(parser.helper_srcs.values()) + _const_defines(self._bindings, body) + [body])
-        bound_arrays = [e["array"] for e in parser.ptr_params.values()]
+        registry = ctx.cupy_ptr_registry
+        source = "\n".join(
+            [_param_block_source(registry)]
+            + list(parser.helper_srcs.values())
+            + _const_defines(self._bindings, body)
+            + [body]
+        )
 
-        raw = CupyKernel._raw_cache.get(source)
-        if raw is None:
-            raw = cp.RawKernel(source, name)
-            CupyKernel._raw_cache[source] = raw
-        krn = CupyKernel(name, raw, bound_arrays)
+        module = CupyKernel._raw_cache.get(source)
+        if module is None:
+            module = cp.RawModule(code=source)
+            CupyKernel._raw_cache[source] = module
+        _upload_param_block(module, registry)
+        raw = module.get_function(name)
+        krn = CupyKernel(name, raw, module)
         krn._final_source = source
         attach_meta(krn, template, self._bindings)
         return krn
@@ -530,30 +668,43 @@ class _CapturedRoutine(Routine):
     with a plain Kernel: queue work, call, read.
 
     A captured graph bakes in the device pointers it was captured with -
-    every launch it holds already has its argument list resolved. Call-time
+    every launch it holds already has its bulk-data argument list resolved,
+    the same arguments a step's `data_handle_ref` maps onto. A step's bound
+    scalar/field Parameters are not part of that argument list at all: they
+    reach the kernel through its module's `pf_params` constant block (see the
+    module docstring), read fresh by the device on every execution rather
+    than captured as part of the launch. Replay therefore sees whatever that
+    block currently holds - which is exactly what the block held at the last
+    compile(), since nothing but a compile()'s upload ever writes to it - so
+    the staleness rules below apply the same way whether a pointer reached a
+    step through its launch arguments or through its constant block. Call-time
     data handle overrides (the `rout(A, B)` form) cannot be honoured against
-    that: doing so would either use the wrong buffers silently or require a
-    fresh capture on a call site that looks like an ordinary launch, hiding a
-    real performance cliff behind what reads as a cheap replay. This raises
-    instead - compile(captured=False) for a routine that overrides are meant
-    to work against.
+    a captured graph's already-resolved bulk-data arguments: doing so would
+    either use the wrong buffers silently or require a fresh capture on a
+    call site that looks like an ordinary launch, hiding a real performance
+    cliff behind what reads as a cheap replay. This raises instead -
+    compile(captured=False) for a routine that overrides are meant to work
+    against.
 
     See the module docstring's "Contract: no set()/destroy() mid-routine" for
     the staleness rules a Routine has always had; capture adds one more way a
     compiled Routine can go stale without anything checking for it:
     - a write to a scalar or field Parameter reached by this routine's bag
-      goes through the same storage the graph's launches point at, so replay
-      keeps seeing the new value - this is the intended way to feed a
-      captured routine changing data, same as for an uncaptured one;
+      goes through the same storage both the graph's launch arguments and its
+      steps' constant blocks already point at, so replay keeps seeing the new
+      value - this is the intended way to feed a captured routine changing
+      data, same as for an uncaptured one;
     - set() on a const Parameter changes generated source, which the graph
       never re-reads - the routine (and the graph baked into it) must be
       recompiled;
     - destroy() on any Parameter or data handle this routine reaches, or
-      anything else that returns a buffer to the pool, invalidates the
-      pointers the graph's launches were captured with. Recompile.
+      anything else that returns a buffer to the pool, invalidates a pointer
+      the graph's launches were captured with or a step's constant block was
+      last uploaded with. Recompile.
     None of this is enforced at runtime; it is exactly the discipline a
     Kernel or an uncaptured Routine already asks for, just extended to a
-    graph's baked-in pointers as an added way "recompile after this" applies.
+    graph's baked-in pointers - launch arguments and constant blocks alike -
+    as an added way "recompile after this" applies.
 
     Author: B.G (07/2026)
     """
@@ -586,13 +737,16 @@ class _CapturedRoutine(Routine):
 
 class CupyRoutineBuilder(RoutineBuilder):
     """
-    Compiles an ordered sequence of cp.RawKernel launches sharing one bag
+    Compiles an ordered sequence of compiled-kernel launches sharing one bag
     into a Routine.
 
     A step's data arity is read off the `__global__` signature as written in
-    the ingested source, before compile() appends the pointer arguments
-    spans imply - so it counts exactly the arguments the template author
-    declared, the same ones data_handle_ref maps onto.
+    the ingested source - the template author's own declared data arguments,
+    the same ones data_handle_ref maps onto. Every bound scalar/field
+    Parameter a step's spans reach travels through its module's constant
+    block instead (see the module docstring), so nothing is appended to this
+    count at compile time the way an earlier version of this class needed to
+    account for.
 
     `grid`/`block` have no auto-ranging equivalent on cupy the way Taichi and
     Quadrants derive one from the template, so they are resolved once per
@@ -652,11 +806,15 @@ class CupyRoutineBuilder(RoutineBuilder):
         captured=True compiles every step exactly as captured=False does,
         then:
         1. Warms up each step by launching it once, for real, on the
-           default stream. cp.RawKernel compiles its module lazily, on
-           first launch; that JIT must not happen while capturing (a
-           RawKernel launched for the first time mid-capture either fails
-           the capture outright or bakes in a broken graph node - CUDA's
-           capture machinery assumes the module is already resident).
+           default stream. Each step's compile() (just above, in this same
+           method) already built its cp.RawModule and uploaded its constant
+           block before this point, so the warmup is not covering a lazy
+           module load the way it would have to for a JIT that only happened
+           on first launch; it remains cheap insurance against any other
+           first-launch cost CUDA's capture machinery would rather not see
+           mid-capture (a launch that fails or behaves unusually the first
+           time either fails the capture outright or bakes in a broken graph
+           node).
         2. Restores every data buffer this routine reaches (add_data's
            handles) to the values it captured a copy of before warming up
            - a warmup launch is a real launch and actually computes into
@@ -667,7 +825,11 @@ class CupyRoutineBuilder(RoutineBuilder):
            non-blocking stream, via cp.cuda.Stream.begin_capture() /
            end_capture(). Nothing on that stream executes during capture -
            only the graph is built - so this pass leaves the (already
-           restored) buffers untouched.
+           restored) buffers untouched. Each step's constant block (see the
+           module docstring) was already uploaded synchronously by its own
+           compile() call, above, well before this point - a synchronous
+           copy issued while a stream is being captured is illegal, so that
+           upload could not happen here even if it needed to.
         4. Checks the default cupy memory pool's used_bytes() is the same
            before and after capture and raises if not. Every data handle a
            routine launches with is already allocated by the time compile()
@@ -705,8 +867,10 @@ class CupyRoutineBuilder(RoutineBuilder):
             for step in compiled_steps:
                 step.caller(*(defaults[name] for name in step.canonical_refs))
 
-        # 1. warm up every kernel with one real launch, so first-launch
-        # module JIT happens before capture starts, not during it.
+        # 1. warm up every kernel with one real launch, so any remaining
+        # first-launch cost happens before capture starts, not during it -
+        # the module itself is already built and its constant block already
+        # uploaded, by compile() just above.
         snapshots = {name: buf.copy() for name, buf in defaults.items()}
         _launch_all()
         cp.cuda.Device().synchronize()

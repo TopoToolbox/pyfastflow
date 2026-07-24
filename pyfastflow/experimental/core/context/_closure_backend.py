@@ -346,29 +346,6 @@ class ClosureKernel(Kernel):
         return self._compiled(*args, **kwargs)
 
 
-def _check_const_only(bindings: dict[str, Any]) -> None:
-    """
-    Raise unless every Parameter reachable in `bindings` is const mode.
-
-    This enforces the rule in base.py that a device helper binds const
-    parameters only, passing any data through explicit arguments instead.
-    Bound Bags are searched too, so a scalar or field parameter tucked inside
-    one does not slip past.
-
-    Author: B.G (07/2026)
-    """
-    for name, value in bindings.items():
-        if isinstance(value, Parameter):
-            if value.mode != "const":
-                raise ValueError(
-                    f"device helper: bound parameter '{name}' has mode {value.mode!r}, but a device "
-                    "helper may only bind const parameters - pass the data as an explicit argument to "
-                    "the helper instead"
-                )
-        elif isinstance(value, Bag):
-            _check_const_only(dict(value.items()))
-
-
 class ClosureHelperBuilder(HelperBuilder):
     """
     Recipe for a device helper compiled to a ti.func/qd.func. Subclasses pin
@@ -382,13 +359,11 @@ class ClosureHelperBuilder(HelperBuilder):
 
     def _specialize(self, ctx: _SpecializeCtx) -> ClosureHelper:
         """
-        Check the const-only rule, splice the referenced bindings into the
-        template's globals against `ctx`, and compile the result as a device
-        func.
+        Splice the referenced bindings into the template's globals against
+        `ctx`, and compile the result as a device func.
 
         Author: B.G (07/2026)
         """
-        _check_const_only(self._bindings)
         specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings), ctx)
         fn = ClosureHelper(specialised.__name__, self._backend.func(specialised))
         attach_meta(fn, self._template, self._bindings)

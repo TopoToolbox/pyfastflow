@@ -91,14 +91,21 @@ read, p.set_node(node, value) to write. A const Parameter declared solo=True
 is the exception: it resolves to a bare compile-time literal, read as `p` with
 no call.
 
-Device helpers bind const parameters only
------------------------------------------
-A HelperBuilder may only bind const-mode Parameters; any data it needs is
-passed to it as an explicit argument by the calling kernel. A helper is
-spliced into its caller and has no way to acquire a pointer argument of its
-own, so this holds on all three backends alike. It is checked when the helper
-is specialized, i.e. as part of the enclosing kernel's compile(). Kernels
-carry no such restriction and may bind any mode.
+What a device helper may bind
+-----------------------------
+A helper binds whatever a kernel binds, in any mode, on every backend.
+
+On Taichi and Quadrants, bound objects reach device code as globals, and a
+helper is traced as part of the kernel that calls it, so alpha.get(i) reads
+the same inside a helper as it does in the kernel body.
+
+On cupy, every scalar/field Parameter a compilation unit reaches - the
+kernel's own bindings plus, recursively, every helper's - is collected into
+one module-scope `__constant__` block, uploaded once per compile(). Every
+`__global__` and `__device__` function compiled into that module sees the
+same block, so a helper reaches a bound Parameter exactly the way its caller
+does, with no pointer argument to thread through and no call site to rewrite.
+See cupy_backend.py's module docstring for the block's exact shape.
 
 Lifetime of a compiled object
 -----------------------------
