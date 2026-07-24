@@ -116,6 +116,7 @@ class ClosureBackendParameter(Parameter):
         if solo and mode != "const":
             raise ValueError(f"{name}: solo access is const-only, got mode {mode!r}")
 
+        super().__init__()
         self.name = name
         self.dtype = dtype
         self.mode = mode
@@ -271,6 +272,7 @@ class ClosureDeviceFunction(DeviceFunction):
     """
 
     def __init__(self, name: str, compiled):
+        super().__init__()
         self.name = name
         self._compiled = compiled
 

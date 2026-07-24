@@ -276,6 +276,7 @@ class CupyParameter(Parameter):
         if solo and mode != "const":
             raise ValueError(f"{name}: solo access is const-only, got mode {mode!r}")
 
+        super().__init__()
         self.name = name
         self.dtype = dtype
         self.mode = mode
@@ -353,6 +354,7 @@ class CupyDeviceFunction(DeviceFunction):
     """
 
     def __init__(self, name: str, source: str):
+        super().__init__()
         self.name = name
         # note: distinct from Specializable._source (the raw template, set by
         # attach_meta) - this is the spliced __device__ source `.compiled` serves.

@@ -9,7 +9,7 @@ Author: B.G (07/2026)
 
 from typing import Any, ClassVar
 
-from .base import DataHandle
+from .base import DataHandle, new_uid
 
 
 class FieldsBuilderDataHandle(DataHandle):
@@ -37,6 +37,7 @@ class FieldsBuilderDataHandle(DataHandle):
         cls = type(self)
         cls._next_id += 1
         self.id = cls._next_id
+        self._uid = new_uid()
         self.dtype = dtype
         self.shape = tuple(shape)
         self.in_use = False

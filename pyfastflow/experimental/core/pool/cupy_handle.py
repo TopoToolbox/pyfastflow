@@ -8,7 +8,7 @@ from typing import Any
 
 import cupy as cp
 
-from .base import DataHandle
+from .base import DataHandle, new_uid
 
 
 class CupyDataHandle(DataHandle):
@@ -28,6 +28,7 @@ class CupyDataHandle(DataHandle):
         """
         CupyDataHandle._next_id += 1
         self.id = CupyDataHandle._next_id
+        self._uid = new_uid()
         self.dtype = dtype
         self.shape = tuple(shape)
         self.in_use = False

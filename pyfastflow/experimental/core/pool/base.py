@@ -8,8 +8,27 @@ quadrants, cupy, ...) must implement. No allocation logic here
 Author: B.G (07/2026)
 """
 
+import itertools
 from abc import ABC, abstractmethod
 from typing import Any
+
+_uid_counter = itertools.count()
+
+
+def new_uid() -> int:
+    """
+    Return the next value from the process-wide identity counter.
+
+    Every Parameter, Bag, Helper (device-function builder and its compiled
+    artifact) and pool DataHandle is assigned one of these at construction,
+    exposed as a read-only `uid` property. uids are plain integers drawn from
+    this single shared counter - not stable across processes, and
+    deliberately so: they identify an object within one running process and
+    must never appear in generated code or a cache key.
+
+    Author: B.G (07/2026)
+    """
+    return next(_uid_counter)
 
 
 class DataHandle(ABC):
@@ -20,7 +39,11 @@ class DataHandle(ABC):
     pool for reuse without freeing memory; `destroy()` actually frees it.
 
     Attributes:
-        id: Unique handle identifier, assigned by the backend.
+        id: Per-backend allocation counter, assigned by the backend - used for
+            pool bookkeeping and not unique across backends.
+        uid: Process-wide identity from the shared counter (new_uid()) - unique
+            across every Parameter, Bag, Helper and DataHandle regardless of
+            backend. Concrete handles set self._uid in their own __init__.
         dtype: Backend-native or common dtype tag for this resource.
         shape: Resource dimensions. () for a scalar.
         in_use: True between acquire() and release().
@@ -32,6 +55,15 @@ class DataHandle(ABC):
     dtype: Any
     shape: tuple[int, ...]
     in_use: bool
+
+    @property
+    def uid(self) -> int:
+        """
+        Process-wide identity assigned at construction. See new_uid().
+
+        Author: B.G (07/2026)
+        """
+        return self._uid
 
     @property
     @abstractmethod

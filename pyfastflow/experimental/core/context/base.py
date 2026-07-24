@@ -104,7 +104,7 @@ from abc import ABC, abstractmethod
 from functools import lru_cache
 from typing import Any, ClassVar
 
-from ..pool.base import DataHandle
+from ..pool.base import DataHandle, new_uid
 
 
 class Parameter(ABC):
@@ -136,8 +136,53 @@ class Parameter(ABC):
 
     name: str
     dtype: Any
-    mode: str
     solo: bool = False
+
+    def __init__(self):
+        """
+        Assign this parameter's process-wide uid and open its `mode` slot.
+        Concrete backends call this first, then set `self.mode = ...` once as
+        part of their own __init__ - see the `mode` property below.
+
+        Author: B.G (07/2026)
+        """
+        self._uid = new_uid()
+        self._mode: str | None = None
+
+    @property
+    def uid(self) -> int:
+        """
+        Process-wide identity assigned at construction, from the same counter
+        as every other Parameter, Bag, Helper and pool data handle. Two
+        references to one Parameter share a uid; two different Parameters
+        never do, even if they hold equal values. Not stable across processes
+        and never meant to appear in generated code or a cache key - see the
+        module docstring, "uid vs handle".
+
+        Author: B.G (07/2026)
+        """
+        return self._uid
+
+    @property
+    def mode(self) -> str:
+        """
+        Where the value lives - "const", "scalar" or "field". Set once, by
+        the backend's __init__; reassigning it raises. To change a
+        parameter's mode, construct a new Parameter and swap it into the bag
+        in place of this one.
+
+        Author: B.G (07/2026)
+        """
+        return self._mode
+
+    @mode.setter
+    def mode(self, value: str) -> None:
+        if self._mode is not None:
+            raise AttributeError(
+                f"{getattr(self, 'name', '?')}: Parameter.mode is immutable once set (already "
+                f"{self._mode!r}); construct a new Parameter and swap it into the bag instead"
+            )
+        self._mode = value
 
     @abstractmethod
     def get(self):
@@ -233,6 +278,24 @@ class DeviceFunction(Specializable):
 
     Author: B.G (07/2026)
     """
+
+    def __init__(self):
+        """
+        Assign this helper's process-wide uid. Concrete backends call this
+        first in their own __init__.
+
+        Author: B.G (07/2026)
+        """
+        self._uid = new_uid()
+
+    @property
+    def uid(self) -> int:
+        """
+        Process-wide identity assigned at construction. See Parameter.uid.
+
+        Author: B.G (07/2026)
+        """
+        return self._uid
 
 
 class Kernel(Specializable):
@@ -454,6 +517,19 @@ class DeviceFunctionBuilder(CompileBuilder):
     Author: B.G (07/2026)
     """
 
+    def __init__(self):
+        super().__init__()
+        self._uid = new_uid()
+
+    @property
+    def uid(self) -> int:
+        """
+        Process-wide identity assigned at construction. See Parameter.uid.
+
+        Author: B.G (07/2026)
+        """
+        return self._uid
+
 
 class KernelBuilder(CompileBuilder):
     """
@@ -485,9 +561,20 @@ class Bag:
     """
 
     def __init__(self, items: dict[str, Any] | None = None):
+        self._uid = new_uid()
         self._items: dict[str, Any] = {}
         for name, item in (items or {}).items():
             self.add(name, item)
+
+    @property
+    def uid(self) -> int:
+        """
+        Process-wide identity assigned at construction, from the same counter
+        as Parameters, Helpers and pool data handles. See Parameter.uid.
+
+        Author: B.G (07/2026)
+        """
+        return self._uid
 
     def add(self, name: str, item: Any) -> None:
         """
@@ -516,3 +603,70 @@ class Bag:
 
     def items(self):
         return self._items.items()
+
+    def walk(self, prefix: str = ""):
+        """
+        Yield (dotted_handle, obj) for every member, descending into nested
+        Bags depth-first.
+
+        A nested Bag produces two things: an entry for the Bag itself, at its
+        own dotted path, then one entry per member underneath it. So
+        `Bag({"at": Bag({"i": p1, "j": p2}), "r": p3})` walks as
+        `("at", <Bag>)`, `("at.i", p1)`, `("at.j", p2)`, `("r", p3)` - the
+        parent Bag's entry always precedes its members'.
+
+        Author: B.G (07/2026)
+        """
+        for name, item in self._items.items():
+            handle = f"{prefix}.{name}" if prefix else name
+            if isinstance(item, Bag):
+                yield handle, item
+                yield from item.walk(handle)
+            else:
+                yield handle, item
+
+
+def _uid_of(obj: Any) -> int | None:
+    """
+    An object's uid if it has one, else None. Handles bound without a uid
+    (plain python values, unwrapped bindings) are simply skipped by
+    check_handles rather than treated as a conflict.
+
+    Author: B.G (07/2026)
+    """
+    uid = getattr(obj, "uid", None)
+    return uid if isinstance(uid, int) else None
+
+
+def check_handles(units: dict[str, dict[str, Any]]) -> None:
+    """
+    Verify that a handle means the same object everywhere it is used.
+
+    `units` maps a unit name (a kernel, a routine step - whatever the caller
+    is checking) to that unit's own {handle: obj} map, typically built from
+    Bag.walk(). Across every unit given, the same handle string must resolve
+    to objects sharing one uid; if two units bind the same handle to objects
+    with different uids, this raises naming the handle and both owning units.
+
+    The converse is fine and common: two different handles pointing at the
+    same uid (an alias, or one Parameter reused under two names) is not a
+    conflict and is not reported.
+
+    Objects with no `uid` attribute are ignored - there is nothing to compare.
+
+    Author: B.G (07/2026)
+    """
+    seen: dict[str, tuple[int, str]] = {}
+    for unit_name, handles in units.items():
+        for handle, obj in handles.items():
+            uid = _uid_of(obj)
+            if uid is None:
+                continue
+            prior = seen.get(handle)
+            if prior is None:
+                seen[handle] = (uid, unit_name)
+            elif prior[0] != uid:
+                raise ValueError(
+                    f"handle '{handle}' is bound to different objects: "
+                    f"uid {prior[0]} in '{prior[1]}' vs uid {uid} in '{unit_name}'"
+                )
