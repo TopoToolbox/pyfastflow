@@ -43,7 +43,7 @@ import numpy as np
 
 from .base import HelperBuilder, Kernel, KernelBuilder, Parameter, _SpecializedHelper, _SpecializeCtx, attach_meta
 from .base import Bag
-from .routine import RoutineBuilder
+from .routine import Routine, RoutineBuilder, _CompiledStep
 
 _KERNEL_NAME_RE = re.compile(r"__global__\s+void\s+(\w+)\s*\(")
 _DEVICE_NAME_RE = re.compile(r"__device__\s+[\w:\*&]+\s+(\w+)\s*\(")
@@ -510,6 +510,80 @@ class CupyKernelBuilder(KernelBuilder):
         return krn
 
 
+class _CapturedRoutine(Routine):
+    """
+    A Routine whose steps have been recorded into a CUDA graph; calling it
+    replays that graph instead of re-issuing each step's kernel launch.
+
+    Built by CupyRoutineBuilder.compile(captured=True) (the default there).
+    Holds the same steps/data_names/defaults an uncaptured Routine would, so
+    introspection agrees between the two, plus the captured cp.cuda.Graph and
+    the private stream the capture was recorded on.
+
+    Capture needs a stream of its own - the default stream cannot be put in
+    capture mode - but replay does not, and the graph is launched on the
+    caller's current stream. A routine that replayed on its private stream
+    would order against nothing the caller had queued, so reading a result
+    straight after a call would need a device-wide synchronize to be correct,
+    which no other launch in this package asks for. Launching on the current
+    stream keeps a captured Routine interchangeable with an uncaptured one and
+    with a plain Kernel: queue work, call, read.
+
+    A captured graph bakes in the device pointers it was captured with -
+    every launch it holds already has its argument list resolved. Call-time
+    data handle overrides (the `rout(A, B)` form) cannot be honoured against
+    that: doing so would either use the wrong buffers silently or require a
+    fresh capture on a call site that looks like an ordinary launch, hiding a
+    real performance cliff behind what reads as a cheap replay. This raises
+    instead - compile(captured=False) for a routine that overrides are meant
+    to work against.
+
+    See the module docstring's "Contract: no set()/destroy() mid-routine" for
+    the staleness rules a Routine has always had; capture adds one more way a
+    compiled Routine can go stale without anything checking for it:
+    - a write to a scalar or field Parameter reached by this routine's bag
+      goes through the same storage the graph's launches point at, so replay
+      keeps seeing the new value - this is the intended way to feed a
+      captured routine changing data, same as for an uncaptured one;
+    - set() on a const Parameter changes generated source, which the graph
+      never re-reads - the routine (and the graph baked into it) must be
+      recompiled;
+    - destroy() on any Parameter or data handle this routine reaches, or
+      anything else that returns a buffer to the pool, invalidates the
+      pointers the graph's launches were captured with. Recompile.
+    None of this is enforced at runtime; it is exactly the discipline a
+    Kernel or an uncaptured Routine already asks for, just extended to a
+    graph's baked-in pointers as an added way "recompile after this" applies.
+
+    Author: B.G (07/2026)
+    """
+
+    def __init__(self, steps: list, data_names: tuple, defaults: dict, graph, stream):
+        super().__init__(steps, data_names, defaults)
+        self._graph = graph
+        self._stream = stream
+
+    def __call__(self, *args) -> None:
+        """
+        Replay the captured graph on the caller's current stream, so the call
+        orders against surrounding work exactly as an uncaptured Routine's
+        launches would. Takes no arguments - see the class docstring for why
+        call-time data handle overrides are rejected rather than honoured or
+        silently re-captured.
+
+        Author: B.G (07/2026)
+        """
+        if args:
+            raise RuntimeError(
+                "Routine: this routine was compiled with captured=True; call-time data "
+                "handle overrides are not supported against a captured CUDA graph, since "
+                "the graph's launches already have their pointers baked in. Compile with "
+                "captured=False for a routine meant to be called with overrides, or build "
+                "a second routine over the override handles and capture that one."
+            )
+        self._graph.launch()
+
+
 class CupyRoutineBuilder(RoutineBuilder):
     """
     Compiles an ordered sequence of cp.RawKernel launches sharing one bag
@@ -557,3 +631,109 @@ class CupyRoutineBuilder(RoutineBuilder):
             return compiled_kernel(*args, grid=grid, block=block)
 
         return caller
+
+    def compile(self, captured: bool = True, dump_source: str | None = None) -> Routine:
+        """
+        Validate (RoutineBuilder._validate), compile every step's kernel, and
+        either return a Routine that launches them in order (captured=False)
+        or capture that same sequence of launches into a CUDA graph and
+        return a Routine that replays it (captured=True, the default here).
+
+        `dump_source` is accepted for signature parity with the closure
+        backend's fused compile() and ignored - there is no generated source
+        on this backend either way.
+
+        captured=False is exactly RoutineBuilder.compile's base behaviour:
+        one host-side launch per step, every call. It is the reference the
+        captured path is diffed against, and stays reachable as a runtime
+        switch - in particular it is the only way to get a Routine that
+        accepts call-time data handle overrides (see _CapturedRoutine).
+
+        captured=True compiles every step exactly as captured=False does,
+        then:
+        1. Warms up each step by launching it once, for real, on the
+           default stream. cp.RawKernel compiles its module lazily, on
+           first launch; that JIT must not happen while capturing (a
+           RawKernel launched for the first time mid-capture either fails
+           the capture outright or bakes in a broken graph node - CUDA's
+           capture machinery assumes the module is already resident).
+        2. Restores every data buffer this routine reaches (add_data's
+           handles) to the values it captured a copy of before warming up
+           - a warmup launch is a real launch and actually computes into
+           those buffers, and compile() otherwise would not be the
+           side-effect-free operation every other compile() in this
+           package is.
+        3. Captures the same step sequence again, on a dedicated
+           non-blocking stream, via cp.cuda.Stream.begin_capture() /
+           end_capture(). Nothing on that stream executes during capture -
+           only the graph is built - so this pass leaves the (already
+           restored) buffers untouched.
+        4. Checks the default cupy memory pool's used_bytes() is the same
+           before and after capture and raises if not. Every data handle a
+           routine launches with is already allocated by the time compile()
+           runs (add_data takes an existing handle), so nothing captured
+           here should need the pool; growth here means some step
+           allocated during capture, which CUDA graph capture does not
+           support - this is caught rather than silently producing an
+           unusable graph.
+
+        The returned _CapturedRoutine keeps the dedicated stream and the
+        cp.cuda.Graph alive; __call__ replays the graph with no arguments -
+        overriding data handles at call time is rejected, see
+        _CapturedRoutine.__call__.
+
+        Author: B.G (07/2026)
+        """
+        if not captured:
+            return super().compile(fused=False)
+
+        self._validate()
+
+        compiled_steps: list[_CompiledStep] = []
+        data_names: list[str] = []
+        for step in self._steps:
+            compiled = step.kernel_builder.compile()
+            caller = self._make_caller(compiled, step.grid, step.block)
+            compiled_steps.append(_CompiledStep(caller, step.canonical_refs))
+            for name in step.canonical_refs:
+                if name not in data_names:
+                    data_names.append(name)
+
+        defaults = {name: self._data[name] for name in data_names}
+
+        def _launch_all():
+            for step in compiled_steps:
+                step.caller(*(defaults[name] for name in step.canonical_refs))
+
+        # 1. warm up every kernel with one real launch, so first-launch
+        # module JIT happens before capture starts, not during it.
+        snapshots = {name: buf.copy() for name, buf in defaults.items()}
+        _launch_all()
+        cp.cuda.Device().synchronize()
+
+        # 2. undo the warmup launch's real effect - compile() must not leave
+        # the caller's buffers different from how it found them.
+        for name, buf in defaults.items():
+            buf[...] = snapshots[name]
+        cp.cuda.Device().synchronize()
+
+        # 3. capture the same sequence on a dedicated stream.
+        mempool = cp.get_default_memory_pool()
+        used_before = mempool.used_bytes()
+        stream = cp.cuda.Stream(non_blocking=True)
+        with stream:
+            stream.begin_capture()
+            _launch_all()
+            graph = stream.end_capture()
+
+        # 4. no allocation should have happened while capturing.
+        used_after = mempool.used_bytes()
+        if used_after != used_before:
+            raise RuntimeError(
+                "CupyRoutineBuilder.compile(captured=True): the default memory pool's "
+                f"used_bytes() changed during capture ({used_before} -> {used_after}); a "
+                "step allocated instead of using an already-initialised data handle, which "
+                "CUDA graph capture does not support"
+            )
+
+        return _CapturedRoutine(compiled_steps, tuple(data_names), defaults, graph, stream)

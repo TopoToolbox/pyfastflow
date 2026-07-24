@@ -18,12 +18,16 @@ backend substitutes into the source directly instead.
 Author: B.G (07/2026)
 """
 
+import ast
+import copy
 import inspect
+import linecache
 from types import FunctionType
 from typing import Any, ClassVar
 
 import numpy as np
 
+from ..pool.base import new_uid
 from .base import (
     Bag,
     HelperBuilder,
@@ -33,10 +37,11 @@ from .base import (
     _SpecializedHelper,
     _SpecializeCtx,
     attach_meta,
+    capture_template_meta,
     filter_bindings,
     resolve_binding,
 )
-from .routine import RoutineBuilder
+from .routine import Routine, RoutineBuilder, _CompiledStep, _template_label
 
 
 def specialize_closure(template, bindings: dict[str, Any], ctx: _SpecializeCtx) -> FunctionType:
@@ -416,6 +421,108 @@ class ClosureKernelBuilder(KernelBuilder):
         return krn
 
 
+class _RenameNames(ast.NodeTransformer):
+    """
+    Substitute every `ast.Name` whose id is a key of `mapping` with a fresh
+    Name carrying the mapped id, leaving everything else - including the
+    ctx (Load/Store/Del) of the node being replaced - untouched.
+
+    Used to retarget a step's template argument names (`T_out`, `T_in`) onto
+    the routine's own data names (`T1`, `T0`) inside that step's body only;
+    bound names (`heat`, `N`, ...) are never touched since they are never
+    template arguments.
+
+    Author: B.G (07/2026)
+    """
+
+    def __init__(self, mapping: dict[str, str]):
+        self._mapping = mapping
+
+    def visit_Name(self, node: ast.Name) -> ast.Name:
+        new_id = self._mapping.get(node.id)
+        if new_id is None:
+            return node
+        return ast.copy_location(ast.Name(id=new_id, ctx=node.ctx), node)
+
+
+def _top_level_assigned_names(stmt: ast.stmt) -> set[str]:
+    """
+    Names a top-level Assign/AnnAssign/AugAssign statement binds.
+
+    Only `ast.Name` targets count - `x = 1` binds `x`, including through
+    tuple/list unpacking (`a, b = ...`); `arr[i] = v` and `obj.attr = v`
+    write through a subscript or attribute and bind no new top-level python
+    name, so they are not collected.
+
+    Author: B.G (07/2026)
+    """
+    if isinstance(stmt, ast.Assign):
+        targets = stmt.targets
+    elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+        targets = [stmt.target]
+    else:
+        return set()
+
+    names: set[str] = set()
+
+    def collect(target: ast.expr) -> None:
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                collect(elt)
+
+    for target in targets:
+        collect(target)
+    return names
+
+
+def _check_fusable(label: str, func_def: ast.FunctionDef) -> None:
+    """
+    Enforce the two structural fusable-template constraints on one step's
+    body, raising with `label` naming the offending step.
+
+    No return anywhere: a return inside a spliced body would exit the whole
+    fused kernel, not just this step's contribution to it. Flat splice only:
+    once a top-level `for` loop has started, every remaining top-level
+    statement must also be a `for` loop - an optional preamble is allowed
+    before the first one, but nothing may follow the loops or sit between
+    them, since wrapping or interleaving would stop Taichi parallelizing
+    them as independent loops.
+
+    Author: B.G (07/2026)
+    """
+    for node in ast.walk(func_def):
+        if isinstance(node, ast.Return):
+            raise ValueError(f"fuse: step {label!r} contains a return statement, which would exit the whole fused kernel")
+
+    seen_loop = False
+    for stmt in func_def.body:
+        if isinstance(stmt, ast.For):
+            seen_loop = True
+        elif seen_loop:
+            raise ValueError(
+                f"fuse: step {label!r} has a statement after a top-level for loop; a fusable template "
+                "must be an optional preamble followed only by top-level for loops, spliced flat"
+            )
+
+
+def _annotation_root_name(annotation: "ast.expr | None") -> "str | None":
+    """
+    The bare name at the root of an annotation expression, e.g. `ti` out of
+    `ti.template()` or `qd.Tensor`. None if the annotation is missing or not
+    shaped as a dotted/called attribute access.
+
+    Author: B.G (07/2026)
+    """
+    node = annotation
+    if isinstance(node, ast.Call):
+        node = node.func
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
 class ClosureRoutineBuilder(RoutineBuilder):
     """
     Compiles a linear sequence of Taichi/Quadrants kernels sharing one bag.
@@ -426,6 +533,10 @@ class ClosureRoutineBuilder(RoutineBuilder):
     and Quadrants kernels derive their own launch range from the template, so
     `grid`/`block` (cupy-only - see CupyRoutineBuilder) are accepted and
     ignored.
+
+    compile() defaults to fused=True: consecutive steps (up to a split()
+    boundary) are spliced into one generated kernel rather than launched as
+    separate ones - see compile() and _fuse_group().
 
     Author: B.G (07/2026)
     """
@@ -438,3 +549,179 @@ class ClosureRoutineBuilder(RoutineBuilder):
 
     def _make_caller(self, compiled_kernel, grid, block):
         return compiled_kernel
+
+    def compile(self, fused: bool = True, dump_source: str | None = None) -> "Routine":
+        """
+        Validate (RoutineBuilder._validate) and compile every step.
+
+        fused=False falls back to the base implementation: one kernel per
+        step, each an ordinary specialize_closure compile, exactly as
+        before fusion existed. This is the reference the fused path is
+        diffed against, and stays reachable as a runtime switch.
+
+        fused=True (the default) compiles each split()-delimited group of
+        steps into one generated kernel: every step's top-level `for` loops
+        are concatenated flat into a single generated `def`, in the order
+        the steps were added, and that `def` is compiled as one
+        ti.kernel/qd.kernel. See _fuse_group for the mechanics and the
+        constraints this enforces.
+
+        `dump_source`, fused mode only, is a file path; when given, every
+        generated group's source is appended to it (truncated first),
+        separated by a header naming the group. No file is written when
+        `dump_source` is None.
+
+        Author: B.G (07/2026)
+        """
+        if not fused:
+            return super().compile(fused=False)
+
+        self._validate()
+
+        compiled_steps: list[_CompiledStep] = []
+        data_names: list[str] = []
+        for group_index, group in enumerate(self._grouped_steps()):
+            kernel, group_data_names = self._fuse_group(group, group_index, dump_source)
+            caller = self._make_caller(kernel, None, None)
+            compiled_steps.append(_CompiledStep(caller, tuple(group_data_names)))
+            for name in group_data_names:
+                if name not in data_names:
+                    data_names.append(name)
+
+        defaults = {name: self._data[name] for name in data_names}
+        return Routine(compiled_steps, tuple(data_names), defaults)
+
+    def _fuse_group(self, group: list, group_index: int, dump_source: "str | None"):
+        """
+        Splice one split()-delimited group of steps into a single generated
+        kernel.
+
+        One `_SpecializeCtx` covers the whole group, so a HelperBuilder
+        reachable from two of these steps is specialized once and both call
+        sites in the generated body share the specialized object - the same
+        guarantee a single ordinary kernel compile gives within itself.
+
+        Per step, in order: the template's own AST is deep-copied out of the
+        capture_template_meta cache (never mutated in place - that cache is
+        shared with every other compile of the same template); the two
+        structural fusable-template constraints are checked
+        (_check_fusable); its top-level assignments are checked against
+        every earlier step in this group for a name collision
+        (_top_level_assigned_names); its template argument names are
+        substituted for this step's canonical_refs, positionally
+        (_RenameNames) - the same mapping data_handle_ref set up at
+        add_kernel time; and its (now renamed) body statements are appended
+        to the generated function's body, flat.
+
+        The generated function's parameters are this group's data names, in
+        first-appearance order, each carrying the annotation its first
+        occurrence used (`ti.template()`, `qd.Tensor`, ...). The result is
+        unparsed to source, registered in linecache under a synthetic
+        filename - required for Taichi/Quadrants to re-parse it via
+        inspect.getsource when they run their own AST transform - exec'd,
+        and decorated as a kernel with the group's resolved bindings plus
+        every step's own template module globals injected.
+
+        Author: B.G (07/2026)
+        """
+        backend = group[0].kernel_builder._backend
+        ctx = _SpecializeCtx()
+        body_stmts: list[ast.stmt] = []
+        data_names: list[str] = []
+        annotations: dict[str, "ast.expr | None"] = {}
+        assigned_by: dict[str, str] = {}
+        module_globals: dict[str, Any] = {}
+        resolved_globals: dict[str, Any] = {}
+        raw_bindings: dict[str, Any] = {}
+
+        for step_index, step in enumerate(group):
+            kernel_builder = step.kernel_builder
+            template = kernel_builder.template
+            label = f"group{group_index}/step{step_index}:{_template_label(template)}"
+
+            _, tree = capture_template_meta(template)
+            if tree is None or not tree.body or not isinstance(tree.body[0], ast.FunctionDef):
+                raise ValueError(f"fuse: step {label!r} has no recoverable source to fuse")
+            func_def = copy.deepcopy(tree.body[0])
+
+            _check_fusable(label, func_def)
+
+            for stmt in func_def.body:
+                for name in _top_level_assigned_names(stmt):
+                    prior = assigned_by.get(name)
+                    if prior is not None:
+                        raise ValueError(
+                            f"fuse: top-level name '{name}' is assigned by both {prior!r} and {label!r}"
+                        )
+                    assigned_by[name] = label
+
+            params = [a.arg for a in func_def.args.args]
+            if len(params) != len(step.canonical_refs):
+                raise ValueError(
+                    f"fuse: step {label!r} declares {len(params)} data argument(s), "
+                    f"routine gives it {len(step.canonical_refs)}"
+                )
+            rename_map = dict(zip(params, step.canonical_refs))
+
+            for arg_node, canon in zip(func_def.args.args, step.canonical_refs):
+                if canon not in data_names:
+                    data_names.append(canon)
+                    annotations[canon] = arg_node.annotation
+
+            renamer = _RenameNames(rename_map)
+            renamed_body = [renamer.visit(stmt) for stmt in func_def.body]
+            body_stmts.extend(renamed_body)
+
+            filtered = filter_bindings(template, kernel_builder.bindings)
+            raw_bindings.update(filtered)
+            module_globals.update(dict(getattr(template, "__globals__", {})))
+            resolved_globals.update({name: resolve_binding(value, ctx) for name, value in filtered.items()})
+
+        if not body_stmts:
+            raise ValueError(f"fuse: group {group_index} produced an empty body")
+
+        # module_globals is a base layer (ti/qd/np/builtins/plain helper functions
+        # each step's own module happens to define) applied once, in step order;
+        # resolved_globals - the actual bound objects this group's steps
+        # reference - is applied last so a name a later step's unrelated module
+        # globals happen to share (e.g. two templates in one file both seeing
+        # `heat` in their module namespace) never clobbers an earlier step's
+        # resolved binding.
+        exec_globals: dict[str, Any] = {}
+        exec_globals.update(module_globals)
+        exec_globals.update(resolved_globals)
+
+        for annotation in annotations.values():
+            alias = _annotation_root_name(annotation)
+            if alias is not None:
+                exec_globals.setdefault(alias, backend)
+
+        func_name = f"_fused_group{group_index}_{new_uid()}"
+        args_node = ast.arguments(
+            posonlyargs=[],
+            args=[ast.arg(arg=name, annotation=annotations.get(name)) for name in data_names],
+            vararg=None,
+            kwonlyargs=[],
+            kw_defaults=[],
+            kwarg=None,
+            defaults=[],
+        )
+        fused_def = ast.FunctionDef(name=func_name, args=args_node, body=body_stmts, decorator_list=[], returns=None)
+        module = ast.fix_missing_locations(ast.Module(body=[fused_def], type_ignores=[]))
+        source = ast.unparse(module)
+
+        filename = f"<fused-routine:{func_name}>"
+        linecache.cache[filename] = (len(source), None, source.splitlines(keepends=True), filename)
+
+        if dump_source:
+            mode = "w" if group_index == 0 else "a"
+            with open(dump_source, mode) as fh:
+                fh.write(f"# --- group {group_index} ({filename}) ---\n{source}\n\n")
+
+        code = compile(source, filename, "exec")
+        exec(code, exec_globals)
+        fused_fn = exec_globals[func_name]
+
+        krn = ClosureKernel(func_name, backend.kernel(fused_fn))
+        attach_meta(krn, fused_fn, raw_bindings)
+        return krn, data_names
