@@ -1,128 +1,63 @@
 # PyFastFlow
 
-**GPU-centred framework for geomorphological and hydrodynamic toolbox**
+> ⚠️ **Experimental.** This describes the in-progress v1 core. The API is
+> settling and will change.
 
-- Developping, ditributing and reusing multi-backend GPU routines (Taichi lang, quadrants and cupy)
-- Flow and flood routines for flexible grids and stencils (e.g. periodic conditions, no data areas, outlet location)
-- 
+**GPU routines for Earth-surface processes — portable across backends.**
+
+Two things in one:
+
+- **A portable GPU-routine engine.** Compose parameters, helpers and
+  multi-kernel *routines* once, and run them on **Taichi**, **Quadrants**,
+  or **CuPy** — same composition model, backend-native kernels.
+- **A geomorphology toolbox built on it.** Flow routing, flooding, and
+  landscape evolution, engineered for grids of hundreds of millions of nodes.
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-Custom-red.svg)](./LICENSE)
+[![License](https://img.shields.io/badge/license-CeCILL%20v2.1-red.svg)](./LICENSE)
 
-## Overview
+## Why
 
-**A lot of work will be put into finalising v1.0 in Q1 2026 + paper**
+Writing flexible GPU kernels for physics simulation can be time-consuming. Performance on GPU are highly affected by memory layout. Hence simple things as constant _vs_ 2D varying parameters or stencil operations (periodic boundaries, no data, ...) 
 
-**02/03/2026: I am currently in a hackathlon to refactor the interface to fix it before submission, stay tuned**
+## Example
 
+```python
+import taichi as ti; ti.init(arch=ti.gpu)
+from pyfastflow.experimental.core.context.taichi_backend import (
+    TaichiKernelBuilder, TaichiParameter,
+)
+from pyfastflow.experimental.core.pool.taichi_pool import TaichiPool
 
-<!-- PyFastFlow is a high-performance Python package for general geomorphological and hydrodynamic computations on GPU. Built on the Taichi programming language with bindings to `pytopotoolbox`, it provides efficient, portable parallel algorithms for flow accumulation, depression filling, (simple) shallow water flow modeling, and landscape evolution simulations.
+pool = TaichiPool()
+D = TaichiParameter("D", ti.f32, mode="scalar", value=1e-2, pool=pool)
 
-The fast flow routines are implemented following **Jain et al., 2024** [📝](https://www-sop.inria.fr/reves/Basilic/2024/JKGFC24/FastFlowPG2024_Author_Version.pdf), delivering state-of-the-art performance for GPU-oriented flow computation (flow accumulation and local minima handling).
+def diffuse(z_out: ti.template(), z_in: ti.template()):
+    for i, j in z_in:
+        z_out[i, j] = z_in[i, j] + D.get(0) * (
+            z_in[i-1, j] + z_in[i+1, j] + z_in[i, j-1] + z_in[i, j+1] - 4.0 * z_in[i, j])
 
-The flooding/hydraulic modelling implements a GPU version of GraphFlood (Gailleton et al., 2024) for stationary solutions and an implementation of Bates et al., 2010 and inertial flow.
-
-## 🚀 Key Features
-
-### **Flow Routing & Hydrology**
-- **GPU-accelerated flow routing**: Steepest descent algorithms with multiple boundary conditions
-- **Advanced depression filling**: Priority flood and carving algorithms for handling closed basins
-- **Flow accumulation**: Efficient rake-and-compress algorithms for parallel tree traversal
-- **Boundary conditions**: Normal, periodic (EW/NS), and custom per-node boundary handling
-
-### **2D Shallow Water Flow (Flood Modeling)**
-- **LisFlood implementation**: Bates et al. 2010 explicit finite difference scheme
-- **GraphFlood**: Fast approximation of the 2D shallow water 2D stationary solution
-- **Manning's friction**: Configurable roughness coefficients
-- **Precipitation input**: Rainfall and boundary conditions
-
-### **Landscape Evolution**
-- **Refactor in progress, not usable right now**
-- **Stream Power Law (SPL)**: Bedrock erosion with detachment and transport-limited models
-- **Sediment transport**: Erosion-deposition coupling with transport capacity
-- **Tectonic uplift**: Block and spatially-varying uplift patterns
-- **Non linear hillslope**: Based on Carretier et al. 2016
-
-### **Visualization & Analysis**
-- **Hillshading**: GPU-accelerated terrain shading with multiple illumination models
-- **Real-time 3D visualization**: Interactive terrain rendering with using mordernGL (Experimental)
-
-### **Performance & Memory**
-- **Field pooling system**: Efficient GPU memory management for taichi with automatic field reuse/clean
-- **General Parallel algorithms**: Utilities written in taichi (e.g. Blelloch parallel scan, ping-pong, swap, ...)
-- **Scalable**: Handles large grids (up to hundreds of millions of nodes) efficiently
-
-## 📦 Installation
-
-### From PyPI (will be available at launch)
-```bash
-pip install pyfastflow
+step = TaichiKernelBuilder().bind("D", D).ingest(diffuse).compile()
 ```
 
-### From Source
+The parameter / helper / routine API is identical on every backend; only the
+kernel body changes — a Python `def` on Taichi and Quadrants, CUDA source on
+CuPy. The same landscape-evolution model, built once per backend, lives in
+[`examples/core/lem/`](./examples/core/lem/).
+
+## Install
+
 ```bash
-git clone https://github.com/bgailleton/pyfastflow.git
-cd pyfastflow
-pip install -e .
+pip install -e .            # from source
 ```
 
-### Requirements
-- **Python** ≥ 3.9
-- **Taichi** ≥ 1.4.0
-- **NumPy** ≥ 1.20.0
-- **Matplotlib** ≥ 3.3.0 (for visualization)
+Requires Python ≥ 3.9, and the backend(s) you target (Taichi, Quadrants, CuPy).
 
-## 🏃‍♂️ Quick Start
+## Status
 
-WIP
+Core interface under active refactor toward v1.0 (+ paper). Flow/flood routines
+are being ported onto the new core; landscape evolution is WIP.
 
+## License & authors
 
-## 🔬 Scientific Background
-
-### Flow Routing Algorithms
-
-- **Flow routing through local minimas**: Improved depression handling with Cordonnier et al. (2019) adapted to GPU by Jain et al. (2024)
-- **Rake-and-Compress**: Parallel flow accumulation following Jain et al. (2024)
-
-### Shallow Water Flow
-- **LisFlood**: Explicit finite difference scheme (Bates et al., 2010)
-- **GraphFlood**: Graph-based implicit flow routing (Gaileton et al., 2024)
-
-### Landscape Evolution
-- **Stream Power Law**: E = K × A^m × S^n erosion model (Howard and Kerby 1983)
-- **Transport-Limited**: Erosion-transport-deposition coupling (Davy and Lague, 2009 style - WIP)
-- **Non linear hillslope**: adapted from CIDRE with a semi-implicit scheme (Carretier et al., 2016 - WIP)
-
-
-## 📄 License
-
-CeCILL v2.1
-
-## 📖 Citation
-
-If you use PyFastFlow in your research, please contact me.
-
-### Related Publications
-- Jain, A., et al. (2024). "Fast Flow Computation using GPU". *Proceedings of Graphics Interface 2024*.
-- Bates, P. D., et al. (2010). "A simple inertial formulation of the shallow water equations". *Journal of Hydrology*.
-
-## 👥 Authors
-
-**Main Authors:**
-- **Boris Gailleton** - Géosciences Rennes - boris.gailleton@univ-rennes.fr
-- **Guillaume Cordonnier** - INRIA Sophia Antipolis
-
-## 🐛 Issues & Support
-
-- **Bug Reports**: [GitHub Issues](https://github.com/bgailleton/pyfastflow/issues)
-- **Feature Requests**: [GitHub Discussions](https://github.com/bgailleton/pyfastflow/discussions)
-- **Documentation**: [Read the Docs](https://pyfastflow.readthedocs.io/) *(coming soon - hopefully)*
-
-## 🔗 Links
-
-- **Repository**: https://github.com/bgailleton/pyfastflow
-- **Documentation**: https://pyfastflow.readthedocs.io/ *(coming soon)*
-- **PyPI Package**: https://pypi.org/project/pyfastflow/ *(coming soon)*
-- **Jain et al. 2024 Paper**: [PDF](https://www-sop.inria.fr/reves/Basilic/2024/JKGFC24/FastFlowPG2024_Author_Version.pdf)
- -->
----
+CeCILL v2.1 — Boris Gailleton (Géosciences Rennes) · Guillaume Cordonnier (INRIA).
