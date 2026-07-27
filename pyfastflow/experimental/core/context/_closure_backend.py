@@ -20,6 +20,7 @@ Author: B.G (07/2026)
 
 import ast
 import copy
+import hashlib
 import inspect
 import linecache
 from types import FunctionType
@@ -27,7 +28,6 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from ..pool.base import new_uid
 from .base import (
     Bag,
     HelperBuilder,
@@ -671,7 +671,17 @@ class ClosureRoutineBuilder(RoutineBuilder):
             if alias is not None:
                 exec_globals.setdefault(alias, backend)
 
-        func_name = f"_fused_group{group_index}_{new_uid()}"
+        # Name the fused function deterministically from its own content
+        # rather than a process-global uid: build it under a stable
+        # placeholder name first, unparse, hash that text, then rename to
+        # `_fused_group{group_index}_{hash}` and re-unparse so the source,
+        # linecache entry, and compiled filename all agree on the real name.
+        # Identical routine -> identical hash -> identical name -> the
+        # backend's own offline cache (Taichi/Quadrants re-parse the kernel
+        # via inspect.getsource off this source+filename) hits across process
+        # restarts; an unrelated upstream allocation shift no longer touches
+        # this name since it never depended on uid in the first place.
+        placeholder_name = f"_fused_group{group_index}_placeholder"
         args_node = ast.arguments(
             posonlyargs=[],
             args=[ast.arg(arg=name, annotation=annotations.get(name)) for name in data_names],
@@ -681,8 +691,14 @@ class ClosureRoutineBuilder(RoutineBuilder):
             kwarg=None,
             defaults=[],
         )
-        fused_def = ast.FunctionDef(name=func_name, args=args_node, body=body_stmts, decorator_list=[], returns=None)
+        fused_def = ast.FunctionDef(
+            name=placeholder_name, args=args_node, body=body_stmts, decorator_list=[], returns=None
+        )
         module = ast.fix_missing_locations(ast.Module(body=[fused_def], type_ignores=[]))
+        placeholder_source = ast.unparse(module)
+        digest = hashlib.sha256(placeholder_source.encode()).hexdigest()[:12]
+        func_name = f"_fused_group{group_index}_{digest}"
+        fused_def.name = func_name
         source = ast.unparse(module)
 
         filename = f"<fused-routine:{func_name}>"

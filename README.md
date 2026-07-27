@@ -1,9 +1,12 @@
 # PyFastFlow
 
-**First full-GPU geomorphological and hydrodynamic toolbox powered by Taichi-lang**
+**GPU-centred framework for geomorphological and hydrodynamic toolbox**
+
+- Developping, ditributing and reusing multi-backend GPU routines (Taichi lang, quadrants and cupy)
+- Flow and flood routines for flexible grids and stencils (e.g. periodic conditions, no data areas, outlet location)
+- 
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![Taichi](https://img.shields.io/badge/taichi-≥1.6.0-orange.svg)](https://github.com/taichi-dev/taichi)
 [![License](https://img.shields.io/badge/license-Custom-red.svg)](./LICENSE)
 
 ## Overview

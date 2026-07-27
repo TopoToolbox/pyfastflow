@@ -21,8 +21,15 @@ a compilation unit reaches - the kernel's own bindings plus, recursively, its
 helpers' - is collected once, deduplicated by uid, into a module-scope
 constant block:
 
-    struct pf_params_t { float* p_<uid>; const float* p_<uid2>; ... };
+    struct pf_params_t { float* p_<idx>; const float* p_<idx2>; ... };
     __constant__ pf_params_t pf_params;
+
+`<idx>` is a per-compilation-unit local index (0, 1, 2, ...) assigned the
+first time this compile's traversal reaches a given Parameter, not its
+process-global `uid` - `uid` still identifies the Parameter for dedup, cycle
+detection and the ptr registry's keys, but never appears in emitted text, so
+an unrelated allocation upstream that shifts every uid does not change this
+source at all. See _SpanParser._register_ptr.
 
 uploaded once per compile() via cp.RawModule.get_global. A member is `const`
 when nothing in the unit writes that parameter, `T*` otherwise. Every
@@ -32,12 +39,12 @@ argument to thread through and no call site to rewrite. At the top of each
 function body one local is declared per pointer that function's own spans
 reference:
 
-    const float* __restrict__ p_<uid> = pf_params.p_<uid>;
+    const float* __restrict__ p_<idx> = pf_params.p_<idx>;
 
 read (or written, dropping `const`) through for the rest of that body. This is
 what keeps a function's own accesses provably non-aliasing to the compiler,
 the same guarantee a `__restrict__` kernel argument used to carry - reading
-`pf_params.p_<uid>` directly, span by span, would lose it.
+`pf_params.p_<idx>` directly, span by span, would lose it.
 
 A const parameter can also be used bare, outside any span, in which case it
 arrives as a `#define`. Only names the source actually mentions are defined,
@@ -49,7 +56,9 @@ One `cp.RawModule` is built per compilation unit: the constant block, every
 sites share it - see _SpecializeCtx), and the unit's `__global__` kernel.
 `CupyKernel._raw_cache` keys the module on its final source text, same as the
 single-kernel cache did before - the whole specialization still reduces to
-that text, uid-qualified struct members included, so it remains a sound key.
+that text, local-index-qualified struct members included, so it remains a
+sound key, and since that index no longer depends on uid the key (and so the
+cache hit rate) is stable across process restarts for an unchanged program.
 A cache hit skips recompilation but the constant block is re-uploaded
 regardless, since the pointers a compile's bindings currently resolve to are
 not part of what the cache key captures.
@@ -153,18 +162,22 @@ def _walk(path: list[str], bindings: dict[str, Any]):
     return obj
 
 
-def _param_argname(param: Parameter) -> str:
+def _param_argname(param: Parameter, local_index: dict[int, int]) -> str:
     """
     The struct member / local variable name a Parameter's pointer is reached
-    through - stable for the object's whole lifetime since it is derived from
-    `uid`, not from whatever name(s) it happens to be bound under. This is
-    what makes dedup by uid automatic: two spans reaching the same Parameter
-    under two different handles compute the same argname and therefore the
-    same struct member.
+    through - stable for the object's whole lifetime *within this compile*
+    since it is derived from `local_index[param.uid]`, a per-compilation-unit
+    index assigned in first-encounter order (see _SpanParser._register_ptr),
+    not from `uid` itself. `uid` still identifies the Parameter for dedup (two
+    spans reaching the same Parameter under two different handles look up the
+    same local index and therefore compute the same argname/struct member),
+    but the emitted name no longer carries the process-global uid, which is
+    what keeps generated source byte-stable across runs regardless of
+    allocation order upstream.
 
     Author: B.G (07/2026)
     """
-    return f"p_{param.uid}"
+    return f"p_{local_index[param.uid]}"
 
 
 class _SpanParser:
@@ -197,6 +210,9 @@ class _SpanParser:
         registry = getattr(self.ctx, "cupy_ptr_registry", None)
         if registry is None:
             registry = self.ctx.cupy_ptr_registry = {}
+        local_index = getattr(self.ctx, "cupy_local_index", None)
+        if local_index is None:
+            local_index = self.ctx.cupy_local_index = {}
         uid = param.uid
         entry = registry.get(uid)
         if entry is None:
@@ -204,12 +220,16 @@ class _SpanParser:
             registry[uid] = entry
         if write:
             entry["write"] = True
+        if uid not in local_index:
+            # first encounter of this Parameter in this compile - assign it
+            # the next local index, in traversal order (see _param_argname).
+            local_index[uid] = len(local_index)
         local = self.local_ptrs.get(uid)
         if local is None:
             self.local_ptrs[uid] = {"ctype": entry["ctype"], "write": write}
         elif write:
             local["write"] = True
-        return _param_argname(param)
+        return _param_argname(param, local_index)
 
     def _expand_param(self, param: Parameter, method: str, call_args: list[str]) -> str:
         if method == "get":
@@ -261,10 +281,11 @@ class _SpanParser:
         Author: B.G (07/2026)
         """
         expanded = _SPAN_RE.sub(self._repl, body)
-        return _insert_locals(expanded, self.local_ptrs)
+        local_index = getattr(self.ctx, "cupy_local_index", None) or {}
+        return _insert_locals(expanded, self.local_ptrs, local_index)
 
 
-def _insert_locals(body: str, local_ptrs: dict[int, dict]) -> str:
+def _insert_locals(body: str, local_ptrs: dict[int, dict], local_index: dict[int, int]) -> str:
     """
     Prepend one `__restrict__` local per pointer `body` itself references,
     reading through the module's `pf_params` constant block, right after the
@@ -276,6 +297,11 @@ def _insert_locals(body: str, local_ptrs: dict[int, dict]) -> str:
     only reads a parameter another function in the same unit writes still
     gets the non-aliasing benefit of a const-qualified local.
 
+    Ordered by local index ascending (first-encounter order for this compile,
+    see _SpanParser._register_ptr) rather than by uid, so this declaration
+    block's text does not depend on the process-global uid values a run
+    happened to assign upstream.
+
     Author: B.G (07/2026)
     """
     if not local_ptrs:
@@ -284,20 +310,21 @@ def _insert_locals(body: str, local_ptrs: dict[int, dict]) -> str:
     if idx == -1:
         raise ValueError("could not find a function body to insert parameter locals into")
     decls = "".join(
-        f"    {'' if e['write'] else 'const '}{e['ctype']}* __restrict__ {_argname_for(uid)} = pf_params.{_argname_for(uid)};\n"
-        for uid, e in sorted(local_ptrs.items())
+        f"    {'' if e['write'] else 'const '}{e['ctype']}* __restrict__ {_argname_for(local_index[uid])} = pf_params.{_argname_for(local_index[uid])};\n"
+        for uid, e in sorted(local_ptrs.items(), key=lambda kv: local_index[kv[0]])
     )
     return f"{body[: idx + 1]}\n{decls}{body[idx + 1 :]}"
 
 
-def _argname_for(uid: int) -> str:
+def _argname_for(local_idx: int) -> str:
     """
-    The struct member / local name for a pointer already registered under
-    `uid` - see _param_argname, which this must stay in lockstep with.
+    The struct member / local name for a pointer already assigned local index
+    `local_idx` in this compile - see _param_argname, which this must stay in
+    lockstep with.
 
     Author: B.G (07/2026)
     """
-    return f"p_{uid}"
+    return f"p_{local_idx}"
 
 
 def _const_defines(bindings: dict[str, Any], body: str) -> list[str]:
@@ -320,32 +347,36 @@ def _const_defines(bindings: dict[str, Any], body: str) -> list[str]:
     ]
 
 
-def _param_block_source(registry: dict[int, dict]) -> str:
+def _param_block_source(registry: dict[int, dict], local_index: dict[int, int]) -> str:
     """
     The `pf_params_t` struct and its `__constant__` instance for one
     compilation unit's pointer registry - empty when the unit reaches no
     scalar/field Parameter, so a unit with only consts and bare helpers emits
     no block at all.
 
-    Member order is by uid, ascending - arbitrary but fixed, so it agrees with
-    the upload order _upload_param_block writes in.
+    Member order is by local index, ascending - i.e. first-encounter order
+    during this compile's traversal (see _SpanParser._register_ptr), not by
+    uid. This is what keeps the struct's text (and therefore the whole
+    generated source) independent of the process-global uid values, so an
+    unrelated allocation upstream that shifts every uid does not change this
+    text. _upload_param_block writes pointers in the same order.
 
     Author: B.G (07/2026)
     """
     if not registry:
         return ""
     members = "".join(
-        f"    {'' if e['write'] else 'const '}{e['ctype']}* {_argname_for(uid)};\n"
-        for uid, e in sorted(registry.items())
+        f"    {'' if e['write'] else 'const '}{e['ctype']}* {_argname_for(local_index[uid])};\n"
+        for uid, e in sorted(registry.items(), key=lambda kv: local_index[kv[0]])
     )
     return f"struct pf_params_t {{\n{members}}};\n__constant__ pf_params_t pf_params;\n"
 
 
-def _upload_param_block(module: "cp.RawModule", registry: dict[int, dict]) -> None:
+def _upload_param_block(module: "cp.RawModule", registry: dict[int, dict], local_index: dict[int, int]) -> None:
     """
     Copy the current pointer for every registered Parameter into the module's
-    `pf_params` constant block, in the same uid order the struct was emitted
-    in.
+    `pf_params` constant block, in the same local-index order the struct was
+    emitted in (see _param_block_source).
 
     Runs once per compile(), synchronously - safe as an ordinary host->device
     copy anywhere a kernel launch would be, but not inside CUDA graph capture
@@ -357,7 +388,10 @@ def _upload_param_block(module: "cp.RawModule", registry: dict[int, dict]) -> No
     if not registry:
         return
     global_ptr = module.get_global("pf_params")
-    ptrs = np.array([e["array"].data.ptr for _, e in sorted(registry.items())], dtype=np.uint64)
+    ptrs = np.array(
+        [e["array"].data.ptr for _, e in sorted(registry.items(), key=lambda kv: local_index[kv[0]])],
+        dtype=np.uint64,
+    )
     view = cp.ndarray(ptrs.shape, dtype=np.uint64, memptr=global_ptr)
     view.set(ptrs)
 
@@ -619,6 +653,7 @@ class CupyKernelBuilder(KernelBuilder):
         """
         ctx = _SpecializeCtx()
         ctx.cupy_ptr_registry = {}
+        ctx.cupy_local_index = {}
         template = self._template
         name = _extract_name(_KERNEL_NAME_RE, template, "__global__")
         parser = _SpanParser(self._bindings, ctx=ctx)
@@ -629,8 +664,9 @@ class CupyKernelBuilder(KernelBuilder):
         if 'extern "C"' not in body:
             body = body.replace("__global__", 'extern "C" __global__', 1)
         registry = ctx.cupy_ptr_registry
+        local_index = ctx.cupy_local_index
         source = "\n".join(
-            [_param_block_source(registry)]
+            [_param_block_source(registry, local_index)]
             + list(parser.helper_srcs.values())
             + _const_defines(self._bindings, body)
             + [body]
@@ -640,7 +676,7 @@ class CupyKernelBuilder(KernelBuilder):
         if module is None:
             module = cp.RawModule(code=source)
             CupyKernel._raw_cache[source] = module
-        _upload_param_block(module, registry)
+        _upload_param_block(module, registry, local_index)
         raw = module.get_function(name)
         krn = CupyKernel(name, raw, module)
         krn._final_source = source
