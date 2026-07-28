@@ -197,6 +197,16 @@ class _SpanParser:
     helper reached twice in one compile is specialized once, and any pointer
     it registers lands in the same shared registry as the kernel's own.
 
+    A span reaching a CupyHelper does not collect its source here: that would
+    mean two parents sharing one leaf helper each carry a full copy of the
+    leaf's text in their own body, so the translation unit ends up with that
+    `__device__` function defined twice the moment both parents are bound
+    into one kernel. Every reachable helper's own (non-nested) source is
+    instead registered once, by name, into `ctx.cupy_device_srcs` - see
+    CupyHelperBuilder._specialize and CupyKernelBuilder.compile, which is
+    where the deduplicated, dependency-ordered set for the whole unit is
+    assembled.
+
     Author: B.G (07/2026)
     """
 
@@ -204,7 +214,6 @@ class _SpanParser:
         self.bindings = bindings
         self.ctx = ctx
         self.local_ptrs: dict[int, dict] = {}   # uid -> {ctype, write}
-        self.helper_srcs: dict[str, str] = {}   # name -> source
 
     def _register_ptr(self, param: Parameter, write: bool) -> str:
         registry = getattr(self.ctx, "cupy_ptr_registry", None)
@@ -266,7 +275,6 @@ class _SpanParser:
         if isinstance(target, CupyHelperBuilder):
             target = self.ctx.specialize(target)
         if isinstance(target, CupyHelper):
-            self.helper_srcs[target.name] = target.compiled
             return f"{target.name}({argstr if argstr is not None else ''})"
         if isinstance(target, Parameter):
             return self._expand_param(target, "get", ["0"])
@@ -274,9 +282,10 @@ class _SpanParser:
 
     def parse(self, body: str) -> str:
         """
-        Expand every `$...$` span in `body`, accumulating local_ptrs and
-        helper_srcs as a side effect, then prepend the `__restrict__` locals
-        this body's own spans implied - see _insert_locals.
+        Expand every `$...$` span in `body`, accumulating local_ptrs (and,
+        transitively, `ctx.cupy_device_srcs` - see CupyHelperBuilder._specialize)
+        as a side effect, then prepend the `__restrict__` locals this body's
+        own spans implied - see _insert_locals.
 
         Author: B.G (07/2026)
         """
@@ -599,13 +608,25 @@ class CupyHelperBuilder(HelperBuilder):
 
     def _specialize(self, ctx: _SpecializeCtx) -> CupyHelper:
         """
-        Expand the template's spans against `ctx` and prepend the helper
-        sources and const #defines it turned out to need, giving the final
-        `__device__` text. Any scalar/field Parameter a span here reaches is
-        registered into `ctx.cupy_ptr_registry` exactly as one reached from
-        the enclosing kernel would be (see _SpanParser) - the block that
-        results is shared, so this helper and its caller read the same
-        pointer.
+        Expand the template's spans against `ctx` and prepend the const
+        #defines it turned out to need, giving this helper's own `__device__`
+        text - its own body only, not any dependency's. Any scalar/field
+        Parameter a span here reaches is registered into `ctx.cupy_ptr_registry`
+        exactly as one reached from the enclosing kernel would be (see
+        _SpanParser) - the block that results is shared, so this helper and
+        its caller read the same pointer.
+
+        This helper's own text is also registered, by name, into
+        `ctx.cupy_device_srcs` - the deduplicated, dependency-ordered set of
+        every `__device__` function the whole compile reaches (see
+        CupyKernelBuilder.compile). parser.parse() above resolves this
+        helper's own spans first, which is what recursively specializes (and
+        so registers) every helper *this* one calls before this line runs -
+        so by the time this helper registers itself, its own dependencies are
+        already in the registry, ahead of it. A helper already reached once in
+        this compile - by this call site or an earlier one - keeps its first
+        registration; `setdefault` leaves it untouched rather than duplicating
+        or reordering it.
 
         Author: B.G (07/2026)
         """
@@ -613,7 +634,11 @@ class CupyHelperBuilder(HelperBuilder):
         name = _extract_name(_DEVICE_NAME_RE, template, "__device__")
         parser = _SpanParser(self._bindings, ctx=ctx)
         body = parser.parse(template)
-        source = "\n".join(list(parser.helper_srcs.values()) + _const_defines(self._bindings, body) + [body])
+        source = "\n".join(_const_defines(self._bindings, body) + [body])
+        device_srcs = getattr(ctx, "cupy_device_srcs", None)
+        if device_srcs is None:
+            device_srcs = ctx.cupy_device_srcs = {}
+        device_srcs.setdefault(name, source)
         fn = CupyHelper(name, source)
         attach_meta(fn, template, self._bindings)
         return fn
@@ -631,17 +656,28 @@ class CupyKernelBuilder(KernelBuilder):
     def compile(self) -> CupyKernel:
         """
         Expand the template's spans - the kernel's own and, recursively,
-        every CupyHelperBuilder they reach - prepend the helpers' source,
-        const #defines, and the `pf_params` constant block the whole unit's
-        scalar/field Parameters collected into, then build (or reuse, keyed
-        by final source text) the cp.RawModule and pull this kernel's
-        function out of it.
+        every CupyHelperBuilder they reach - prepend the whole unit's
+        `__device__` helper sources (deduplicated by name, dependency-first -
+        see CupyHelperBuilder._specialize and `ctx.cupy_device_srcs`), the
+        kernel's own const #defines, and the `pf_params` constant block the
+        whole unit's scalar/field Parameters collected into, then build (or
+        reuse, keyed by final source text) the cp.RawModule and pull this
+        kernel's function out of it.
 
         Opens a fresh _SpecializeCtx for this compile, so every
         CupyHelperBuilder this kernel's spans reach is specialized once,
         against these bindings, and every scalar/field Parameter any of them
         binds lands in one shared pointer registry
         (`ctx.cupy_ptr_registry`) - see _SpanParser and _param_block_source.
+        The same ctx is what lets a helper reachable from two of this
+        kernel's own bindings - or from two different helpers this kernel
+        reaches - contribute its `__device__` text to `ctx.cupy_device_srcs`
+        exactly once: emitting a shared leaf's definition once per
+        translation unit, rather than once per parent that calls it, is what
+        the module docstring's "reaches it exactly the way its caller does"
+        promise requires, and repeated emission is a compile error a CUDA
+        translation unit does not tolerate the way a repeated `#define` of
+        an identical macro does.
 
         The registry - and so the set of pointers to upload - is rebuilt by
         parsing on every call, cache hit or not, since the final source text
@@ -654,6 +690,7 @@ class CupyKernelBuilder(KernelBuilder):
         ctx = _SpecializeCtx()
         ctx.cupy_ptr_registry = {}
         ctx.cupy_local_index = {}
+        ctx.cupy_device_srcs = {}
         template = self._template
         name = _extract_name(_KERNEL_NAME_RE, template, "__global__")
         parser = _SpanParser(self._bindings, ctx=ctx)
@@ -667,7 +704,7 @@ class CupyKernelBuilder(KernelBuilder):
         local_index = ctx.cupy_local_index
         source = "\n".join(
             [_param_block_source(registry, local_index)]
-            + list(parser.helper_srcs.values())
+            + list(ctx.cupy_device_srcs.values())
             + _const_defines(self._bindings, body)
             + [body]
         )

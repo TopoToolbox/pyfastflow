@@ -18,7 +18,7 @@ Two things in one:
 
 ## Why
 
-Writing flexible GPU kernels for physics simulation can be time-consuming. Performance on GPU are highly affected by memory layout. Hence simple things as constant _vs_ 2D varying parameters or stencil operations (periodic boundaries, no data, ...) 
+Writing flexible GPU kernels for physics simulation can be time-consuming. Performance on GPU is highly affected by memory layout. Hence simple things such as a constant _vs_ a 2D varying parameter, or stencil operations (periodic boundaries, no-data, outlets, ...), each push you toward a different hand-tuned kernel — multiplied by every backend you want to run on. PyFastFlow lets you write a routine once and *bind* how each parameter and stencil is realised, then specialises it per backend and layout.
 
 ## Example
 
