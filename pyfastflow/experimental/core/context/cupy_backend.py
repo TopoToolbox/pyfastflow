@@ -77,7 +77,10 @@ from .base import Bag
 from .routine import Routine, RoutineBuilder, _CompiledStep
 
 _KERNEL_NAME_RE = re.compile(r"__global__\s+void\s+(\w+)\s*\(")
-_DEVICE_NAME_RE = re.compile(r"__device__\s+[\w:\*&]+\s+(\w+)\s*\(")
+# the return type is one-or-more tokens, matched non-greedily so the LAST one
+# before the parameter list is the function name - `__device__ unsigned int f(`
+# names f, not int.
+_DEVICE_NAME_RE = re.compile(r"__device__\s+(?:[\w:\*&]+\s+)+?(\w+)\s*\(")
 _KERNEL_SIG_RE = re.compile(r"(__global__\s+void\s+\w+\s*\()(.*?)(\))", re.S)
 _SPAN_RE = re.compile(r"\$(.*?)\$", re.S)
 _CALL_RE = re.compile(r"([\w.]+)\s*(?:\((.*)\))?\s*$", re.S)
@@ -88,6 +91,7 @@ _CTYPE = {
     np.dtype(np.int32): "int",
     np.dtype(np.int64): "long long",
     np.dtype(np.uint8): "unsigned char",
+    np.dtype(np.uint32): "unsigned int",
 }
 
 

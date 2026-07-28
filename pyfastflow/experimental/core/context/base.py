@@ -87,9 +87,7 @@ Everything that *describes* the problem rather than *being* it - grid spacing,
 timestep, gravity, which helper implements the neighbour lookup - is bound.
 
 Reading a Parameter in device code is uniform across modes: p.get(node) to
-read, p.set_node(node, value) to write. A const Parameter declared solo=True
-is the exception: it resolves to a bare compile-time literal, read as `p` with
-no call.
+read, p.set_node(node, value) to write.
 
 What a device helper may bind
 -----------------------------
