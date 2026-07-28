@@ -1,0 +1,196 @@
+"""
+make_grid: the GridContext-equivalent Bag factory, built on the
+backend-agnostic core (see ..core.context.base for Parameter/HelperBuilder/Bag).
+
+There is no stateful Context class here - by design, the core has none (see
+core/context/base.py's module docstring). make_grid just builds a Bag once: a
+uniform public surface (grid.nx, grid.neighbour(i, k), ...) whatever the
+backend and whatever the grid's own topology/boundary/nodata/outlet config.
+
+Two kinds of knobs:
+  - value params (nx, ny, dx) - mode-overridable (const/scalar, dx also
+    field), always read in device code through `.get(...)`. Default mode is
+    "const", non-solo, for all three - see the note below.
+  - structural selectors (topology, boundary, nodata, outlet) - each one
+    picks which variant of a private block gets bound into the public
+    composite helpers; see _closure_blocks.py / _cupy_blocks.py.
+
+Masks are independent, optional bag members: nodata_mask (u8, 1 == inactive)
+when nodata=True, outlet_mask (u8, 1 == outlet) when outlet=="mask". Neither
+exists in the bag when its feature is off, so a caller that never asked for
+nodata/mask-outlet never sees them.
+
+Note on nx/ny solo=True: earlier drafts of this design set nx/ny to a
+default of const+solo=True (read bare, as a compile-time literal with no
+`.get()`), matching how n_neighbours is read. That is incompatible with the
+"read every value param mode-agnostically via `.get()`" requirement the
+private blocks are built around - a solo Parameter resolves to a bare python
+literal in device code (see base.py's resolve_binding), which has no `.get`
+method, so `NX.get(0)` inside a shared geometry block would fail to trace
+the moment nx defaulted to solo. To keep one geometry block working
+whatever mode nx/ny/dx are in - the actual point of the mode-overridable
+design - nx/ny/dx are built here as solo=False by default (same as dx's
+own, unambiguous spec: "non-solo, read via .get(0)"). n_neighbours, which
+has no override and is genuinely only ever a compile-time literal, keeps
+solo=True.
+
+Author: B.G (07/2026)
+"""
+
+import numpy as np
+
+from ..core.context.base import Bag
+
+_TOPOLOGIES = {"D4": 4, "D8": 8}
+_BOUNDARIES = frozenset({"normal", "periodic_EW", "periodic_NS"})
+_OUTLETS = frozenset({"edge", "mask"})
+
+
+def _backend_classes(backend: str):
+    """
+    (backend_module_or_None, ParameterCls, HelperBuilderCls, blocks_module,
+    dtypes) for one backend name. cupy's backend_module is None - its blocks
+    call plain C, never a bound backend module - see _cupy_blocks.py.
+
+    Author: B.G (07/2026)
+    """
+    if backend == "taichi":
+        import taichi as ti
+
+        from ..core.context.taichi_backend import TaichiHelperBuilder, TaichiParameter
+        from . import _closure_blocks as blocks
+
+        return ti, TaichiParameter, TaichiHelperBuilder, blocks, {"i32": ti.i32, "f32": ti.f32, "u8": ti.u8}
+    if backend == "quadrants":
+        import quadrants as qd
+
+        from ..core.context.quadrants_backend import QuadrantsHelperBuilder, QuadrantsParameter
+        from . import _closure_blocks as blocks
+
+        return qd, QuadrantsParameter, QuadrantsHelperBuilder, blocks, {"i32": qd.i32, "f32": qd.f32, "u8": qd.u8}
+    if backend == "cupy":
+        from ..core.context.cupy_backend import CupyHelperBuilder, CupyParameter
+        from . import _cupy_blocks as blocks
+
+        return None, CupyParameter, CupyHelperBuilder, blocks, {
+            "i32": np.int32,
+            "f32": np.float32,
+            "u8": np.uint8,
+        }
+    raise ValueError(f"make_grid: unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
+
+
+def make_grid(
+    backend: str,
+    pool,
+    nx: int,
+    ny: int,
+    dx: float,
+    *,
+    topology: str = "D8",
+    boundary: str = "normal",
+    nodata: bool = False,
+    outlet: str = "edge",
+    nx_mode: str = "const",
+    ny_mode: str = "const",
+    dx_mode: str = "const",
+) -> Bag:
+    """
+    Build one grid's Bag: nx/ny/dx/n_neighbours params, the optional
+    nodata_mask/outlet_mask fields, and the neighbour/distance/edge helper
+    surface - all uniform by name regardless of backend or config.
+
+    `topology` "D4"|"D8", `boundary` "normal"|"periodic_EW"|"periodic_NS",
+    `outlet` "edge"|"mask" pick block variants at build time (see
+    _closure_blocks.py / _cupy_blocks.py). `nodata` allocates and folds in
+    nodata_mask (u8, 1 == inactive) wherever a block needs it.
+
+    `nx_mode`/`ny_mode` default "const", may be overridden to "scalar".
+    `dx_mode` defaults "const", may be overridden to "scalar" or "field" - a
+    field-mode dx is allocated (one cell per node, caller fills it) but the
+    public helpers that read dx (dist_from_k, dist_between_nodes) only ever
+    read index 0: neither's signature carries a node to key a per-node value
+    off, so a genuinely spatially-varying dx is not wired through those two
+    helpers as things stand - only reachable by reading grid.dx.get(i)
+    directly in a caller's own template.
+
+    Author: B.G (07/2026)
+    """
+    if topology not in _TOPOLOGIES:
+        raise ValueError(f"make_grid: topology must be one of {sorted(_TOPOLOGIES)}, got {topology!r}")
+    if boundary not in _BOUNDARIES:
+        raise ValueError(f"make_grid: boundary must be one of {sorted(_BOUNDARIES)}, got {boundary!r}")
+    if outlet not in _OUTLETS:
+        raise ValueError(f"make_grid: outlet must be one of {sorted(_OUTLETS)}, got {outlet!r}")
+    if nx_mode not in ("const", "scalar"):
+        raise ValueError(f"make_grid: nx_mode must be 'const' or 'scalar', got {nx_mode!r}")
+    if ny_mode not in ("const", "scalar"):
+        raise ValueError(f"make_grid: ny_mode must be 'const' or 'scalar', got {ny_mode!r}")
+    if dx_mode not in ("const", "scalar", "field"):
+        raise ValueError(f"make_grid: dx_mode must be 'const', 'scalar' or 'field', got {dx_mode!r}")
+
+    backend_mod, ParamCls, HelperCls, blocks, dtypes = _backend_classes(backend)
+    n_flat = int(nx) * int(ny)
+
+    nx_p = ParamCls("GRID_NX", dtype=dtypes["i32"], mode=nx_mode, value=int(nx), pool=pool)
+    ny_p = ParamCls("GRID_NY", dtype=dtypes["i32"], mode=ny_mode, value=int(ny), pool=pool)
+
+    if dx_mode == "field":
+        dx_p = ParamCls(
+            "GRID_DX",
+            dtype=dtypes["f32"],
+            mode="field",
+            value=np.full(n_flat, dx, dtype=np.float32),
+            pool=pool,
+            n_flat=n_flat,
+        )
+    else:
+        dx_p = ParamCls("GRID_DX", dtype=dtypes["f32"], mode=dx_mode, value=float(dx), pool=pool)
+
+    n_neighbours_p = ParamCls(
+        "GRID_NNEIGHBOURS", dtype=dtypes["i32"], mode="const", value=_TOPOLOGIES[topology], pool=pool, solo=True
+    )
+
+    nodata_mask_p = None
+    if nodata:
+        nodata_mask_p = ParamCls(
+            "GRID_NODATA_MASK",
+            dtype=dtypes["u8"],
+            mode="field",
+            value=np.zeros(n_flat, dtype=np.uint8),
+            pool=pool,
+            n_flat=n_flat,
+        )
+
+    outlet_mask_p = None
+    if outlet == "mask":
+        outlet_mask_p = ParamCls(
+            "GRID_OUTLET_MASK",
+            dtype=dtypes["u8"],
+            mode="field",
+            value=np.zeros(n_flat, dtype=np.uint8),
+            pool=pool,
+            n_flat=n_flat,
+        )
+
+    helpers = blocks.build_helpers(
+        HelperCls,
+        nx_p=nx_p,
+        ny_p=ny_p,
+        dx_p=dx_p,
+        nodata_mask_p=nodata_mask_p,
+        outlet_mask_p=outlet_mask_p,
+        topology=topology,
+        boundary=boundary,
+        nodata=nodata,
+        outlet=outlet,
+        backend_mod=backend_mod,
+    )
+
+    items = {"nx": nx_p, "ny": ny_p, "dx": dx_p, "n_neighbours": n_neighbours_p}
+    if nodata_mask_p is not None:
+        items["nodata_mask"] = nodata_mask_p
+    if outlet_mask_p is not None:
+        items["outlet_mask"] = outlet_mask_p
+    items.update(helpers)
+    return Bag(items)
