@@ -129,9 +129,12 @@ import inspect
 import warnings
 from abc import ABC, abstractmethod
 from functools import lru_cache
-from typing import Any, ClassVar
+from typing import Any
 
-from ..pool.base import DataHandle, new_uid
+from ..pool.base import new_uid
+
+MODES = ("const", "scalar", "field")
+"""The storage kinds a Parameter's `mode` may take, common to every backend."""
 
 
 class Parameter(ABC):
@@ -140,9 +143,7 @@ class Parameter(ABC):
 
     `mode` decides where the value lives - "const" in the generated code,
     "scalar" in a single device cell, "field" in a device array - and every
-    backend must offer all three (REQUIRED_MODES). A backend may widen
-    SUPPORTED_MODES with further storage kinds; the check runs when the
-    subclass is defined, so an incomplete backend fails at import.
+    backend offers all three (see MODES).
 
     Two surfaces. From the host: get(), set(value), set_node(node, value).
     From device code: device_view(), which returns a backend object whose
@@ -152,18 +153,8 @@ class Parameter(ABC):
     Author: B.G (07/2026)
     """
 
-    REQUIRED_MODES: ClassVar[frozenset[str]] = frozenset({"const", "scalar", "field"})
-    SUPPORTED_MODES: ClassVar[frozenset[str]] = REQUIRED_MODES
-
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        missing = Parameter.REQUIRED_MODES - cls.SUPPORTED_MODES
-        if missing:
-            raise TypeError(f"{cls.__name__} must support modes {sorted(missing)}")
-
     name: str
     dtype: Any
-    solo: bool = False
 
     def __init__(self):
         """
@@ -270,22 +261,13 @@ class Specializable(ABC):
     launchable Kernel, or the internal object a HelperBuilder specializes
     into as part of an enclosing kernel's compile().
 
-    Beyond the call contract, each instance keeps a read-only snapshot of the
-    raw material it was made from - template, source text, AST, and the real
-    bindings dict as it stood at this object's own compile time. Nothing in
-    this module reads those back to drive a later compile; they are here so a
-    higher layer (kernel fusion, a graph compiler) can work from the originals
-    instead of re-deriving them. The builder that produced this object stays
-    authoritative for anything that needs to change - see CompileBuilder.
+    The builder that produced this object stays authoritative for its recipe
+    - template and bindings - see CompileBuilder.
 
     Author: B.G (07/2026)
     """
 
     name: str
-    _template: Any = None
-    _source: str | None = None
-    _ast: ast.AST | None = None
-    _dependencies: dict[str, Any] | None = None
 
     def __init__(self):
         """
@@ -304,48 +286,6 @@ class Specializable(ABC):
         Author: B.G (07/2026)
         """
         return self._uid
-
-    @property
-    def template(self):
-        """
-        The template object this was compiled from - a python def for
-        Taichi/Quadrants, a CUDA source string for cupy. Read-only: this is a
-        snapshot for introspection, not a handle to recompile from. Change and
-        recompile through the builder instead.
-
-        Author: B.G (07/2026)
-        """
-        return self._template
-
-    @property
-    def source(self) -> str | None:
-        """
-        The template's source text, captured at compile time. See `template`.
-
-        Author: B.G (07/2026)
-        """
-        return self._source
-
-    @property
-    def ast(self) -> "ast.AST | None":
-        """
-        The template's parsed AST, captured at compile time. None for a
-        template with no recoverable source (e.g. cupy's CUDA text). See
-        `template`.
-
-        Author: B.G (07/2026)
-        """
-        return self._ast
-
-    @property
-    def bindings(self) -> dict[str, Any]:
-        """
-        The real bound objects - not type names - as they stood at this
-        object's own compile time. Read-only snapshot; see `template`.
-
-        Author: B.G (07/2026)
-        """
-        return self._dependencies
 
     @property
     @abstractmethod
@@ -474,8 +414,8 @@ def resolve_binding(value, ctx: "_SpecializeCtx"):
     """
     Turn a bound object into what a template body should see in its place.
 
-    Parameter      a bare literal when solo, otherwise device_view() - the
-                   carrier of .get / .set_node for in-kernel access.
+    Parameter      device_view() - the carrier of .get / .set_node for
+                   in-kernel access.
     HelperBuilder  specialized against `ctx` (memoized - see _SpecializeCtx)
                    and replaced with its .compiled backend callable or
                    source.
@@ -492,9 +432,6 @@ def resolve_binding(value, ctx: "_SpecializeCtx"):
     Author: B.G (07/2026)
     """
     if isinstance(value, Parameter):
-        if getattr(value, "solo", False):
-            resolved = value.get()
-            return resolved.data if isinstance(resolved, DataHandle) else resolved
         return value.device_view()
     if isinstance(value, HelperBuilder):
         return ctx.specialize(value).compiled
@@ -511,10 +448,10 @@ def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
     Return (source_text, ast) for a template. A python def is introspected; a
     raw string (CUDA source) is kept verbatim and has no AST.
 
-    Cached because every compile() asks twice - once to filter bindings, once
-    for attach_meta - and a miss costs an inspect.getsource plus a parse. The
-    tree handed back is therefore shared by every Specializable built from that
-    template: treat it as read-only.
+    Cached because every compile() asks once to filter bindings, and a miss
+    costs an inspect.getsource plus a parse. The tree handed back is
+    therefore shared by every Specializable built from that template: treat
+    it as read-only.
 
     The cache key is the template object itself, so the bound size matters -
     unbounded, it would pin every dynamically generated template and every CUDA
@@ -578,20 +515,6 @@ def filter_bindings(template, bindings: dict[str, Any]) -> dict[str, Any]:
     return filtered
 
 
-def attach_meta(obj: Specializable, template, bindings: dict[str, Any]) -> None:
-    """
-    Record on a freshly built Specializable what it was made from: the
-    template itself, its source, its AST, and the real bound objects (not
-    type names, so a caller can inspect and reuse what was actually bound).
-    See Specializable.
-
-    Author: B.G (07/2026)
-    """
-    obj._template = template
-    obj._source, obj._ast = capture_template_meta(template)
-    obj._dependencies = dict(bindings)
-
-
 class CompileBuilder(ABC):
     """
     Collects dependencies and a template, and compiles them into one
@@ -648,9 +571,8 @@ class CompileBuilder(ABC):
         """
         The current name -> object bindings, in bind() order. Read-only - go
         through bind() / bind_bag() to change them. This is a live view onto
-        the builder's own dict, not a copy of a frozen snapshot; a compiled
-        object's own `.bindings` is the frozen copy, taken at its compile
-        time.
+        the builder's own dict, not a snapshot - the builder stays
+        authoritative for its recipe (see the class docstring).
 
         Author: B.G (07/2026)
         """

@@ -11,10 +11,11 @@ What the file is here to show is how the pieces fit together when a model
 needs all of them at once. The other examples each isolate one thing; this
 one carries the lot:
 
-  Parameter modes   N and DT are solo consts, read bare as compile-time
-                    literals. DX is a non-solo const, read as grid.dx.get(0).
-                    D and SEA_LEVEL are scalars the host retunes between
-                    frames. UPLIFT is a field, one rate per node.
+  Parameter modes   N, DT and DX are const Parameters, read uniformly via
+                    .get(0) - the value still bakes to a compile-time literal
+                    in generated code. D and SEA_LEVEL are scalars the host
+                    retunes between frames. UPLIFT is a field, one rate per
+                    node.
   Helpers           clampi binds a const; laplacian binds a bag and calls
                     clampi, so a helper reaches another helper; uplift_at
                     binds the UPLIFT *field* directly, which is what lets the
@@ -72,14 +73,14 @@ pool = QuadrantsPool()
 # ---------------------------------------------------------------------------
 # parameters - one of every mode
 # ---------------------------------------------------------------------------
-# solo consts: folded into the generated code as bare literals, read as `N`
-n_p = QuadrantsParameter("N", dtype=qd.i32, mode="const", value=GRID_N, pool=pool, solo=True)
-dt_p = QuadrantsParameter("DT", dtype=qd.f32, mode="const", value=DT_VAL, pool=pool, solo=True)
-seed_a_p = QuadrantsParameter("SEED_A", dtype=qd.f32, mode="const", value=12.9898, pool=pool, solo=True)
-seed_b_p = QuadrantsParameter("SEED_B", dtype=qd.f32, mode="const", value=78.233, pool=pool, solo=True)
+# const Parameters: fixed at compile time and folded into the generated code
+# as a literal, but read through .get(0) like any other mode, so a template
+# can be written without knowing a given name is const.
+n_p = QuadrantsParameter("N", dtype=qd.i32, mode="const", value=GRID_N, pool=pool)
+dt_p = QuadrantsParameter("DT", dtype=qd.f32, mode="const", value=DT_VAL, pool=pool)
+seed_a_p = QuadrantsParameter("SEED_A", dtype=qd.f32, mode="const", value=12.9898, pool=pool)
+seed_b_p = QuadrantsParameter("SEED_B", dtype=qd.f32, mode="const", value=78.233, pool=pool)
 
-# non-solo const: still fixed at compile time, but read through .get(0) like
-# any other mode, so a template can be written without knowing it is const
 dx_p = QuadrantsParameter("DX", dtype=qd.f32, mode="const", value=DX_M, pool=pool)
 
 # scalars: one cell each, retuned from the host between routine calls
@@ -99,8 +100,8 @@ uplift_p.set((UPLIFT_MAX * _ridge).ravel())
 # ---------------------------------------------------------------------------
 # bags
 # ---------------------------------------------------------------------------
-# nested: grid.n is a solo const read bare, grid.dx a non-solo const read
-# through .get(0) - members resolve on their own type, not the bag's
+# nested: both grid.n and grid.dx are const Parameters, read through .get(0) -
+# members resolve on their own type, not the bag's
 grid = Bag({"n": n_p, "dx": dx_p})
 
 # flat, for bind_bag: the kernel that uses these reads them as bare names
@@ -112,14 +113,14 @@ noise_seeds = Bag({"SEED_A": seed_a_p, "SEED_B": seed_b_p})
 
 
 def clampi(i):
-    return min(max(i, 0), N - 1)
+    return min(max(i, 0), N.get(0) - 1)
 
 
 clampi_fn = QuadrantsHelperBuilder().bind("N", n_p).ingest(clampi)
 
 
 def laplacian(field_, i, j):
-    # calls another helper, and reads a non-solo const out of a bound bag
+    # calls another helper, and reads a const Parameter out of a bound bag
     ip = clampi(i + 1)
     im = clampi(i - 1)
     jp = clampi(j + 1)
@@ -134,7 +135,7 @@ laplacian_fn = QuadrantsHelperBuilder().bind("clampi", clampi_fn).bind("grid", g
 def uplift_at(i, j):
     # binds the UPLIFT *field* itself: a helper reads a non-const Parameter
     # exactly the way a kernel does, so the caller passes only the indices
-    return UPLIFT.get(i * N + j)
+    return UPLIFT.get(i * N.get(0) + j)
 
 
 uplift_at_fn = QuadrantsHelperBuilder().bind("UPLIFT", uplift_p).bind("N", n_p).ingest(uplift_at)
@@ -147,7 +148,7 @@ uplift_at_fn = QuadrantsHelperBuilder().bind("UPLIFT", uplift_p).bind("N", n_p).
 def init_topo_template(z: qd.Tensor):
     # bind_bag put SEED_A / SEED_B in flat, so they read as bare names here
     for i, j in z:
-        x = qd.cast(i, qd.f32) * SEED_A + qd.cast(j, qd.f32) * SEED_B
+        x = qd.cast(i, qd.f32) * SEED_A.get(0) + qd.cast(j, qd.f32) * SEED_B.get(0)
         s = qd.sin(x) * 43758.5453
         z[i, j] = (s - qd.floor(s)) * 2.0
 
@@ -158,14 +159,15 @@ init_topo_kernel = QuadrantsKernelBuilder().bind_bag(noise_seeds).ingest(init_to
 # routine kernels
 # ---------------------------------------------------------------------------
 
-# mixed bag: a scalar Parameter, a helper and a solo const under one name.
-# hill.d is a device accessor, hill.lap a specialized func, hill.dt a literal.
+# mixed bag: a scalar Parameter, a helper and a const Parameter under one
+# name. hill.d and hill.dt are both device accessors, hill.lap a specialized
+# func.
 hill = Bag({"d": d_p, "lap": laplacian_fn, "dt": dt_p})
 
 
 def diffuse_template(z_out: qd.Tensor, z_in: qd.Tensor):
     for i, j in z_in:
-        z_out[i, j] = z_in[i, j] + hill.dt * hill.d.get(0) * hill.lap(z_in, i, j)
+        z_out[i, j] = z_in[i, j] + hill.dt.get(0) * hill.d.get(0) * hill.lap(z_in, i, j)
 
 
 diffuse_builder = QuadrantsKernelBuilder().bind("hill", hill).ingest(diffuse_template)
@@ -173,9 +175,9 @@ diffuse_builder = QuadrantsKernelBuilder().bind("hill", hill).ingest(diffuse_tem
 
 def uplift_template(z: qd.Tensor):
     for i, j in z:
-        z[i, j] += up(i, j) * DT
+        z[i, j] += up(i, j) * DT.get(0)
         # base level: pin the east and west edges, so the ridge drains outward
-        if j == 0 or j == grid.n - 1:
+        if j == 0 or j == grid.n.get(0) - 1:
             z[i, j] = SEA.get(0)
 
 

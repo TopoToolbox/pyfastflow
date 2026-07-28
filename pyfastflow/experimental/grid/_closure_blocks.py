@@ -28,6 +28,10 @@ block template.
 Author: B.G (07/2026)
 """
 
+import functools
+
+from ..core.context.backends import make_helper
+
 # ---------------------------------------------------------------------------
 # geometry
 # ---------------------------------------------------------------------------
@@ -437,11 +441,7 @@ def build_helpers(
     sqrt2 = math.sqrt(2.0)
     d8 = topology == "D8"
 
-    def mk(template, **binds):
-        b = HelperCls().ingest(template)
-        for name, obj in binds.items():
-            b.bind(name, obj)
-        return b
+    mk = functools.partial(make_helper, HelperCls)
 
     row = mk(_row_tmpl, NX=nx_p)
     col = mk(_col_tmpl, NX=nx_p)

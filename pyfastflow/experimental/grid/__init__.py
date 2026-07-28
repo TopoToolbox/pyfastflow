@@ -10,7 +10,7 @@ backend and whatever the grid's own topology/boundary/nodata/outlet config.
 Two kinds of knobs:
   - value params (nx, ny, dx) - mode-overridable (const/scalar, dx also
     field), always read in device code through `.get(...)`. Default mode is
-    "const", non-solo, for all three - see the note below.
+    "const" for all three.
   - structural selectors (topology, boundary, nodata, outlet) - each one
     picks which variant of a private block gets bound into the public
     composite helpers; see _closure_blocks.py / _cupy_blocks.py.
@@ -20,25 +20,12 @@ when nodata=True, outlet_mask (u8, 1 == outlet) when outlet=="mask". Neither
 exists in the bag when its feature is off, so a caller that never asked for
 nodata/mask-outlet never sees them.
 
-Note on nx/ny solo=True: earlier drafts of this design set nx/ny to a
-default of const+solo=True (read bare, as a compile-time literal with no
-`.get()`), matching how n_neighbours is read. That is incompatible with the
-"read every value param mode-agnostically via `.get()`" requirement the
-private blocks are built around - a solo Parameter resolves to a bare python
-literal in device code (see base.py's resolve_binding), which has no `.get`
-method, so `NX.get(0)` inside a shared geometry block would fail to trace
-the moment nx defaulted to solo. To keep one geometry block working
-whatever mode nx/ny/dx are in - the actual point of the mode-overridable
-design - nx/ny/dx are built here as solo=False by default (same as dx's
-own, unambiguous spec: "non-solo, read via .get(0)"). n_neighbours, which
-has no override and is genuinely only ever a compile-time literal, keeps
-solo=True.
-
 Author: B.G (07/2026)
 """
 
 import numpy as np
 
+from ..core.context.backends import backend_classes
 from ..core.context.base import Bag
 
 _TOPOLOGIES = {"D4": 4, "D8": 8}
@@ -46,38 +33,21 @@ _BOUNDARIES = frozenset({"normal", "periodic_EW", "periodic_NS"})
 _OUTLETS = frozenset({"edge", "mask"})
 
 
-def _backend_classes(backend: str):
+def _blocks_for(backend: str):
     """
-    (backend_module_or_None, ParameterCls, HelperBuilderCls, blocks_module,
-    dtypes) for one backend name. cupy's backend_module is None - its blocks
-    call plain C, never a bound backend module - see _cupy_blocks.py.
+    The private block module implementing make_grid's device code for one
+    backend name: the closure blocks (shared by Taichi and Quadrants) or the
+    cupy blocks.
 
     Author: B.G (07/2026)
     """
-    if backend == "taichi":
-        import taichi as ti
-
-        from ..core.context.taichi_backend import TaichiHelperBuilder, TaichiParameter
+    if backend in ("taichi", "quadrants"):
         from . import _closure_blocks as blocks
-
-        return ti, TaichiParameter, TaichiHelperBuilder, blocks, {"i32": ti.i32, "f32": ti.f32, "u8": ti.u8}
-    if backend == "quadrants":
-        import quadrants as qd
-
-        from ..core.context.quadrants_backend import QuadrantsHelperBuilder, QuadrantsParameter
-        from . import _closure_blocks as blocks
-
-        return qd, QuadrantsParameter, QuadrantsHelperBuilder, blocks, {"i32": qd.i32, "f32": qd.f32, "u8": qd.u8}
-    if backend == "cupy":
-        from ..core.context.cupy_backend import CupyHelperBuilder, CupyParameter
+    elif backend == "cupy":
         from . import _cupy_blocks as blocks
-
-        return None, CupyParameter, CupyHelperBuilder, blocks, {
-            "i32": np.int32,
-            "f32": np.float32,
-            "u8": np.uint8,
-        }
-    raise ValueError(f"make_grid: unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
+    else:
+        raise ValueError(f"make_grid: unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
+    return blocks
 
 
 def make_grid(
@@ -129,7 +99,8 @@ def make_grid(
     if dx_mode not in ("const", "scalar", "field"):
         raise ValueError(f"make_grid: dx_mode must be 'const', 'scalar' or 'field', got {dx_mode!r}")
 
-    backend_mod, ParamCls, HelperCls, blocks, dtypes = _backend_classes(backend)
+    backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
+    blocks = _blocks_for(backend)
     n_flat = int(nx) * int(ny)
 
     nx_p = ParamCls("GRID_NX", dtype=dtypes["i32"], mode=nx_mode, value=int(nx), pool=pool)
@@ -148,7 +119,7 @@ def make_grid(
         dx_p = ParamCls("GRID_DX", dtype=dtypes["f32"], mode=dx_mode, value=float(dx), pool=pool)
 
     n_neighbours_p = ParamCls(
-        "GRID_NNEIGHBOURS", dtype=dtypes["i32"], mode="const", value=_TOPOLOGIES[topology], pool=pool, solo=True
+        "GRID_NNEIGHBOURS", dtype=dtypes["i32"], mode="const", value=_TOPOLOGIES[topology], pool=pool
     )
 
     nodata_mask_p = None

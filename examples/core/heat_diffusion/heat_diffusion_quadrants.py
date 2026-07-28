@@ -17,11 +17,10 @@ Pipeline:
   - diffuse: explicit FTCS heat equation dT/dt = alpha(i,j) * lap(T), with a
     clamped (Neumann / no-flux) boundary Laplacian.
 
-Uniform device surface: `wall`, `alpha` and `stove` are read with p.get(node)
-and written with p.set_node(node, val) regardless of const/scalar/field mode -
-the kernels never branch on mode, so re-declaring `alpha` as a single const
-(uniform room, no walls) needs no kernel-body change. Structural constants
-(N, ROOM, ...) are declared solo=True and used bare as compile-time literals.
+Uniform device surface: every Parameter is read with p.get(node) and written
+with p.set_node(node, val) regardless of const/scalar/field mode - the
+kernels never branch on mode, so re-declaring `alpha` as a single const
+(uniform room, no walls) needs no kernel-body change.
 
 Binding styles, all three visible in one file:
   - flat, one bind() per object (most kernels here);
@@ -87,25 +86,25 @@ DT_VAL = CFL_SAFETY * DX_M**2 / (4.0 * ALPHA_AIR_VAL)  # seconds
 
 pool = QuadrantsPool()
 
-# Structural constants: solo=True -> read bare in kernel bodies as compile-time
-# literals (no .get()), since they are never going to vary at runtime.
-n_p = QuadrantsParameter("N", dtype=qd.i32, mode="const", value=GRID_N, pool=pool, solo=True)
-room_p = QuadrantsParameter("ROOM", dtype=qd.i32, mode="const", value=GRID_N // 4, pool=pool, solo=True)
-wall_thick_p = QuadrantsParameter("WALL_THICK", dtype=qd.i32, mode="const", value=8, pool=pool, solo=True)
-door_p = QuadrantsParameter("DOOR", dtype=qd.i32, mode="const", value=6, pool=pool, solo=True)
-seed_p = QuadrantsParameter("SEED", dtype=qd.f32, mode="const", value=17.0, pool=pool, solo=True)
+# Structural constants: const mode, bake to compile-time literals in generated
+# code even though the kernel body still reads them via .get(0).
+n_p = QuadrantsParameter("N", dtype=qd.i32, mode="const", value=GRID_N, pool=pool)
+room_p = QuadrantsParameter("ROOM", dtype=qd.i32, mode="const", value=GRID_N // 4, pool=pool)
+wall_thick_p = QuadrantsParameter("WALL_THICK", dtype=qd.i32, mode="const", value=8, pool=pool)
+door_p = QuadrantsParameter("DOOR", dtype=qd.i32, mode="const", value=6, pool=pool)
+seed_p = QuadrantsParameter("SEED", dtype=qd.f32, mode="const", value=17.0, pool=pool)
 
-dt_p = QuadrantsParameter("DT", dtype=qd.f32, mode="const", value=DT_VAL, pool=pool, solo=True)  # seconds
-dx2_p = QuadrantsParameter("DX2", dtype=qd.f32, mode="const", value=DX_M**2, pool=pool, solo=True)  # meters^2
+dt_p = QuadrantsParameter("DT", dtype=qd.f32, mode="const", value=DT_VAL, pool=pool)  # seconds
+dx2_p = QuadrantsParameter("DX2", dtype=qd.f32, mode="const", value=DX_M**2, pool=pool)  # meters^2
 
-# Seed values for the alpha field - used bare inside set_alpha.
-alpha_air_seed_p = QuadrantsParameter("ALPHA_AIR_SEED", dtype=qd.f32, mode="const", value=ALPHA_AIR_VAL, pool=pool, solo=True)
-alpha_wall_seed_p = QuadrantsParameter("ALPHA_WALL_SEED", dtype=qd.f32, mode="const", value=ALPHA_WALL_VAL, pool=pool, solo=True)
-t_bg_p = QuadrantsParameter("T_BG", dtype=qd.f32, mode="const", value=15.0, pool=pool, solo=True)
+# Seed values for the alpha field - read via .get(0) inside set_alpha.
+alpha_air_seed_p = QuadrantsParameter("ALPHA_AIR_SEED", dtype=qd.f32, mode="const", value=ALPHA_AIR_VAL, pool=pool)
+alpha_wall_seed_p = QuadrantsParameter("ALPHA_WALL_SEED", dtype=qd.f32, mode="const", value=ALPHA_WALL_VAL, pool=pool)
+t_bg_p = QuadrantsParameter("T_BG", dtype=qd.f32, mode="const", value=15.0, pool=pool)
 
-src_i_p = QuadrantsParameter("SRC_I", dtype=qd.i32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool, solo=True)
-src_j_p = QuadrantsParameter("SRC_J", dtype=qd.i32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool, solo=True)
-src_r_p = QuadrantsParameter("SRC_R", dtype=qd.i32, mode="const", value=10, pool=pool, solo=True)  # stove radius, cells
+src_i_p = QuadrantsParameter("SRC_I", dtype=qd.i32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool)
+src_j_p = QuadrantsParameter("SRC_J", dtype=qd.i32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool)
+src_r_p = QuadrantsParameter("SRC_R", dtype=qd.i32, mode="const", value=10, pool=pool)  # stove radius, cells
 
 # scalar mode: a 0-d field, host-settable every frame -> a pulsing stove
 # temperature. Reached in-kernel as stove.temp.get(0) (see the stove Bag).
@@ -126,7 +125,7 @@ alpha_p = QuadrantsParameter("ALPHA", dtype=qd.f32, mode="field", value=np.zeros
 
 
 def clamp(i):
-    return min(max(i, 0), N - 1)
+    return min(max(i, 0), N.get(0) - 1)
 
 
 clamp_fn = QuadrantsHelperBuilder().bind("N", n_p).ingest(clamp)
@@ -145,7 +144,7 @@ laplacian_fn = QuadrantsHelperBuilder().bind("clamp", clamp_fn).ingest(laplacian
 
 def whash(a, b):
     """Deterministic pseudo-random value in [0, 1) for two integer indices."""
-    x = qd.cast(a, qd.f32) * 12.9898 + qd.cast(b, qd.f32) * 78.233 + SEED
+    x = qd.cast(a, qd.f32) * 12.9898 + qd.cast(b, qd.f32) * 78.233 + SEED.get(0)
     s = qd.sin(x) * 43758.5453
     return s - qd.floor(s)
 
@@ -158,25 +157,25 @@ whash_fn = QuadrantsHelperBuilder().bind("SEED", seed_p).ingest(whash)
 
 
 def generate_walls_template():
-    for i, j in qd.ndrange(N, N):
+    for i, j in qd.ndrange(N.get(0), N.get(0)):
         is_wall = 0
-        if i < WALL_THICK or i >= N - WALL_THICK or j < WALL_THICK or j >= N - WALL_THICK:
+        if i < WALL_THICK.get(0) or i >= N.get(0) - WALL_THICK.get(0) or j < WALL_THICK.get(0) or j >= N.get(0) - WALL_THICK.get(0):
             is_wall = 1
-        elif i % ROOM < WALL_THICK:
-            vline = i // ROOM
-            seg = j // ROOM
-            door = qd.cast(whash(vline, seg) * ROOM, qd.i32)
-            gap = (j % ROOM) >= door and (j % ROOM) < door + DOOR
+        elif i % ROOM.get(0) < WALL_THICK.get(0):
+            vline = i // ROOM.get(0)
+            seg = j // ROOM.get(0)
+            door = qd.cast(whash(vline, seg) * ROOM.get(0), qd.i32)
+            gap = (j % ROOM.get(0)) >= door and (j % ROOM.get(0)) < door + DOOR.get(0)
             if not gap:
                 is_wall = 1
-        elif j % ROOM < WALL_THICK:
-            hline = j // ROOM
-            seg = i // ROOM
-            door = qd.cast(whash(hline + 7919, seg) * ROOM, qd.i32)
-            gap = (i % ROOM) >= door and (i % ROOM) < door + DOOR
+        elif j % ROOM.get(0) < WALL_THICK.get(0):
+            hline = j // ROOM.get(0)
+            seg = i // ROOM.get(0)
+            door = qd.cast(whash(hline + 7919, seg) * ROOM.get(0), qd.i32)
+            gap = (i % ROOM.get(0)) >= door and (i % ROOM.get(0)) < door + DOOR.get(0)
             if not gap:
                 is_wall = 1
-        wall.set_node(i * N + j, is_wall)
+        wall.set_node(i * N.get(0) + j, is_wall)
 
 
 generate_walls_kernel = (
@@ -193,12 +192,12 @@ generate_walls_kernel = (
 
 
 def set_alpha_template():
-    for i, j in qd.ndrange(N, N):
-        idx = i * N + j
+    for i, j in qd.ndrange(N.get(0), N.get(0)):
+        idx = i * N.get(0) + j
         if wall.get(idx) == 1:
-            alpha.set_node(idx, ALPHA_WALL_SEED)
+            alpha.set_node(idx, ALPHA_WALL_SEED.get(0))
         else:
-            alpha.set_node(idx, ALPHA_AIR_SEED)
+            alpha.set_node(idx, ALPHA_AIR_SEED.get(0))
 
 
 # The two seed values are grouped on the host for tidiness, then merged in with
@@ -221,17 +220,17 @@ set_alpha_kernel = (
 
 def init_temperature_template(T: qd.Tensor):
     for i, j in T:
-        T[i, j] = T_BG
+        T[i, j] = T_BG.get(0)
 
 
 init_temperature_kernel = QuadrantsKernelBuilder().bind("T_BG", t_bg_p).ingest(init_temperature_template).compile()
 
 
 # The stove travels as ONE nested Bag rather than four flat binds: its position
-# is grouped into an `at` sub-bag, and members of either level resolve on their
-# own type - the solo consts become compile-time literals (read bare), the
-# scalar Parameter keeps its .get(0). Everything else here still binds flat, so
-# the two styles sit side by side in one file.
+# is grouped into an `at` sub-bag. Every member, whatever mode, is reached the
+# same way - .get(0) - so const and scalar Parameters sit side by side under
+# one name. Everything else here still binds flat, so the two styles sit side
+# by side in one file.
 stove = Bag(
     {
         "at": Bag({"i": src_i_p, "j": src_j_p}),
@@ -243,9 +242,9 @@ stove = Bag(
 
 def apply_source_template(T: qd.Tensor):
     for i, j in T:
-        dx = i - stove.at.i
-        dy = j - stove.at.j
-        if dx * dx + dy * dy <= stove.r * stove.r:
+        dx = i - stove.at.i.get(0)
+        dy = j - stove.at.j.get(0)
+        if dx * dx + dy * dy <= stove.r.get(0) * stove.r.get(0):
             T[i, j] = stove.temp.get(0)
 
 
@@ -253,18 +252,19 @@ apply_source_kernel = QuadrantsKernelBuilder().bind("stove", stove).ingest(apply
 
 
 # A MIXED Bag: everything the diffusion step needs, whatever kind it is - a
-# field Parameter, a device helper, two solo consts - under one name. A bag has
-# no member type; each is resolved on its own at compile time, so `heat.alpha`
-# becomes a device accessor, `heat.lap` a compiled func, `heat.dx2` a literal.
+# field Parameter, a device helper, two const Parameters - under one name. A
+# bag has no member type; each is resolved on its own at compile time, so
+# `heat.alpha` becomes a device accessor, `heat.lap` a compiled func, and
+# `heat.dx2` a device accessor whose .get(0) bakes to a literal.
 heat = Bag({"alpha": alpha_p, "lap": laplacian_fn, "dt": dt_p, "dx2": dx2_p})
 
 
 def diffuse_template(T_out: qd.Tensor, T_in: qd.Tensor):
     for i, j in T_in:
-        idx = i * N + j
+        idx = i * N.get(0) + j
         a = heat.alpha.get(idx)
-        lap = heat.lap(T_in, i, j) / heat.dx2
-        T_out[i, j] = T_in[i, j] + heat.dt * a * lap
+        lap = heat.lap(T_in, i, j) / heat.dx2.get(0)
+        T_out[i, j] = T_in[i, j] + heat.dt.get(0) * a * lap
 
 diffuse_kernel = QuadrantsKernelBuilder().bind("N", n_p).bind("heat", heat).ingest(diffuse_template).compile()
 

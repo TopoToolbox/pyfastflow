@@ -71,9 +71,9 @@ pool = CupyPool()
 # parameters
 # ---------------------------------------------------------------------------
 # Structural constants -> #define, used bare in the CUDA source.
-n_p = CupyParameter("N", dtype=np.int32, mode="const", value=GRID_N, pool=pool, solo=True)
-rest_depth_p = CupyParameter("REST_DEPTH", dtype=np.float32, mode="const", value=REST_DEPTH_VAL, pool=pool, solo=True)
-drop_r_p = CupyParameter("DROP_R", dtype=np.int32, mode="const", value=DROP_R_VAL, pool=pool, solo=True)
+n_p = CupyParameter("N", dtype=np.int32, mode="const", value=GRID_N, pool=pool)
+rest_depth_p = CupyParameter("REST_DEPTH", dtype=np.float32, mode="const", value=REST_DEPTH_VAL, pool=pool)
+drop_r_p = CupyParameter("DROP_R", dtype=np.int32, mode="const", value=DROP_R_VAL, pool=pool)
 
 # phys Bag: g is scalar (host-tunable live), dx/dt/damp are const - all
 # written the same way in the source, $phys.<name>.get(0)$.

@@ -75,22 +75,22 @@ DT_VAL = CFL_SAFETY * DX_M**2 / (4.0 * ALPHA_AIR_VAL)
 
 pool = CupyPool()
 
-n_p = CupyParameter("N", dtype=np.int32, mode="const", value=GRID_N, pool=pool, solo=True)
-room_p = CupyParameter("ROOM", dtype=np.int32, mode="const", value=GRID_N // 4, pool=pool, solo=True)
-wall_thick_p = CupyParameter("WALL_THICK", dtype=np.int32, mode="const", value=8, pool=pool, solo=True)
-door_p = CupyParameter("DOOR", dtype=np.int32, mode="const", value=6, pool=pool, solo=True)
-seed_p = CupyParameter("SEED", dtype=np.float32, mode="const", value=17.0, pool=pool, solo=True)
+n_p = CupyParameter("N", dtype=np.int32, mode="const", value=GRID_N, pool=pool)
+room_p = CupyParameter("ROOM", dtype=np.int32, mode="const", value=GRID_N // 4, pool=pool)
+wall_thick_p = CupyParameter("WALL_THICK", dtype=np.int32, mode="const", value=8, pool=pool)
+door_p = CupyParameter("DOOR", dtype=np.int32, mode="const", value=6, pool=pool)
+seed_p = CupyParameter("SEED", dtype=np.float32, mode="const", value=17.0, pool=pool)
 
-dt_p = CupyParameter("DT", dtype=np.float32, mode="const", value=DT_VAL, pool=pool, solo=True)
-dx2_p = CupyParameter("DX2", dtype=np.float32, mode="const", value=DX_M**2, pool=pool, solo=True)
+dt_p = CupyParameter("DT", dtype=np.float32, mode="const", value=DT_VAL, pool=pool)
+dx2_p = CupyParameter("DX2", dtype=np.float32, mode="const", value=DX_M**2, pool=pool)
 
-alpha_air_seed_p = CupyParameter("ALPHA_AIR_SEED", dtype=np.float32, mode="const", value=ALPHA_AIR_VAL, pool=pool, solo=True)
-alpha_wall_seed_p = CupyParameter("ALPHA_WALL_SEED", dtype=np.float32, mode="const", value=ALPHA_WALL_VAL, pool=pool, solo=True)
-t_bg_p = CupyParameter("T_BG", dtype=np.float32, mode="const", value=15.0, pool=pool, solo=True)
+alpha_air_seed_p = CupyParameter("ALPHA_AIR_SEED", dtype=np.float32, mode="const", value=ALPHA_AIR_VAL, pool=pool)
+alpha_wall_seed_p = CupyParameter("ALPHA_WALL_SEED", dtype=np.float32, mode="const", value=ALPHA_WALL_VAL, pool=pool)
+t_bg_p = CupyParameter("T_BG", dtype=np.float32, mode="const", value=15.0, pool=pool)
 
-src_i_p = CupyParameter("SRC_I", dtype=np.int32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool, solo=True)
-src_j_p = CupyParameter("SRC_J", dtype=np.int32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool, solo=True)
-src_r_p = CupyParameter("SRC_R", dtype=np.int32, mode="const", value=10, pool=pool, solo=True)
+src_i_p = CupyParameter("SRC_I", dtype=np.int32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool)
+src_j_p = CupyParameter("SRC_J", dtype=np.int32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool)
+src_r_p = CupyParameter("SRC_R", dtype=np.int32, mode="const", value=10, pool=pool)
 
 OG_stove = 70
 stove_p = CupyParameter("STOVE_T", dtype=np.float32, mode="scalar", value=OG_stove, pool=pool)
@@ -236,9 +236,9 @@ apply_source_builder = (
 __global__ void apply_source(float* T) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N * N) return;
-    int dx = idx / N - $stove.at.i$;
-    int dy = idx % N - $stove.at.j$;
-    if (dx * dx + dy * dy <= $stove.r$ * $stove.r$) {
+    int dx = idx / N - $stove.at.i.get(0)$;
+    int dy = idx % N - $stove.at.j.get(0)$;
+    if (dx * dx + dy * dy <= $stove.r.get(0)$ * $stove.r.get(0)$) {
         T[idx] = $stove.temp.get(0)$;
     }
 }
@@ -261,8 +261,8 @@ __global__ void diffuse(float* T_out, const float* T_in) {
     int i = idx / N;
     int j = idx % N;
     float a = $heat.alpha.get(idx)$;
-    float lap = $heat.lap(T_in, i, j)$ / $heat.dx2$;
-    T_out[idx] = T_in[idx] + $heat.dt$ * a * lap;
+    float lap = $heat.lap(T_in, i, j)$ / $heat.dx2.get(0)$;
+    T_out[idx] = T_in[idx] + $heat.dt.get(0)$ * a * lap;
 }
 """
     )

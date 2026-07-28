@@ -23,8 +23,9 @@ resolve to each member's device view - the kernel body never names them flat.
 The three bags are split by role, not by kind: a Bag has no member type, so
 one could equally hold `phys` and `ops` together (see heat_diffusion's `heat`).
 
-Structural constants (N, DROP_R, REST_DEPTH) are solo=True: compile-time
-literals used bare, no .get().
+Structural constants (N, DROP_R, REST_DEPTH) are const Parameters, read
+uniformly via .get(0) - the value still bakes to a compile-time literal in
+generated code.
 
 Author: B.G (07/2026)
 """
@@ -76,10 +77,11 @@ pool = TaichiPool()
 # ---------------------------------------------------------------------------
 # parameters
 # ---------------------------------------------------------------------------
-# Structural constants: solo=True -> read bare as compile-time literals.
-n_p = TaichiParameter("N", dtype=ti.i32, mode="const", value=GRID_N, pool=pool, solo=True)
-rest_depth_p = TaichiParameter("REST_DEPTH", dtype=ti.f32, mode="const", value=REST_DEPTH_VAL, pool=pool, solo=True)
-drop_r_p = TaichiParameter("DROP_R", dtype=ti.i32, mode="const", value=DROP_R_VAL, pool=pool, solo=True)
+# Structural constants: const mode, folded into the generated code as a
+# literal but still read through .get(0).
+n_p = TaichiParameter("N", dtype=ti.i32, mode="const", value=GRID_N, pool=pool)
+rest_depth_p = TaichiParameter("REST_DEPTH", dtype=ti.f32, mode="const", value=REST_DEPTH_VAL, pool=pool)
+drop_r_p = TaichiParameter("DROP_R", dtype=ti.i32, mode="const", value=DROP_R_VAL, pool=pool)
 
 # phys Bag: g is scalar (host-tunable live), dx/dt/damp are const - but all
 # read uniformly as phys.<name>.get(0), so the kernels never branch on mode.
@@ -101,7 +103,7 @@ drop = Bag({"cx": drop_cx_p, "cy": drop_cy_p, "amp": drop_amp_p})
 
 
 def clamp(i):
-    return min(max(i, 0), N - 1)
+    return min(max(i, 0), N.get(0) - 1)
 
 
 clamp_fn = TaichiHelperBuilder().bind("N", n_p).ingest(clamp)
@@ -126,7 +128,7 @@ ops = Bag({"clamp": clamp_fn, "face_depth": face_depth_fn})
 
 def init_height_template(h: ti.template()):
     for i, j in h:
-        h[i, j] = REST_DEPTH
+        h[i, j] = REST_DEPTH.get(0)
 
 
 init_height_kernel = TaichiKernelBuilder().bind("REST_DEPTH", rest_depth_p).ingest(init_height_template).compile()
@@ -136,7 +138,7 @@ def apply_drop_template(h: ti.template()):
     for i, j in h:
         dxr = i - drop.cx.get(0)
         dyr = j - drop.cy.get(0)
-        if dxr * dxr + dyr * dyr <= DROP_R * DROP_R:
+        if dxr * dxr + dyr * dyr <= DROP_R.get(0) * DROP_R.get(0):
             h[i, j] += drop.amp.get(0)
 
 
@@ -173,11 +175,11 @@ def update_height_template(h_out: ti.template(), h_in: ti.template(), u: ti.temp
         # face velocities: u[i]=west face, u[i+1]=east face (0 at the wall).
         uw = u[i, j]
         ue = 0.0
-        if i < N - 1:
+        if i < N.get(0) - 1:
             ue = u[i + 1, j]
         vs = v[i, j]
         vn = 0.0
-        if j < N - 1:
+        if j < N.get(0) - 1:
             vn = v[i, j + 1]
 
         ip = ops.clamp(i + 1)

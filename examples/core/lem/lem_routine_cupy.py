@@ -11,10 +11,13 @@ What the file is here to show is how the pieces fit together when a model
 needs all of them at once. The other examples each isolate one thing; this
 one carries the lot:
 
-  Parameter modes   N and DT are solo consts, arriving as #defines and read
-                    bare. DX is a non-solo const, read as $grid.dx.get(0)$.
-                    D and SEA_LEVEL are scalars the host retunes between
-                    frames. UPLIFT is a field, one rate per node.
+  Parameter modes   N and DT are const Parameters bound flat, arriving as
+                    #defines and read bare in the source. DX is a const bound
+                    through a Bag, read as $grid.dx.get(0)$ - a const reached
+                    through a span, rather than a top-level #define, always
+                    goes through .get(0). D and SEA_LEVEL are scalars the
+                    host retunes between frames. UPLIFT is a field, one rate
+                    per node.
   Helpers           clampi binds a const; laplacian binds a bag and calls
                     clampi, so a helper reaches another helper; uplift_at
                     binds the UPLIFT *field* directly, which is what lets the
@@ -82,14 +85,15 @@ pool = CupyPool()
 # ---------------------------------------------------------------------------
 # parameters - one of every mode
 # ---------------------------------------------------------------------------
-# solo consts: emitted as #defines and read bare in the source
-n_p = CupyParameter("N", dtype=np.int32, mode="const", value=GRID_N, pool=pool, solo=True)
-dt_p = CupyParameter("DT", dtype=np.float32, mode="const", value=DT_VAL, pool=pool, solo=True)
-seed_a_p = CupyParameter("SEED_A", dtype=np.float32, mode="const", value=12.9898, pool=pool, solo=True)
-seed_b_p = CupyParameter("SEED_B", dtype=np.float32, mode="const", value=78.233, pool=pool, solo=True)
+# const Parameters, bound flat at top level: emitted as #defines and read
+# bare in the source.
+n_p = CupyParameter("N", dtype=np.int32, mode="const", value=GRID_N, pool=pool)
+dt_p = CupyParameter("DT", dtype=np.float32, mode="const", value=DT_VAL, pool=pool)
+seed_a_p = CupyParameter("SEED_A", dtype=np.float32, mode="const", value=12.9898, pool=pool)
+seed_b_p = CupyParameter("SEED_B", dtype=np.float32, mode="const", value=78.233, pool=pool)
 
-# non-solo const: still fixed at compile time, but read through a span like
-# any other mode, so a template can be written without knowing it is const
+# fixed at compile time like the ones above, but reached through a span
+# (bound inside a Bag) rather than as a top-level #define
 dx_p = CupyParameter("DX", dtype=np.float32, mode="const", value=DX_M, pool=pool)
 
 # scalars: one cell each, retuned from the host between routine calls
@@ -107,8 +111,9 @@ uplift_p.set((UPLIFT_MAX * _ridge).ravel())
 # ---------------------------------------------------------------------------
 # bags
 # ---------------------------------------------------------------------------
-# nested: grid.n is a solo const read bare, grid.dx a non-solo const reached
-# through a span - members resolve on their own type, not the bag's
+# nested: both grid.n and grid.dx are const Parameters, reached through a
+# span (.get(0)) rather than a top-level #define - members resolve on their
+# own type, not the bag's
 grid = Bag({"n": n_p, "dx": dx_p})
 
 # flat, for bind_bag: the kernel that uses these reads them as bare names
@@ -131,7 +136,7 @@ laplacian_fn = (
     .ingest(
         r"""
 __device__ float laplacian(const float* f, int i, int j) {
-    // calls another helper, and reads a non-solo const out of a bound bag
+    // calls another helper, and reads a const Parameter out of a bound bag
     int ip = $clampi(i + 1)$;
     int im = $clampi(i - 1)$;
     int jp = $clampi(j + 1)$;
@@ -185,8 +190,8 @@ extern "C" __global__ void init_topo(float* z) {
 # routine kernels
 # ---------------------------------------------------------------------------
 
-# mixed bag: a scalar Parameter, a helper and a solo const under one name.
-# hill.d is a span read, hill.lap a spliced call, hill.dt a bare literal.
+# mixed bag: a scalar Parameter, a helper and a const Parameter under one
+# name. hill.d, hill.dt are span reads (.get(0)), hill.lap a spliced call.
 hill = Bag({"d": d_p, "lap": laplacian_fn, "dt": dt_p})
 
 diffuse_builder = (
@@ -199,7 +204,7 @@ extern "C" __global__ void diffuse(float* z_out, const float* z_in) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N * N) return;
     int i = idx / N, j = idx % N;
-    z_out[idx] = z_in[idx] + $hill.dt$ * $hill.d.get(0)$ * $hill.lap(z_in, i, j)$;
+    z_out[idx] = z_in[idx] + $hill.dt.get(0)$ * $hill.d.get(0)$ * $hill.lap(z_in, i, j)$;
 }
 """
     )
@@ -214,9 +219,10 @@ uplift_builder = (
     .ingest(
         r"""
 extern "C" __global__ void uplift_bc(float* z) {
-    // grid.n is a solo const reached through the bag, so it splices in as a
-    // bare literal here just as it would read bare if bound flat
-    int n = $grid.n$;
+    // grid.n is a const Parameter reached through the bag, so it splices in
+    // as a device accessor - .get(0) bakes to a literal just as a top-level
+    // #define would
+    int n = $grid.n.get(0)$;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n * n) return;
     int j = idx % n;

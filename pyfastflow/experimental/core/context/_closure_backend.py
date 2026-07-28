@@ -29,6 +29,7 @@ from typing import Any, ClassVar
 import numpy as np
 
 from .base import (
+    MODES,
     Bag,
     HelperBuilder,
     Kernel,
@@ -36,7 +37,6 @@ from .base import (
     Parameter,
     _SpecializedHelper,
     _SpecializeCtx,
-    attach_meta,
     capture_template_meta,
     filter_bindings,
     resolve_binding,
@@ -107,30 +107,24 @@ class ClosureBackendParameter(Parameter):
     Author: B.G (07/2026)
     """
 
-    SUPPORTED_MODES = frozenset({"const", "scalar", "field"})
     _backend: ClassVar[Any]
 
-    def __init__(self, name: str, *, dtype, mode: str, value, pool, n_flat: int | None = None, solo: bool = False):
+    def __init__(self, name: str, *, dtype, mode: str, value, pool, n_flat: int | None = None):
         """
         Declare one parameter and give it its initial value.
 
-        scalar and field take pooled storage straight away; const stays a plain
-        python value. solo=True, available on const only, lets the parameter be
-        read bare in a template body - written `p` rather than `p.get(i)` -
-        because it resolves to a compile-time literal.
+        scalar and field take pooled storage straight away; const stays a
+        plain python value.
 
         Author: B.G (07/2026)
         """
-        if mode not in self.SUPPORTED_MODES:
-            raise ValueError(f"{name}: mode must be one of {sorted(self.SUPPORTED_MODES)}, got {mode!r}")
-        if solo and mode != "const":
-            raise ValueError(f"{name}: solo access is const-only, got mode {mode!r}")
+        if mode not in MODES:
+            raise ValueError(f"{name}: mode must be one of {sorted(MODES)}, got {mode!r}")
 
         super().__init__()
         self.name = name
         self.dtype = dtype
         self.mode = mode
-        self.solo = solo
         self._pool = pool
         self._const_value: Any = None
         self._handle = None
@@ -365,9 +359,7 @@ class ClosureHelperBuilder(HelperBuilder):
         Author: B.G (07/2026)
         """
         specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings), ctx)
-        fn = ClosureHelper(specialised.__name__, self._backend.func(specialised))
-        attach_meta(fn, self._template, self._bindings)
-        return fn
+        return ClosureHelper(specialised.__name__, self._backend.func(specialised))
 
 
 class ClosureKernelBuilder(KernelBuilder):
@@ -391,9 +383,7 @@ class ClosureKernelBuilder(KernelBuilder):
         """
         ctx = _SpecializeCtx()
         specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings), ctx)
-        krn = ClosureKernel(specialised.__name__, self._backend.kernel(specialised))
-        attach_meta(krn, self._template, self._bindings)
-        return krn
+        return ClosureKernel(specialised.__name__, self._backend.kernel(specialised))
 
 
 class _RenameNames(ast.NodeTransformer):
@@ -607,7 +597,6 @@ class ClosureRoutineBuilder(RoutineBuilder):
         assigned_by: dict[str, str] = {}
         module_globals: dict[str, Any] = {}
         resolved_globals: dict[str, Any] = {}
-        raw_bindings: dict[str, Any] = {}
 
         for step_index, step in enumerate(group):
             kernel_builder = step.kernel_builder
@@ -648,7 +637,6 @@ class ClosureRoutineBuilder(RoutineBuilder):
             body_stmts.extend(renamed_body)
 
             filtered = filter_bindings(template, kernel_builder.bindings)
-            raw_bindings.update(filtered)
             module_globals.update(dict(getattr(template, "__globals__", {})))
             resolved_globals.update({name: resolve_binding(value, ctx) for name, value in filtered.items()})
 
@@ -714,5 +702,4 @@ class ClosureRoutineBuilder(RoutineBuilder):
         fused_fn = exec_globals[func_name]
 
         krn = ClosureKernel(func_name, backend.kernel(fused_fn))
-        attach_meta(krn, fused_fn, raw_bindings)
         return krn, data_names

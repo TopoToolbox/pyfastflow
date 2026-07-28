@@ -69,22 +69,22 @@ DT_VAL = CFL_SAFETY * DX_M**2 / (4.0 * ALPHA_AIR_VAL)
 
 pool = TaichiPool()
 
-n_p = TaichiParameter("N", dtype=ti.i32, mode="const", value=GRID_N, pool=pool, solo=True)
-room_p = TaichiParameter("ROOM", dtype=ti.i32, mode="const", value=GRID_N // 4, pool=pool, solo=True)
-wall_thick_p = TaichiParameter("WALL_THICK", dtype=ti.i32, mode="const", value=8, pool=pool, solo=True)
-door_p = TaichiParameter("DOOR", dtype=ti.i32, mode="const", value=6, pool=pool, solo=True)
-seed_p = TaichiParameter("SEED", dtype=ti.f32, mode="const", value=17.0, pool=pool, solo=True)
+n_p = TaichiParameter("N", dtype=ti.i32, mode="const", value=GRID_N, pool=pool)
+room_p = TaichiParameter("ROOM", dtype=ti.i32, mode="const", value=GRID_N // 4, pool=pool)
+wall_thick_p = TaichiParameter("WALL_THICK", dtype=ti.i32, mode="const", value=8, pool=pool)
+door_p = TaichiParameter("DOOR", dtype=ti.i32, mode="const", value=6, pool=pool)
+seed_p = TaichiParameter("SEED", dtype=ti.f32, mode="const", value=17.0, pool=pool)
 
-dt_p = TaichiParameter("DT", dtype=ti.f32, mode="const", value=DT_VAL, pool=pool, solo=True)
-dx2_p = TaichiParameter("DX2", dtype=ti.f32, mode="const", value=DX_M**2, pool=pool, solo=True)
+dt_p = TaichiParameter("DT", dtype=ti.f32, mode="const", value=DT_VAL, pool=pool)
+dx2_p = TaichiParameter("DX2", dtype=ti.f32, mode="const", value=DX_M**2, pool=pool)
 
-alpha_air_seed_p = TaichiParameter("ALPHA_AIR_SEED", dtype=ti.f32, mode="const", value=ALPHA_AIR_VAL, pool=pool, solo=True)
-alpha_wall_seed_p = TaichiParameter("ALPHA_WALL_SEED", dtype=ti.f32, mode="const", value=ALPHA_WALL_VAL, pool=pool, solo=True)
-t_bg_p = TaichiParameter("T_BG", dtype=ti.f32, mode="const", value=15.0, pool=pool, solo=True)
+alpha_air_seed_p = TaichiParameter("ALPHA_AIR_SEED", dtype=ti.f32, mode="const", value=ALPHA_AIR_VAL, pool=pool)
+alpha_wall_seed_p = TaichiParameter("ALPHA_WALL_SEED", dtype=ti.f32, mode="const", value=ALPHA_WALL_VAL, pool=pool)
+t_bg_p = TaichiParameter("T_BG", dtype=ti.f32, mode="const", value=15.0, pool=pool)
 
-src_i_p = TaichiParameter("SRC_I", dtype=ti.i32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool, solo=True)
-src_j_p = TaichiParameter("SRC_J", dtype=ti.i32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool, solo=True)
-src_r_p = TaichiParameter("SRC_R", dtype=ti.i32, mode="const", value=10, pool=pool, solo=True)
+src_i_p = TaichiParameter("SRC_I", dtype=ti.i32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool)
+src_j_p = TaichiParameter("SRC_J", dtype=ti.i32, mode="const", value=GRID_N // 4 + GRID_N // 8, pool=pool)
+src_r_p = TaichiParameter("SRC_R", dtype=ti.i32, mode="const", value=10, pool=pool)
 
 OG_stove = 70
 stove_p = TaichiParameter("STOVE_T", dtype=ti.f32, mode="scalar", value=OG_stove, pool=pool)
@@ -98,7 +98,7 @@ alpha_p = TaichiParameter("ALPHA", dtype=ti.f32, mode="field", value=np.zeros(GR
 
 
 def clamp(i):
-    return min(max(i, 0), N - 1)
+    return min(max(i, 0), N.get(0) - 1)
 
 
 clamp_fn = TaichiHelperBuilder().bind("N", n_p).ingest(clamp)
@@ -117,7 +117,7 @@ laplacian_fn = TaichiHelperBuilder().bind("clamp", clamp_fn).ingest(laplacian)
 
 def whash(a, b):
     """Deterministic pseudo-random value in [0, 1) for two integer indices."""
-    x = ti.cast(a, ti.f32) * 12.9898 + ti.cast(b, ti.f32) * 78.233 + SEED
+    x = ti.cast(a, ti.f32) * 12.9898 + ti.cast(b, ti.f32) * 78.233 + SEED.get(0)
     s = ti.sin(x) * 43758.5453
     return s - ti.floor(s)
 
@@ -131,25 +131,25 @@ whash_fn = TaichiHelperBuilder().bind("SEED", seed_p).ingest(whash)
 
 
 def generate_walls_template():
-    for i, j in ti.ndrange(N, N):
+    for i, j in ti.ndrange(N.get(0), N.get(0)):
         is_wall = 0
-        if i < WALL_THICK or i >= N - WALL_THICK or j < WALL_THICK or j >= N - WALL_THICK:
+        if i < WALL_THICK.get(0) or i >= N.get(0) - WALL_THICK.get(0) or j < WALL_THICK.get(0) or j >= N.get(0) - WALL_THICK.get(0):
             is_wall = 1
-        elif i % ROOM < WALL_THICK:
-            vline = i // ROOM
-            seg = j // ROOM
-            door = ti.cast(whash(vline, seg) * ROOM, ti.i32)
-            gap = (j % ROOM) >= door and (j % ROOM) < door + DOOR
+        elif i % ROOM.get(0) < WALL_THICK.get(0):
+            vline = i // ROOM.get(0)
+            seg = j // ROOM.get(0)
+            door = ti.cast(whash(vline, seg) * ROOM.get(0), ti.i32)
+            gap = (j % ROOM.get(0)) >= door and (j % ROOM.get(0)) < door + DOOR.get(0)
             if not gap:
                 is_wall = 1
-        elif j % ROOM < WALL_THICK:
-            hline = j // ROOM
-            seg = i // ROOM
-            door = ti.cast(whash(hline + 7919, seg) * ROOM, ti.i32)
-            gap = (i % ROOM) >= door and (i % ROOM) < door + DOOR
+        elif j % ROOM.get(0) < WALL_THICK.get(0):
+            hline = j // ROOM.get(0)
+            seg = i // ROOM.get(0)
+            door = ti.cast(whash(hline + 7919, seg) * ROOM.get(0), ti.i32)
+            gap = (i % ROOM.get(0)) >= door and (i % ROOM.get(0)) < door + DOOR.get(0)
             if not gap:
                 is_wall = 1
-        wall.set_node(i * N + j, is_wall)
+        wall.set_node(i * N.get(0) + j, is_wall)
 
 
 generate_walls_kernel = (
@@ -166,12 +166,12 @@ generate_walls_kernel = (
 
 
 def set_alpha_template():
-    for i, j in ti.ndrange(N, N):
-        idx = i * N + j
+    for i, j in ti.ndrange(N.get(0), N.get(0)):
+        idx = i * N.get(0) + j
         if wall.get(idx) == 1:
-            alpha.set_node(idx, ALPHA_WALL_SEED)
+            alpha.set_node(idx, ALPHA_WALL_SEED.get(0))
         else:
-            alpha.set_node(idx, ALPHA_AIR_SEED)
+            alpha.set_node(idx, ALPHA_AIR_SEED.get(0))
 
 
 alpha_seeds = Bag({"ALPHA_WALL_SEED": alpha_wall_seed_p, "ALPHA_AIR_SEED": alpha_air_seed_p})
@@ -189,7 +189,7 @@ set_alpha_kernel = (
 
 def init_temperature_template(T: ti.template()):
     for i, j in T:
-        T[i, j] = T_BG
+        T[i, j] = T_BG.get(0)
 
 
 init_temperature_kernel = TaichiKernelBuilder().bind("T_BG", t_bg_p).ingest(init_temperature_template).compile()
@@ -205,9 +205,9 @@ stove = Bag(
 
 def apply_source_template(T: ti.template()):
     for i, j in T:
-        dx = i - stove.at.i
-        dy = j - stove.at.j
-        if dx * dx + dy * dy <= stove.r * stove.r:
+        dx = i - stove.at.i.get(0)
+        dy = j - stove.at.j.get(0)
+        if dx * dx + dy * dy <= stove.r.get(0) * stove.r.get(0):
             T[i, j] = stove.temp.get(0)
 
 
@@ -222,10 +222,10 @@ heat = Bag({"alpha": alpha_p, "lap": laplacian_fn, "dt": dt_p, "dx2": dx2_p})
 
 def diffuse_template(T_out: ti.template(), T_in: ti.template()):
     for i, j in T_in:
-        idx = i * N + j
+        idx = i * N.get(0) + j
         a = heat.alpha.get(idx)
-        lap = heat.lap(T_in, i, j) / heat.dx2
-        T_out[i, j] = T_in[i, j] + heat.dt * a * lap
+        lap = heat.lap(T_in, i, j) / heat.dx2.get(0)
+        T_out[i, j] = T_in[i, j] + heat.dt.get(0) * a * lap
 
 
 diffuse_builder = TaichiKernelBuilder().bind("N", n_p).bind("heat", heat).ingest(diffuse_template)

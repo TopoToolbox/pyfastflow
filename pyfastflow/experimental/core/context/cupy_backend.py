@@ -72,7 +72,7 @@ from typing import Any
 import cupy as cp
 import numpy as np
 
-from .base import HelperBuilder, Kernel, KernelBuilder, Parameter, _SpecializedHelper, _SpecializeCtx, attach_meta
+from .base import MODES, HelperBuilder, Kernel, KernelBuilder, Parameter, _SpecializedHelper, _SpecializeCtx
 from .base import Bag
 from .routine import Routine, RoutineBuilder, _CompiledStep
 
@@ -420,27 +420,21 @@ class CupyParameter(Parameter):
     Author: B.G (07/2026)
     """
 
-    SUPPORTED_MODES = frozenset({"const", "scalar", "field"})
-
-    def __init__(self, name: str, *, dtype, mode: str, value, pool, n_flat: int | None = None, solo: bool = False):
+    def __init__(self, name: str, *, dtype, mode: str, value, pool, n_flat: int | None = None):
         """
         Declare and initialize one parameter. "scalar"/"field" modes allocate
         pooled storage immediately via `pool`; "const" stays a plain python
-        value. solo=True (const only) lets the parameter be read bare in a
-        template body - it becomes a #define rather than a span expansion.
+        value, read bare in a template body as a #define.
 
         Author: B.G (07/2026)
         """
-        if mode not in self.SUPPORTED_MODES:
-            raise ValueError(f"{name}: mode must be one of {sorted(self.SUPPORTED_MODES)}, got {mode!r}")
-        if solo and mode != "const":
-            raise ValueError(f"{name}: solo access is const-only, got mode {mode!r}")
+        if mode not in MODES:
+            raise ValueError(f"{name}: mode must be one of {sorted(MODES)}, got {mode!r}")
 
         super().__init__()
         self.name = name
         self.dtype = dtype
         self.mode = mode
-        self.solo = solo
         self._pool = pool
         self._const_value: Any = None
         self._handle = None
@@ -518,8 +512,6 @@ class CupyHelper(_SpecializedHelper):
     def __init__(self, name: str, source: str):
         super().__init__()
         self.name = name
-        # note: distinct from Specializable._source (the raw template, set by
-        # attach_meta) - this is the spliced __device__ source `.compiled` serves.
         self._compiled_source = source
 
     @property
@@ -643,9 +635,7 @@ class CupyHelperBuilder(HelperBuilder):
         if device_srcs is None:
             device_srcs = ctx.cupy_device_srcs = {}
         device_srcs.setdefault(name, source)
-        fn = CupyHelper(name, source)
-        attach_meta(fn, template, self._bindings)
-        return fn
+        return CupyHelper(name, source)
 
 
 class CupyKernelBuilder(KernelBuilder):
@@ -721,7 +711,6 @@ class CupyKernelBuilder(KernelBuilder):
         raw = module.get_function(name)
         krn = CupyKernel(name, raw, module)
         krn._final_source = source
-        attach_meta(krn, template, self._bindings)
         return krn
 
 

@@ -22,8 +22,10 @@ single compiled cupy module even if both are bound into the same kernel.
 Author: B.G (07/2026)
 """
 
+import functools
 import math
 
+from ..core.context.backends import make_helper
 from ..core.pool.base import new_uid
 
 
@@ -60,11 +62,7 @@ def build_helpers(
     d8 = topology == "D8"
     sqrt2 = math.sqrt(2.0)
 
-    def mk(template, **binds):
-        b = HelperCls().ingest(template)
-        for name, obj in binds.items():
-            b.bind(name, obj)
-        return b
+    mk = functools.partial(make_helper, HelperCls)
 
     row = mk(
         f"__device__ int {t}_row(int i) {{ return i / $NX.get(0)$; }}",
