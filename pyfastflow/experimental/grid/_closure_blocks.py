@@ -20,7 +20,7 @@ specialized once per compile and shared at both call sites (see compile.py,
 _SpecializeCtx).
 
 nx/ny/dx are read exclusively through `.get(...)`, uniformly across whatever
-mode they end up in (const, scalar, field) - see base.py, "Reading a
+mode they end up in (const, scalar, field) - see parameter.py, "Reading a
 Parameter in device code is uniform across modes." This is what lets any of
 them be overridden to a runtime-modifiable mode without touching a single
 block template.

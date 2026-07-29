@@ -28,7 +28,6 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from .base import MODES, Parameter
 from .compile import (
     HelperBuilder,
     Kernel,
@@ -39,6 +38,7 @@ from .compile import (
     filter_bindings,
     resolve_binding,
 )
+from .parameter import MODES, Parameter
 from .routine import Routine, RoutineBuilder, _CompiledStep, _template_label
 
 
@@ -212,7 +212,7 @@ class ClosureBackendParameter(Parameter):
         set() on a const mode, which changes the literal baked into the getter,
         and destroy(), which releases the storage it reads. Both drop the view
         so the next caller rebuilds; neither reaches kernels compiled earlier
-        (see base.py, "Lifetime of a compiled object"). A scalar or field set()
+        (see parameter.py, "Lifetime of a compiled object"). A scalar or field set()
         needs no invalidation, writing through the very storage the view reads.
 
         Author: B.G (07/2026)

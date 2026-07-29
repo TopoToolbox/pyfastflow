@@ -334,7 +334,7 @@ except KeyboardInterrupt:
 # destroy() hands a Parameter's storage back to the pool; it is a no-op on a
 # const, which owns none. Safe only because nothing will launch again - the
 # pool may reissue these buffers, while the compiled kernels above still point
-# at them (see base.py, "Lifetime of a compiled object").
+# at them (see parameter.py, "Lifetime of a compiled object").
 for param in (stove_p, wall_p, alpha_p):
     param.destroy()
 pool.release_data(T0)

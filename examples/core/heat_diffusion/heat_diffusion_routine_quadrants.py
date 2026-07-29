@@ -213,7 +213,7 @@ def apply_source_template(T: qd.Tensor):
 
 # Kept as a builder, not just a compiled Kernel: compile() below seeds T0
 # once, standalone, and the very same builder is later handed to the
-# routine's add_kernel() - compile() does not consume it (see base.py).
+# routine's add_kernel() - compile() does not consume it (see compile.py).
 apply_source_builder = QuadrantsKernelBuilder().bind("stove", stove).ingest(apply_source_template)
 apply_source_kernel = apply_source_builder.compile()
 

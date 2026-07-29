@@ -226,7 +226,7 @@ stove = Bag(
 
 # Kept as a builder, not just a compiled Kernel: compile() below seeds T0
 # once, standalone, and the very same builder is later handed to the
-# routine's add_kernel() - compile() does not consume it (see base.py).
+# routine's add_kernel() - compile() does not consume it (see compile.py).
 apply_source_builder = (
     CupyKernelBuilder()
     .bind("N", n_p)

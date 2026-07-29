@@ -7,7 +7,7 @@ ti.kernel; _closure_backend.py holds that machinery, shared with Quadrants.
 Everything below just names Taichi as the backend to use.
 
 Kernel templates declare their data arguments the usual Taichi way, typically
-ti.template(). Bound Parameters and helpers are not arguments - see base.py.
+ti.template(). Bound Parameters and helpers are not arguments - see parameter.py.
 
 Author: B.G (07/2026)
 """

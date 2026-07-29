@@ -72,7 +72,7 @@ swaps must balance either way.
 Contract: no set()/destroy() mid-routine
 ------------------------------------------
 A compiled Routine holds the same kind of frozen snapshot a Kernel does (see
-base.py, "Lifetime of a compiled object"): scalar/field Parameters are baked
+parameter.py, "Lifetime of a compiled object"): scalar/field Parameters are baked
 in by their storage, const Parameters by their literal value. Calling set() or
 destroy() on any Parameter the routine's bag reaches, between two calls to the
 routine (or between two of its steps, if that were possible), is undefined:
@@ -190,7 +190,7 @@ class Routine:
     """
     A compiled, ordered sequence of kernels sharing one bag, ready to launch.
 
-    Inert, like every other compiled object in this package (see base.py,
+    Inert, like every other compiled object in this package (see compile.py,
     Specializable): it retains the steps it was built from and nothing reads
     back from it to drive a later compile. Go through the RoutineBuilder that
     produced it to change anything and compile again.

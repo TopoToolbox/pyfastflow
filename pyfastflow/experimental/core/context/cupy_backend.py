@@ -72,9 +72,9 @@ from typing import Any
 import cupy as cp
 import numpy as np
 
-from .base import MODES, Parameter
-from .compile import HelperBuilder, Kernel, KernelBuilder, _SpecializedHelper, _SpecializeCtx
 from .bag import Bag
+from .compile import HelperBuilder, Kernel, KernelBuilder, _SpecializedHelper, _SpecializeCtx
+from .parameter import MODES, Parameter
 from .routine import Routine, RoutineBuilder, _CompiledStep
 
 _KERNEL_NAME_RE = re.compile(r"__global__\s+void\s+(\w+)\s*\(")

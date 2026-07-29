@@ -1,9 +1,9 @@
 """
 make_grid: the GridContext-equivalent Bag factory, built on the
-backend-agnostic core (see ..core.context: base.py for Parameter, compile.py for HelperBuilder, bag.py for Bag).
+backend-agnostic core (see ..core.context: parameter.py for Parameter, compile.py for HelperBuilder, bag.py for Bag).
 
 There is no stateful Context class here - by design, the core has none (see
-core/context/base.py's module docstring). make_grid just builds a Bag once: a
+core/context/parameter.py's module docstring). make_grid just builds a Bag once: a
 uniform public surface (grid.nx, grid.neighbour(i, k), ...) whatever the
 backend and whatever the grid's own topology/boundary/nodata/outlet config.
 

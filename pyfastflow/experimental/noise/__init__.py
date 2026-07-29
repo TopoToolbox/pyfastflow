@@ -1,6 +1,6 @@
 """
 make_noise: the NoiseContext-equivalent Bag factory, built on the
-backend-agnostic core (see ..core.context: base.py for Parameter, compile.py for HelperBuilder, bag.py for Bag)
+backend-agnostic core (see ..core.context: parameter.py for Parameter, compile.py for HelperBuilder, bag.py for Bag)
 and on a grid Bag from ..grid.
 
 Like make_grid there is no stateful context class - make_noise builds a Bag

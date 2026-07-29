@@ -11,10 +11,10 @@ Bag.
 Everything here is one interlocking piece - _SpecializeCtx specializes a
 HelperBuilder, which resolves its own bindings back through resolve_binding,
 which may reach another HelperBuilder through a _LazyBagView. It reads
-Parameter (base.py) and Bag (bag.py) but neither reads it back.
+Parameter (parameter.py) and Bag (bag.py) but neither reads it back.
 
 Only the abstract builders live here; the concrete Taichi*, Quadrants* and
-Cupy* ones sit alongside in their own modules. See base.py's module docstring
+Cupy* ones sit alongside in their own modules. See parameter.py's module docstring
 for what the whole scheme is for.
 
 Author: B.G (07/2026)
@@ -27,9 +27,9 @@ from abc import ABC, abstractmethod
 from functools import lru_cache
 from typing import Any
 
-from .bag import Bag
-from .base import Parameter
 from ..pool.base import new_uid
+from .bag import Bag, from_builder
+from .parameter import Parameter
 
 
 class Specializable(ABC):
