@@ -447,7 +447,7 @@ class CupyParameter(Parameter):
                 raise ValueError(f"{name}: field mode requires n_flat")
             self._handle = pool.get_data(dtype, (n_flat,))
 
-        self.set(value)
+        self._store(value)
 
     def get(self):
         """
@@ -459,8 +459,23 @@ class CupyParameter(Parameter):
 
     def set(self, value) -> None:
         """
-        Overwrite the whole value: a cast python scalar for const, a device
-        write for scalar, a full host->device copy for field.
+        Overwrite the whole value: a device write for scalar, a full
+        host->device copy for field. const is immutable - see Parameter.set.
+
+        Author: B.G (07/2026)
+        """
+        if self.mode == "const":
+            raise ValueError(
+                f"{self.name}: const parameter is immutable; build a new Parameter and "
+                f"replace() it into the bag, then recompile"
+            )
+        self._store(value)
+
+    def _store(self, value) -> None:
+        """
+        Write `value` according to the mode, with no immutability check - the
+        one path that may set a const, used by __init__ to place its initial
+        value.
 
         Author: B.G (07/2026)
         """

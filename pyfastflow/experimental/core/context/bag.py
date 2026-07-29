@@ -87,6 +87,34 @@ class Bag:
     def items(self):
         return self._items.items()
 
+    def __repr__(self) -> str:
+        """
+        Every member on its own line at its dotted path, nested Bags shown as
+        the subtree they head rather than as an opaque entry.
+
+        Bags are routinely built by merging several others, at which point the
+        only reliable way to see what one holds is to read it out; this is
+        that. Each leaf is labelled by what it is - a Parameter by mode and
+        dtype, anything else by its class - and by its uid, which is what
+        makes an alias visible: one object reached under two names shows the
+        same uid twice.
+
+        Author: B.G (07/2026)
+        """
+        lines = [f"Bag(uid={self._uid})"]
+        for handle, obj in self.walk():
+            if isinstance(obj, Bag):
+                lines.append(f"  {handle}/")
+                continue
+            mode = getattr(obj, "mode", None)
+            if mode is not None:
+                what = f"{mode} {getattr(obj, 'dtype', '?')}"
+            else:
+                what = type(obj).__name__
+            uid = _uid_of(obj)
+            lines.append(f"  {handle}: {what}" + (f" [uid {uid}]" if uid is not None else ""))
+        return "\n".join(lines)
+
     def walk(self, prefix: str = ""):
         """
         Yield (dotted_handle, obj) for every member, descending into nested
@@ -291,10 +319,12 @@ def replace(bag: "Bag", name: str, obj: Any) -> "Bag":
     """
     `bag` with the member at `name` swapped for `obj`, as a new Bag.
 
-    `name` may be a dotted path into nested Bags. This is how a Parameter's
-    mode is changed: mode is fixed at construction (see Parameter.mode), so
-    changing it means building a new Parameter and using replace() to swap it
-    into the bag in place of the old one.
+    `name` may be a dotted path into nested Bags.
+
+    This is how anything fixed at a Parameter's construction is changed - its
+    mode (see Parameter.mode), or a const's value (see Parameter.set). Both
+    mean building a new Parameter, replacing it in here, and recompiling
+    whatever bound the old one.
 
     Author: B.G (07/2026)
     """

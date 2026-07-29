@@ -135,7 +135,7 @@ class ClosureBackendParameter(Parameter):
                 raise ValueError(f"{name}: field mode requires n_flat")
             self._handle = pool.get_data(dtype, (n_flat,))
 
-        self.set(value)
+        self._store(value)
 
     @classmethod
     def _numpy_dtype(cls, dtype):
@@ -164,14 +164,28 @@ class ClosureBackendParameter(Parameter):
 
     def set(self, value) -> None:
         """
-        Overwrite the whole value: a cast python scalar for const, a device
-        write for scalar, a full host->device copy for field.
+        Overwrite the whole value: a device write for scalar, a full
+        host->device copy for field. const is immutable - see Parameter.set.
+
+        Author: B.G (07/2026)
+        """
+        if self.mode == "const":
+            raise ValueError(
+                f"{self.name}: const parameter is immutable; build a new Parameter and "
+                f"replace() it into the bag, then recompile"
+            )
+        self._store(value)
+
+    def _store(self, value) -> None:
+        """
+        Write `value` according to the mode, with no immutability check - the
+        one path that may set a const, used by __init__ to place its initial
+        value.
 
         Author: B.G (07/2026)
         """
         if self.mode == "const":
             self._const_value = self._numpy_dtype(self.dtype)(value).item()
-            self._device_view = None  # a cached view would bake the stale literal
         elif self.mode == "scalar":
             self._handle.data[None] = value
         else:  # field
@@ -208,12 +222,12 @@ class ClosureBackendParameter(Parameter):
         This parameter's device accessor, built on first use and kept.
 
         The compiled funcs come out identical every time, so one view serves
-        every kernel that binds this parameter. Two things can invalidate it -
-        set() on a const mode, which changes the literal baked into the getter,
-        and destroy(), which releases the storage it reads. Both drop the view
-        so the next caller rebuilds; neither reaches kernels compiled earlier
-        (see parameter.py, "Lifetime of a compiled object"). A scalar or field set()
-        needs no invalidation, writing through the very storage the view reads.
+        every kernel that binds this parameter, for the parameter's whole
+        life. A const's literal is fixed at construction, and a scalar or
+        field set() writes through the very storage the view already reads, so
+        neither can stale it. Only destroy() drops the view, having released
+        that storage - and that does not reach kernels compiled earlier, which
+        still hold it (see parameter.py, "Lifetime of a compiled object").
 
         Author: B.G (07/2026)
         """

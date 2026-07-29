@@ -24,9 +24,9 @@ never changes.
 Jargon
 ----------
 Parameter       One named, typed value. Its `mode` says where the value lives:
-                "const" (a compile-time constant, not modifiable mid-run),
-                "scalar" (a single value, modifiable) or "field" (a device
-                array, one value per node).
+                "const" (baked into the generated code, fixed at
+                construction), "scalar" (a single device cell, writable) or
+                "field" (a device array, one value per node, writable).
 HelperBuilder   The recipe for a device-side helper: a small routine callable
                 only from other device code (ti.func, qd.func, CUDA
                 __device__). Bind it into a kernel - flat or inside a Bag -
@@ -108,18 +108,25 @@ See cupy_backend.py's module docstring for the block's exact shape.
 Lifetime of a compiled object
 -----------------------------
 compile() freezes what it was given: const Parameters are baked in as literals,
-scalar and field Parameters as the storage behind their DataHandle. So:
+scalar and field Parameters as the storage behind their DataHandle. What may
+change afterwards follows from that, and splits cleanly along the mode:
 
-  - Writing to a scalar or field Parameter *is* visible to already-compiled
-    kernels, which hold that same storage. This is the normal way to feed
-    changing data.
-  - set() on a const Parameter is not. It drops the parameter's cached device
-    view so the next compile() picks the new value up, but kernels compiled
-    before it keep the old literal. Recompile them.
+  - Writing to a scalar or field Parameter - set(), set_node(), or a device
+    write from inside a kernel - *is* visible to every kernel that binds it,
+    including ones compiled beforehand, since they all hold that same storage.
+    This is the normal way to feed changing data, and it needs no recompile.
+  - A const Parameter is immutable: its value is fixed at construction and
+    set() raises. To change one, build a new Parameter, replace() it into the
+    bag, and recompile whatever bound the old one.
   - destroy() returns storage to the pool, which may hand the same buffer out
-    again. Never destroy a Parameter that a live kernel still binds.
+    again. Never destroy a Parameter that a live kernel still binds. This one
+    is not enforced at runtime.
 
-None of this is enforced at runtime.
+So a Parameter's build-time identity - name, dtype, mode, const value - is
+fixed at construction, and only its device storage is writable. Which is also
+the line to design along: if a quantity changes per step, it is scalar or
+field and you simply write it; if changing it demands a recompile, const says
+so rather than silently missing the kernels already built.
 
 Where things live
 -----------------
@@ -221,9 +228,14 @@ class Parameter(ABC):
     @abstractmethod
     def set(self, value) -> None:
         """
-        Update the whole parameter value in place, according to its mode. On
-        const mode this does not reach already-compiled kernels - see the
-        module docstring, "Lifetime of a compiled object".
+        Update the whole parameter value in place, according to its mode: one
+        device cell for scalar, a full host->device copy for field. The write
+        lands in storage every kernel binding this parameter already reads, so
+        no recompile is needed.
+
+        const mode raises: its value is fixed at construction. Build a new
+        Parameter, replace() it into the bag and recompile - see the module
+        docstring, "Lifetime of a compiled object".
 
         Author: B.G (07/2026)
         """
