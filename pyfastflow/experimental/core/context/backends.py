@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from .base import HelperBuilder
+from .compile import HelperBuilder
 
 
 def backend_classes(backend: str):

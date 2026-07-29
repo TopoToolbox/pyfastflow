@@ -16,7 +16,7 @@ on GPU, hence the explicit if/elif chain instead.
 Every public helper below is a HelperBuilder that binds the private blocks it
 needs BY NAME - helper binds helper - so a block reached from two composites
 (e.g. _row reached from both neighbour_raw and dist_between_nodes) is
-specialized once per compile and shared at both call sites (see base.py,
+specialized once per compile and shared at both call sites (see compile.py,
 _SpecializeCtx).
 
 nx/ny/dx are read exclusively through `.get(...)`, uniformly across whatever

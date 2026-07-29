@@ -28,13 +28,11 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from .base import (
-    MODES,
-    Bag,
+from .base import MODES, Parameter
+from .compile import (
     HelperBuilder,
     Kernel,
     KernelBuilder,
-    Parameter,
     _SpecializedHelper,
     _SpecializeCtx,
     capture_template_meta,
@@ -312,7 +310,7 @@ class ClosureKernel(Kernel):
 
     Its call signature is the template's own, which declares data arguments
     only - `def template(out: ti.template()): ...` - since bound objects reach
-    the body through globals instead. See base.py.
+    the body through globals instead. See compile.py.
 
     Author: B.G (07/2026)
     """

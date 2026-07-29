@@ -38,7 +38,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import quadrants as qd
 
-from pyfastflow.experimental.core.context.base import Bag
+from pyfastflow.experimental.core.context.bag import Bag
 from pyfastflow.experimental.core.context.quadrants_backend import (
     QuadrantsHelperBuilder,
     QuadrantsKernelBuilder,

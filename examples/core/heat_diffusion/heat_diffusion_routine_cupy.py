@@ -47,7 +47,7 @@ import cupy as cp
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyfastflow.experimental.core.context.base import Bag, merge
+from pyfastflow.experimental.core.context.bag import Bag, merge
 from pyfastflow.experimental.core.context.cupy_backend import (
     CupyHelperBuilder,
     CupyKernelBuilder,

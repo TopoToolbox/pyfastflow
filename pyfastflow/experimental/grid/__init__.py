@@ -1,6 +1,6 @@
 """
 make_grid: the GridContext-equivalent Bag factory, built on the
-backend-agnostic core (see ..core.context.base for Parameter/HelperBuilder/Bag).
+backend-agnostic core (see ..core.context: base.py for Parameter, compile.py for HelperBuilder, bag.py for Bag).
 
 There is no stateful Context class here - by design, the core has none (see
 core/context/base.py's module docstring). make_grid just builds a Bag once: a
@@ -26,7 +26,7 @@ Author: B.G (07/2026)
 import numpy as np
 
 from ..core.context.backends import backend_classes
-from ..core.context.base import Bag
+from ..core.context.bag import Bag
 
 _TOPOLOGIES = {"D4": 4, "D8": 8}
 _BOUNDARIES = frozenset({"normal", "periodic_EW", "periodic_NS"})

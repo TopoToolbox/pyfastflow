@@ -1,7 +1,7 @@
 """
 cupy implementations of Parameter, Kernel and their builders, plus
 CupyHelperBuilder - the recipe for a device helper, specialized as part of
-whichever kernel binds it (see base.py, HelperBuilder).
+whichever kernel binds it (see compile.py, HelperBuilder).
 
 Here a template is CUDA source text rather than a python function, since
 cp.RawModule compiles source and there is no function whose globals could be
@@ -72,8 +72,9 @@ from typing import Any
 import cupy as cp
 import numpy as np
 
-from .base import MODES, HelperBuilder, Kernel, KernelBuilder, Parameter, _SpecializedHelper, _SpecializeCtx
-from .base import Bag
+from .base import MODES, Parameter
+from .compile import HelperBuilder, Kernel, KernelBuilder, _SpecializedHelper, _SpecializeCtx
+from .bag import Bag
 from .routine import Routine, RoutineBuilder, _CompiledStep
 
 _KERNEL_NAME_RE = re.compile(r"__global__\s+void\s+(\w+)\s*\(")

@@ -17,9 +17,9 @@ A Routine is built from KernelBuilders that are otherwise ordinary - built
 exactly as they would be for a standalone compile, bind()ed against whatever
 Parameters and Helpers the step needs. What is different is that a Routine's
 steps do not each keep their own bindings forever: at compile() time, every
-step is rebound (see base.py, CompileBuilder.rebind) against the one bag the
+step is rebound (see compile.py, CompileBuilder.rebind) against the one bag the
 whole Routine shares, so a Parameter reached under a given name means the same
-object in every step that reaches it. check_handles (base.py) is run across
+object in every step that reaches it. check_handles (bag.py) is run across
 every step's own bindings, as authored, before that rebind happens - so a
 step built against one object under a name another step expects to mean
 something else is caught at compile time, even though rebind would otherwise
@@ -111,7 +111,8 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
-from .base import Bag, CompileBuilder, check_handles
+from .bag import Bag, check_handles
+from .compile import CompileBuilder
 
 _C_FUNC_NAME_RE = re.compile(r"(?:__global__|__device__)\s+[\w:\*&]*\s*(\w+)\s*\(")
 
@@ -385,7 +386,7 @@ class RoutineBuilder(ABC):
         Everything a compile needs checked before any step is actually
         compiled, fused or not.
 
-        In order: check_handles (base.py) runs across every step's own
+        In order: check_handles (bag.py) runs across every step's own
         bindings, as authored - so two steps disagreeing about what one
         handle means is caught here, before rebind would otherwise silently
         make both agree with the routine's bag. Each step is then rebound
