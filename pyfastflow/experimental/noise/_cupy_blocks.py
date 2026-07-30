@@ -28,6 +28,33 @@ from ..core.context.backends import make_helper
 from ..core.pool.base import new_uid
 
 
+def build_hash_u32(HelperCls, backend_mod=None):
+    """
+    The standalone hash_u32(x) HelperBuilder - no bound Parameters, so it
+    can be built without a grid, a pool, or any of make_noise's other
+    config. `backend_mod` is accepted for signature parity with the closure
+    backend's build_hash_u32 and unused here. See _closure_blocks.py's
+    build_hash_u32 for why this exists.
+
+    Author: B.G (07/2026)
+    """
+    t = f"pn{new_uid()}"
+    mk = functools.partial(make_helper, HelperCls)
+    return mk(
+        f"""
+__device__ unsigned int {t}_hash_u32(unsigned int x) {{
+    unsigned int h = x;
+    h ^= h >> 16u;
+    h *= 0x7FEB352Du;
+    h ^= h >> 15u;
+    h *= 0x846CA68Bu;
+    h ^= h >> 16u;
+    return h;
+}}
+"""
+    )
+
+
 def build_helpers(
     HelperCls,
     *,
@@ -63,21 +90,13 @@ def build_helpers(
 
     row = mk(f"__device__ int {t}_row(int i) {{ return i / $GRID.nx.get(0)$; }}", GRID=grid)
     col = mk(f"__device__ int {t}_col(int i) {{ return i % $GRID.nx.get(0)$; }}", GRID=grid)
+    # Built unconditionally (not just for kind="white") - hash_u32 is also a
+    # public bag member, reused by callers outside make_noise (e.g. flow's
+    # rand_unit) that want the same integer hash without pulling in the rest
+    # of the white-noise chain.
+    hash_u32 = build_hash_u32(HelperCls)
 
     if kind == "white":
-        hash_u32 = mk(
-            f"""
-__device__ unsigned int {t}_hash_u32(unsigned int x) {{
-    unsigned int h = x;
-    h ^= h >> 16u;
-    h *= 0x7FEB352Du;
-    h ^= h >> 15u;
-    h *= 0x846CA68Bu;
-    h ^= h >> 16u;
-    return h;
-}}
-"""
-        )
         white_unit = mk(
             f"""
 __device__ float {t}_white_unit(int i) {{
@@ -105,7 +124,7 @@ __device__ float {t}_at(int i) {{
             white_unit=white_unit,
             AMP=amplitude_p,
         )
-        return {"at": at, "white_unit": white_unit}
+        return {"at": at, "white_unit": white_unit, "hash_u32": hash_u32}
 
     fade = mk(f"__device__ float {t}_fade(float t) {{ return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f); }}")
     lerp = mk(f"__device__ float {t}_lerp(float t, float a, float b) {{ return a + t * (b - a); }}")
@@ -207,4 +226,4 @@ __device__ float {t}_at(int i) {{
         PERSISTENCE=persistence_p,
         AMP=amplitude_p,
     )
-    return {"at": at, "perlin_at": perlin_at}
+    return {"at": at, "perlin_at": perlin_at, "hash_u32": hash_u32}

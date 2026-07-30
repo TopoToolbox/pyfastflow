@@ -271,6 +271,8 @@ class RoutineBuilder(ABC):
         self._steps: list[_Step] = []
         self._splits: set[int] = set()
         self._bag: "Bag | None" = None
+        self._recording: "list | None" = None
+        self._repeat_times: int = 0
 
     def add_data(self, name: str, handle: Any) -> "RoutineBuilder":
         """
@@ -304,9 +306,15 @@ class RoutineBuilder(ABC):
         not reach back and change this step. `grid`/`block` are accepted on
         every backend but only meaningful on cupy - see CupyRoutineBuilder.
 
+        Inside a begin_repeat()/end_repeat() block, this call is recorded
+        rather than applied immediately - see begin_repeat.
+
         Author: B.G (07/2026)
         """
         data_handle_ref = tuple(data_handle_ref)
+        if self._recording is not None:
+            self._recording.append(("kernel", kernel_builder, data_handle_ref, grid, block))
+            return self
         arity = self._data_arity(kernel_builder)
         if arity != len(data_handle_ref):
             name = _template_label(kernel_builder.template)
@@ -329,8 +337,14 @@ class RoutineBuilder(ABC):
         before this call are unaffected. See compile() for the requirement
         that every swap in a routine nets out to the identity.
 
+        Inside a begin_repeat()/end_repeat() block, this call is recorded
+        rather than applied immediately - see begin_repeat.
+
         Author: B.G (07/2026)
         """
+        if self._recording is not None:
+            self._recording.append(("swap", a, b))
+            return self
         if a not in self._perm or b not in self._perm:
             missing = sorted(n for n in (a, b) if n not in self._perm)
             raise KeyError(f"add_swap: not registered via add_data: {missing}")
@@ -346,9 +360,72 @@ class RoutineBuilder(ABC):
         compile() - every step there is already its own kernel, in the order
         added, whether or not split() was called between them.
 
+        Raises inside a begin_repeat()/end_repeat() block - what a fusion
+        boundary would mean for a body that is about to be replayed several
+        times is not worth defining, so it is simply rejected.
+
         Author: B.G (07/2026)
         """
+        if self._recording is not None:
+            raise ValueError("split: not supported inside a begin_repeat()/end_repeat() block")
         self._splits.add(len(self._steps))
+        return self
+
+    def begin_repeat(self, times: int) -> "RoutineBuilder":
+        """
+        Start recording a repeated body: every add_kernel/add_swap call made
+        before the matching end_repeat() is recorded, verbatim, instead of
+        being applied to the step list right away.
+
+        end_repeat() replays the recorded calls `times` times, in order, by
+        calling the real add_kernel/add_swap for each recorded call on each
+        pass - so add_swap's relabeling and add_kernel's data_handle_ref
+        resolution against the swap table happen exactly as they would for
+        `times` copies of the body written out by hand. This is what lets the
+        existing net-permutation-is-identity check (see compile()/_validate)
+        run unchanged: it sees the fully unrolled step list either way, so an
+        odd repeat count over a body containing one swap is caught by that
+        same check with the same message.
+
+        Nested begin_repeat() raises - recording into a recording is not
+        supported. `times < 1` raises.
+
+        Author: B.G (07/2026)
+        """
+        if times < 1:
+            raise ValueError(f"begin_repeat: times must be >= 1, got {times}")
+        if self._recording is not None:
+            raise ValueError("begin_repeat: a repeat block is already open - nested repeat blocks are not supported")
+        self._recording = []
+        self._repeat_times = times
+        return self
+
+    def end_repeat(self) -> "RoutineBuilder":
+        """
+        Stop recording and replay the recorded add_kernel/add_swap calls the
+        number of times given to the matching begin_repeat(), in order, each
+        pass calling the real (non-recording) add_kernel/add_swap so the swap
+        table and step list end up exactly as if the body had been written
+        out `times` times by hand.
+
+        Raises if no begin_repeat() is open.
+
+        Author: B.G (07/2026)
+        """
+        if self._recording is None:
+            raise ValueError("end_repeat: no repeat block is open - call begin_repeat() first")
+        recorded = self._recording
+        times = self._repeat_times
+        self._recording = None
+        self._repeat_times = 0
+        for _ in range(times):
+            for call in recorded:
+                if call[0] == "kernel":
+                    _, kernel_builder, data_handle_ref, grid, block = call
+                    self.add_kernel(kernel_builder, data_handle_ref=data_handle_ref, grid=grid, block=block)
+                else:
+                    _, a, b = call
+                    self.add_swap(a, b)
         return self
 
     def bind_bag(self, bag: "Bag") -> "RoutineBuilder":
@@ -400,6 +477,8 @@ class RoutineBuilder(ABC):
 
         Author: B.G (07/2026)
         """
+        if self._recording is not None:
+            raise ValueError("compile: a begin_repeat() block is still open - call end_repeat() first")
         if self._bag is None:
             raise ValueError("compile: no bag bound - call bind_bag() first")
         if not self._steps:
@@ -453,6 +532,14 @@ class RoutineBuilder(ABC):
         fused=True raises here: this base implementation backs cupy, which
         has no source fusion.
 
+        Compiling a kernel_builder is deduplicated within one compile() call,
+        keyed on id(kernel_builder): a repeat block (begin_repeat/end_repeat)
+        unrolls the same KernelBuilder objects into several steps, and this
+        avoids recompiling an unchanged builder once per repetition. A
+        per-step caller is still built for every step even when its compiled
+        kernel is reused, since cupy steps sharing one builder may still
+        differ in grid/block.
+
         Author: B.G (07/2026)
         """
         if fused:
@@ -464,8 +551,13 @@ class RoutineBuilder(ABC):
 
         compiled_steps: list[_CompiledStep] = []
         data_names: list[str] = []
+        compiled_cache: dict[int, Any] = {}
         for step in self._steps:
-            compiled = step.kernel_builder.compile()
+            key = id(step.kernel_builder)
+            compiled = compiled_cache.get(key)
+            if compiled is None:
+                compiled = step.kernel_builder.compile()
+                compiled_cache[key] = compiled
             caller = self._make_caller(compiled, step.grid, step.block)
             compiled_steps.append(_CompiledStep(caller, step.canonical_refs))
             for name in step.canonical_refs:

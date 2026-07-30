@@ -159,6 +159,20 @@ def _at_perlin_tmpl(i):
     return out
 
 
+def build_hash_u32(HelperCls, backend_mod):
+    """
+    The standalone hash_u32(x) HelperBuilder - no Parameters, so it can be
+    built without a grid, a pool, or any of make_noise's other config. Used
+    both by build_helpers below and by make_noise's own make_hash_u32(),
+    which callers outside make_noise (e.g. flow's rand_unit) reach when they
+    want the same integer hash without building a whole noise Bag.
+
+    Author: B.G (07/2026)
+    """
+    mk = functools.partial(make_helper, HelperCls)
+    return mk(_hash_u32_tmpl, _BK=backend_mod)
+
+
 def build_helpers(
     HelperCls,
     *,
@@ -189,12 +203,16 @@ def build_helpers(
 
     row = mk(_row_tmpl, GRID=grid)
     col = mk(_col_tmpl, GRID=grid)
+    # Built unconditionally (not just for kind="white") - hash_u32 is also a
+    # public bag member, reused by callers outside make_noise (e.g. flow's
+    # rand_unit) that want the same integer hash without pulling in the rest
+    # of the white-noise chain.
+    hash_u32 = build_hash_u32(HelperCls, backend_mod)
 
     if kind == "white":
-        hash_u32 = mk(_hash_u32_tmpl, _BK=backend_mod)
         white_unit = mk(_white_unit_tmpl, _ROW=row, _COL=col, _HASH=hash_u32, SEED=seed_p, _BK=backend_mod)
         at = mk(_at_white_tmpl, _WHITEUNIT=white_unit, AMP=amplitude_p)
-        return {"at": at, "white_unit": white_unit}
+        return {"at": at, "white_unit": white_unit, "hash_u32": hash_u32}
 
     fade = mk(_fade_tmpl)
     lerp = mk(_lerp_tmpl)
@@ -213,4 +231,4 @@ def build_helpers(
         AMP=amplitude_p,
         _BK=backend_mod,
     )
-    return {"at": at, "perlin_at": perlin_at}
+    return {"at": at, "perlin_at": perlin_at, "hash_u32": hash_u32}

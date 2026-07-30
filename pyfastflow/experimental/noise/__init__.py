@@ -35,10 +35,13 @@ and uploaded. Reseed Perlin by refilling that field:
 
     noise.perm.set(permutation_table(7))
 
-Bag members are `at` plus whatever the kind actually uses: white carries
-`amplitude`, `seed`, `white_unit`; perlin carries `amplitude`, `perm`,
-`frequency_x`, `frequency_y`, `octaves`, `persistence`, `perlin_at`. A member
-that a kind does not use is absent from the bag rather than present and inert.
+Bag members are `at` and `hash_u32` plus whatever the kind actually uses:
+white carries `amplitude`, `seed`, `white_unit`; perlin carries `amplitude`,
+`perm`, `frequency_x`, `frequency_y`, `octaves`, `persistence`, `perlin_at`. A
+member that a kind does not use is absent from the bag rather than present
+and inert. `hash_u32` is always present regardless of `kind` - it is the
+integer hash white noise builds on, exposed so other bags (e.g. flow's
+rand_unit) can reuse the exact same hash rather than reimplementing it.
 
 Values match pyfastflow/noise/ for the same seed and settings - this is a port
 of that arithmetic, not a reimplementation. White noise lands in
@@ -92,6 +95,21 @@ def _blocks_for(backend: str):
     else:
         raise ValueError(f"make_noise: unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
     return blocks
+
+
+def make_hash_u32(backend: str):
+    """
+    The standalone hash_u32(x) HelperBuilder make_noise's white-noise chain
+    is built on - no Parameters, no grid, no pool. A caller that only wants
+    the same integer hash (e.g. flow's rand_unit - see ../flow/__init__.py)
+    reaches it here rather than building a whole noise Bag just to pull
+    hash_u32 back out of it.
+
+    Author: B.G (07/2026)
+    """
+    backend_mod, _, HelperCls, _ = backend_classes(backend)
+    blocks = _blocks_for(backend)
+    return blocks.build_hash_u32(HelperCls, backend_mod)
 
 
 def make_noise(

@@ -22,6 +22,7 @@ Author: B.G (07/2026)
 
 import ast
 import inspect
+import textwrap
 import warnings
 from abc import ABC, abstractmethod
 from functools import lru_cache
@@ -223,7 +224,13 @@ def resolve_binding(value, ctx: "_SpecializeCtx"):
 def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
     """
     Return (source_text, ast) for a template. A python def is introspected; a
-    raw string (CUDA source) is kept verbatim and has no AST.
+    raw string (CUDA source) is kept verbatim and has no AST. The source
+    returned as `source_text` is `inspect.getsource`'s own indentation
+    (whatever the def's nesting produced); the source parsed into `tree` is
+    dedented first, so a nested def's indented body parses instead of
+    raising an IndentationError - a no-op for a module-level def, which is
+    already at column 0. A def with no recoverable source at all (a lambda,
+    an exec'd function) still comes back with `tree = None`.
 
     Cached because every compile() asks once to filter bindings, and a miss
     costs an inspect.getsource plus a parse. The tree handed back is
@@ -244,7 +251,7 @@ def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
     except (OSError, TypeError):
         return None, None
     try:
-        tree = ast.parse(source)
+        tree = ast.parse(textwrap.dedent(source))
     except SyntaxError:
         tree = None
     return source, tree

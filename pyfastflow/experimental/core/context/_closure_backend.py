@@ -484,20 +484,49 @@ def _check_fusable(label: str, func_def: ast.FunctionDef) -> None:
             )
 
 
-def _annotation_root_name(annotation: "ast.expr | None") -> "str | None":
+def _synthesize_tensor_annotation(backend: Any) -> tuple[ast.expr, str]:
     """
-    The bare name at the root of an annotation expression, e.g. `ti` out of
-    `ti.template()` or `qd.Tensor`. None if the annotation is missing or not
-    shaped as a dotted/called attribute access.
+    Build a fresh data-argument annotation node for `backend` (the bound ti
+    or qd module) rather than reading one out of a step's AST, plus the bare
+    name the node's root refers to.
+
+    Taichi: `ti.template()`, an `ast.Call` on `ast.Attribute(Name("ti"),
+    "template")`. Quadrants: `qd.Tensor`, an `ast.Attribute(Name("qd"),
+    "Tensor")` (no call - see quadrants_backend.py). Distinguishing the two
+    by `backend.__name__` rather than `backend is ti`/`backend is qd` keeps
+    this free of a direct import of either module.
 
     Author: B.G (07/2026)
     """
-    node = annotation
-    if isinstance(node, ast.Call):
-        node = node.func
-    while isinstance(node, ast.Attribute):
-        node = node.value
-    return node.id if isinstance(node, ast.Name) else None
+    if backend.__name__ == "taichi":
+        alias = "ti"
+        node = ast.Call(
+            func=ast.Attribute(value=ast.Name(id=alias, ctx=ast.Load()), attr="template", ctx=ast.Load()),
+            args=[],
+            keywords=[],
+        )
+    else:
+        alias = "qd"
+        node = ast.Attribute(value=ast.Name(id=alias, ctx=ast.Load()), attr="Tensor", ctx=ast.Load())
+    return node, alias
+
+
+def _step_freevars(template) -> dict[str, Any]:
+    """
+    `template`'s own closure, name -> cell contents. Empty for a module-level
+    def (no enclosing function scope to capture from) and for anything with
+    no `__code__`/`__closure__` of its own.
+
+    `__wrapped__` is unwrapped first so a decorated template's freevars are
+    read off the underlying function rather than the wrapper.
+
+    Author: B.G (07/2026)
+    """
+    tmpl = getattr(template, "__wrapped__", template)
+    code = getattr(tmpl, "__code__", None)
+    if code is None:
+        return {}
+    return dict(zip(code.co_freevars, (c.cell_contents for c in (tmpl.__closure__ or ()))))
 
 
 class ClosureRoutineBuilder(RoutineBuilder):
@@ -548,7 +577,13 @@ class ClosureRoutineBuilder(RoutineBuilder):
         work, this is what lets a routine that split()s after every step -
         one whose steps each need a global barrier, so fusing them would be
         wrong - compile on this path at all: _fuse_group's constraints are
-        the splicer's, and a lone step is subject to none of them.
+        the splicer's, and a lone step is subject to none of them. A lone
+        step's compile is deduplicated across such groups, keyed on
+        id(kernel_builder) - see RoutineBuilder.compile. Fused groups (more
+        than one step) need no such dedup: _fuse_group already unions every
+        step in the group into one generated kernel, so an unrolled repeat
+        block with no split() inside it compiles to a single kernel already,
+        never once per repetition.
 
         `dump_source`, fused mode only, is a file path; when given, every
         generated group's source is appended to it (truncated first),
@@ -564,10 +599,16 @@ class ClosureRoutineBuilder(RoutineBuilder):
 
         compiled_steps: list[_CompiledStep] = []
         data_names: list[str] = []
+        compiled_cache: dict[int, Any] = {}
         for group_index, group in enumerate(self._grouped_steps()):
             if len(group) == 1:
                 step = group[0]
-                caller = self._make_caller(step.kernel_builder.compile(), None, None)
+                key = id(step.kernel_builder)
+                compiled = compiled_cache.get(key)
+                if compiled is None:
+                    compiled = step.kernel_builder.compile()
+                    compiled_cache[key] = compiled
+                caller = self._make_caller(compiled, None, None)
                 compiled_steps.append(_CompiledStep(caller, step.canonical_refs))
                 for name in step.canonical_refs:
                     if name not in data_names:
@@ -595,24 +636,33 @@ class ClosureRoutineBuilder(RoutineBuilder):
 
         Per step, in order: the template's own AST is deep-copied out of the
         capture_template_meta cache (never mutated in place - that cache is
-        shared with every other compile of the same template); the two
-        structural fusable-template constraints are checked
-        (_check_fusable); its top-level assignments are checked against
-        every earlier step in this group for a name collision
-        (_top_level_assigned_names); its template argument names are
-        substituted for this step's canonical_refs, positionally
+        shared with every other compile of the same template; the source it
+        parsed is dedented first, so a nested def's indented body is
+        recoverable exactly like a module-level one - see
+        capture_template_meta); the two structural fusable-template
+        constraints are checked (_check_fusable); its top-level assignments
+        are checked against every earlier step in this group for a name
+        collision (_top_level_assigned_names); its template argument names
+        are substituted for this step's canonical_refs, positionally
         (_RenameNames) - the same mapping data_handle_ref set up at
-        add_kernel time; and its (now renamed) body statements are appended
-        to the generated function's body, flat.
+        add_kernel time; its freevars, if any, are substituted for
+        step-index-mangled names (`_fv{s}_{NAME}`) by a second, independent
+        _RenameNames pass over the already-data-renamed body, so a data
+        rename and a freevar rename can never collide; and the resulting
+        body statements are appended to the generated function's body, flat.
 
         The generated function's parameters are this group's data names, in
-        first-appearance order, each carrying the annotation its first
-        occurrence used (`ti.template()`, `qd.Tensor`, ...). The result is
-        unparsed to source, registered in linecache under a synthetic
-        filename - required for Taichi/Quadrants to re-parse it via
-        inspect.getsource when they run their own AST transform - exec'd,
-        and decorated as a kernel with the group's resolved bindings plus
-        every step's own template module globals injected.
+        first-appearance order, each carrying a data-argument annotation
+        synthesized fresh for this group's backend (`ti.template()` or
+        `qd.Tensor` - see _synthesize_tensor_annotation), not one read out of
+        any step's AST: a nested-def template's own annotation is a bare
+        alias name (`T`) closed over from its factory, which has no useful
+        source form to copy. The result is unparsed to source, registered in
+        linecache under a synthetic filename - required for Taichi/Quadrants
+        to re-parse it via inspect.getsource when they run their own AST
+        transform - exec'd, and decorated as a kernel with the group's
+        resolved bindings, every step's mangled freevars, plus every step's
+        own template module globals injected.
 
         Author: B.G (07/2026)
         """
@@ -620,10 +670,12 @@ class ClosureRoutineBuilder(RoutineBuilder):
         ctx = _SpecializeCtx()
         body_stmts: list[ast.stmt] = []
         data_names: list[str] = []
-        annotations: dict[str, "ast.expr | None"] = {}
+        annotations: dict[str, ast.expr] = {}
         assigned_by: dict[str, str] = {}
         module_globals: dict[str, Any] = {}
         resolved_globals: dict[str, Any] = {}
+
+        annotation_node, annotation_alias = _synthesize_tensor_annotation(backend)
 
         for step_index, step in enumerate(group):
             kernel_builder = step.kernel_builder
@@ -654,13 +706,23 @@ class ClosureRoutineBuilder(RoutineBuilder):
                 )
             rename_map = dict(zip(params, step.canonical_refs))
 
-            for arg_node, canon in zip(func_def.args.args, step.canonical_refs):
+            for canon in step.canonical_refs:
                 if canon not in data_names:
                     data_names.append(canon)
-                    annotations[canon] = arg_node.annotation
+                    annotations[canon] = copy.deepcopy(annotation_node)
 
             renamer = _RenameNames(rename_map)
             renamed_body = [renamer.visit(stmt) for stmt in func_def.body]
+
+            freevars = _step_freevars(template)
+            if freevars:
+                fv_rename_map = {name: f"_fv{step_index}_{name}" for name in freevars}
+                fv_renamer = _RenameNames(fv_rename_map)
+                renamed_body = [fv_renamer.visit(stmt) for stmt in renamed_body]
+                resolved_globals.update(
+                    {f"_fv{step_index}_{name}": value for name, value in freevars.items()}
+                )
+
             body_stmts.extend(renamed_body)
 
             filtered = filter_bindings(template, kernel_builder.bindings)
@@ -673,18 +735,14 @@ class ClosureRoutineBuilder(RoutineBuilder):
         # module_globals is a base layer (ti/qd/np/builtins/plain helper functions
         # each step's own module happens to define) applied once, in step order;
         # resolved_globals - the actual bound objects this group's steps
-        # reference - is applied last so a name a later step's unrelated module
-        # globals happen to share (e.g. two templates in one file both seeing
-        # `heat` in their module namespace) never clobbers an earlier step's
-        # resolved binding.
+        # reference, plus every step's mangled freevars - is applied last so a
+        # name a later step's unrelated module globals happen to share (e.g.
+        # two templates in one file both seeing `heat` in their module
+        # namespace) never clobbers an earlier step's resolved binding.
         exec_globals: dict[str, Any] = {}
         exec_globals.update(module_globals)
         exec_globals.update(resolved_globals)
-
-        for annotation in annotations.values():
-            alias = _annotation_root_name(annotation)
-            if alias is not None:
-                exec_globals.setdefault(alias, backend)
+        exec_globals[annotation_alias] = backend
 
         # Name the fused function deterministically from its own content
         # rather than a process-global uid: build it under a stable

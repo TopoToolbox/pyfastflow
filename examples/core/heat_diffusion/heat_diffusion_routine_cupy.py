@@ -5,8 +5,16 @@ ping-pong expressed as a Routine instead of a hand-written python loop.
 heat_diffusion_cupy.py alternates `diffuse_kernel(T1, T0, ...)`,
 `apply_source_kernel(T1, ...)`, then swaps the T0/T1 python names each
 iteration. A Routine has no python between its steps to do that swap in, so
-the two iterations that one swap-pair covers are unrolled into one routine,
-with add_swap standing in for the python-level `T0, T1 = T1, T0`:
+the two iterations that one swap-pair covers are unrolled into one routine
+with a repeat block, add_swap standing in for the python-level
+`T0, T1 = T1, T0`:
+
+    begin_repeat(times=2)
+        diffuse(T1, T0); apply_source(T1); swap(T0, T1)
+    end_repeat()
+
+which records the body once and replays it twice, giving the same six-step
+sequence as writing it out by hand:
 
     diffuse(T1, T0); apply_source(T1); swap(T0, T1)
     diffuse(T1, T0); apply_source(T1); swap(T0, T1)
@@ -291,12 +299,11 @@ diffusion_routine = (
     .add_data("T0", T0.data)
     .add_data("T1", T1.data)
     .bind_bag(routine_bag)
+    .begin_repeat(times=2)
     .add_kernel(diffuse_builder, data_handle_ref=("T1", "T0"))
     .add_kernel(apply_source_builder, data_handle_ref=("T1",))
     .add_swap("T0", "T1")
-    .add_kernel(diffuse_builder, data_handle_ref=("T1", "T0"))
-    .add_kernel(apply_source_builder, data_handle_ref=("T1",))
-    .add_swap("T0", "T1")
+    .end_repeat()
     .compile()
 )
 

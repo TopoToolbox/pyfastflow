@@ -911,8 +911,11 @@ class CupyRoutineBuilder(RoutineBuilder):
         switch - in particular it is the only way to get a Routine that
         accepts call-time data handle overrides (see _CapturedRoutine).
 
-        captured=True compiles every step exactly as captured=False does,
-        then:
+        captured=True compiles every step exactly as captured=False does -
+        deduplicated within this call, keyed on id(kernel_builder), so a
+        begin_repeat()/end_repeat() block that unrolls the same
+        KernelBuilder into several steps compiles it once, not once per
+        repetition - then:
         1. Warms up each step by launching it once, for real, on the
            default stream. Each step's compile() (just above, in this same
            method) already built its cp.RawModule and uploaded its constant
@@ -961,8 +964,13 @@ class CupyRoutineBuilder(RoutineBuilder):
 
         compiled_steps: list[_CompiledStep] = []
         data_names: list[str] = []
+        compiled_cache: dict[int, Any] = {}
         for step in self._steps:
-            compiled = step.kernel_builder.compile()
+            key = id(step.kernel_builder)
+            compiled = compiled_cache.get(key)
+            if compiled is None:
+                compiled = step.kernel_builder.compile()
+                compiled_cache[key] = compiled
             caller = self._make_caller(compiled, step.grid, step.block)
             compiled_steps.append(_CompiledStep(caller, step.canonical_refs))
             for name in step.canonical_refs:
