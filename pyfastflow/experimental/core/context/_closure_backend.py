@@ -40,6 +40,7 @@ from .compile import (
 )
 from .parameter import MODES, Parameter
 from .routine import Routine, RoutineBuilder, _CompiledStep, _template_label
+from .sequence import SequenceBuilder
 
 
 def specialize_closure(template, bindings: dict[str, Any], ctx: _SpecializeCtx) -> FunctionType:
@@ -204,6 +205,21 @@ class ClosureBackendParameter(Parameter):
             self._handle.data[None] = value
         else:  # field
             self._handle.data[node] = value
+
+    def read(self):
+        """
+        Host-side scalar read - see Parameter.read for the contract.
+
+        Author: B.G (07/2026)
+        """
+        if self.mode == "const":
+            return self._const_value
+        if self.mode == "field":
+            raise ValueError(
+                f"{self.name}: read() is for scalar/const only; a field is not meant to be "
+                f"read back to the host as a whole"
+            )
+        return self._numpy_dtype(self.dtype)(self._handle.data.to_numpy()).item()
 
     def destroy(self) -> None:
         """
@@ -788,3 +804,24 @@ class ClosureRoutineBuilder(RoutineBuilder):
 
         krn = ClosureKernel(func_name, backend.kernel(fused_fn))
         return krn, data_names
+
+
+class ClosureSequenceBuilder(SequenceBuilder):
+    """
+    Sequences Taichi/Quadrants blocks under host-driven control.
+
+    A kernel block's data arity is read straight off its template's own
+    python signature, and launching a compiled kernel is just calling it -
+    the same two facts ClosureRoutineBuilder rests on.
+
+    Author: B.G (07/2026)
+    """
+
+    def _data_arity(self, kernel_builder: KernelBuilder) -> int:
+        template = kernel_builder.template
+        if template is None:
+            raise ValueError("add_kernel: kernel_builder has no ingested template")
+        return len(inspect.signature(template).parameters)
+
+    def _make_caller(self, compiled_kernel, grid, block):
+        return compiled_kernel

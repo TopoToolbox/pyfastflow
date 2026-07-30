@@ -262,6 +262,23 @@ class Parameter(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement device_view")
 
+    def read(self):
+        """
+        Host-side scalar read, returned as a plain python value regardless of
+        mode - unlike get(), which hands back a DataHandle for scalar/field.
+
+        const mode: the stored python value, no device traffic.
+        scalar mode: a device->host read that synchronizes. That sync is the
+        whole cost model of any host-driven loop built on top of this - call
+        it only where a step actually needs the value on the host.
+        field mode: raises. Reading a whole field back to the host is not
+        what this is for; use device_view()/get() from device code, or copy
+        the field explicitly if the host genuinely needs all of it.
+
+        Author: B.G (07/2026)
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement read")
+
     @abstractmethod
     def destroy(self) -> None:
         """

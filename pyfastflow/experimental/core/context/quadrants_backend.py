@@ -37,6 +37,7 @@ from ._closure_backend import (
     ClosureHelperBuilder,
     ClosureKernelBuilder,
     ClosureRoutineBuilder,
+    ClosureSequenceBuilder,
 )
 
 
@@ -76,6 +77,15 @@ class QuadrantsRoutineBuilder(ClosureRoutineBuilder):
     """
     Compiles an ordered sequence of Quadrants kernels sharing one bag into a
     Routine.
+
+    Author: B.G (07/2026)
+    """
+
+
+class QuadrantsSequenceBuilder(ClosureSequenceBuilder):
+    """
+    Sequences Quadrants kernels, Routines and host code under host-driven
+    control.
 
     Author: B.G (07/2026)
     """

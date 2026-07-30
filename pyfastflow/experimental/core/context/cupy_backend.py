@@ -76,6 +76,7 @@ from .bag import Bag
 from .compile import HelperBuilder, Kernel, KernelBuilder, _SpecializedHelper, _SpecializeCtx
 from .parameter import MODES, Parameter
 from .routine import Routine, RoutineBuilder, _CompiledStep
+from .sequence import SequenceBuilder
 
 _KERNEL_NAME_RE = re.compile(r"__global__\s+void\s+(\w+)\s*\(")
 # the return type is one-or-more tokens, matched non-greedily so the LAST one
@@ -514,6 +515,22 @@ class CupyParameter(Parameter):
             self._handle.data[...] = value
         else:  # field
             self._handle.data[node] = value
+
+    def read(self):
+        """
+        Host-side scalar read - see Parameter.read for the contract. dtypes
+        are numpy dtypes already here, so no translation is needed.
+
+        Author: B.G (07/2026)
+        """
+        if self.mode == "const":
+            return self._const_value
+        if self.mode == "field":
+            raise ValueError(
+                f"{self.name}: read() is for scalar/const only; a field is not meant to be "
+                f"read back to the host as a whole"
+            )
+        return np.dtype(self.dtype).type(self._handle.data.get()).item()
 
     def destroy(self) -> None:
         """
@@ -1017,3 +1034,49 @@ class CupyRoutineBuilder(RoutineBuilder):
             )
 
         return _CapturedRoutine(compiled_steps, tuple(data_names), defaults, graph, stream)
+
+
+class CupySequenceBuilder(SequenceBuilder):
+    """
+    Sequences cupy kernels, Routines and host code under host-driven control.
+
+    A kernel block's data arity is read off the `__global__` signature as
+    written in the ingested source, and its launch needs a grid/block the way
+    every cupy launch does: whatever add_kernel(..., grid=..., block=...)
+    gave that block, else the default passed to this builder's constructor.
+    Neither given raises at compile time, naming the kernel.
+
+    A Routine block compiles through CupyRoutineBuilder as usual, so it keeps
+    its own captured graph and a loop over it replays that graph per
+    iteration - see the module docstring and _CapturedRoutine.
+
+    Author: B.G (07/2026)
+    """
+
+    def __init__(self, *, grid=None, block=None):
+        super().__init__()
+        self._default_grid = grid
+        self._default_block = block
+
+    def _data_arity(self, kernel_builder: KernelBuilder) -> int:
+        template = kernel_builder.template
+        if template is None:
+            raise ValueError("add_kernel: kernel_builder has no ingested template")
+        try:
+            return _declared_arity(template)
+        except ValueError as exc:
+            raise ValueError(f"add_kernel: {exc}") from exc
+
+    def _make_caller(self, compiled_kernel, grid, block):
+        grid = grid if grid is not None else self._default_grid
+        block = block if block is not None else self._default_block
+        if grid is None or block is None:
+            raise ValueError(
+                f"CupySequenceBuilder: no grid/block for kernel '{compiled_kernel.name}' - "
+                "pass grid=/block= to the builder or to this block's add_kernel"
+            )
+
+        def caller(*args):
+            return compiled_kernel(*args, grid=grid, block=block)
+
+        return caller

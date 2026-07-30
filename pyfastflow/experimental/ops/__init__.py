@@ -237,11 +237,10 @@ class Scan:
     Author: B.G (07/2026)
     """
 
-    def __init__(self, inclusive_fn, compact_fn, count_param, count_fn):
+    def __init__(self, inclusive_fn, compact_fn, count_param):
         self._inclusive_fn = inclusive_fn
         self._compact_fn = compact_fn
         self.count_param = count_param
-        self._count_fn = count_fn
 
     def inclusive(self, input_handle, output_handle) -> None:
         self._inclusive_fn(input_handle, output_handle)
@@ -250,7 +249,7 @@ class Scan:
         return self._compact_fn(flags_handle, ids_handle)
 
     def count(self) -> int:
-        return self._count_fn()
+        return int(self.count_param.read())
 
 
 def make_scan(backend: str, pool, n: int) -> Scan:
@@ -287,16 +286,13 @@ def make_scan(backend: str, pool, n: int) -> Scan:
         def compact_fn(flags_handle, ids_handle):
             cp.cumsum(flags_handle.data, out=scan_out_h.data)
             count_p.get().data[...] = scan_out_h.data[n - 1 : n]
-            count = int(count_p.get().data.get())
+            count = int(count_p.read())
             if count <= 0:
                 return 0
             scatter_kernel(flags_handle.data, scan_out_h.data, ids_handle.data, n, grid=grid_dim, block=block)
             return count
 
-        def count_fn():
-            return int(count_p.get().data.get())
-
-        return Scan(inclusive_fn, compact_fn, count_p, count_fn)
+        return Scan(inclusive_fn, compact_fn, count_p)
 
     # Taichi / Quadrants
     backend_mod, _, _, _ = backend_classes(backend)
@@ -319,16 +315,13 @@ def make_scan(backend: str, pool, n: int) -> Scan:
     def compact_fn(flags_handle, ids_handle):
         routine(flags_handle.data, work_h.data, scan_out_scratch.data)
         read_count_kernel(scan_out_scratch.data)
-        count = int(count_p.get().to_numpy())
+        count = int(count_p.read())
         if count <= 0:
             return 0
         scatter_kernel(flags_handle.data, scan_out_scratch.data, ids_handle.data)
         return count
 
-    def count_fn():
-        return int(count_p.get().to_numpy())
-
-    return Scan(inclusive_fn, compact_fn, count_p, count_fn)
+    return Scan(inclusive_fn, compact_fn, count_p)
 
 
 # ---------------------------------------------------------------------------
