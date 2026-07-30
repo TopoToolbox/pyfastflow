@@ -130,6 +130,96 @@ every-call semantics these buffers need anyway.
 requires nx/ny to be in "const" mode (the make_grid default); pass `n_flat`
 explicitly for a grid built with scalar-mode dimensions.
 
+make_depressions: the depression-handling Bag factory, porting
+../../flow/flow_reroute_kernels.py. Two orthogonal build flags:
+
+    deps = make_depressions("taichi", grid, ndep_p, method="vanilla", reroute="carve")
+
+`method` ("vanilla"|"optimized") picks how basins are labelled and, for
+reroute="carve", how the carve itself runs; `reroute` ("carve"|"jump") picks
+how a resolved basin's pit is reconnected to its outlet. All four
+combinations build. `ndep_p` (a caller-allocated scalar i32 Parameter, mode
+"scalar") is required - it is not built here, the same way make_accumulation
+takes iteration_p rather than allocating it, since this factory takes no
+pool: every scratch buffer below is a caller-supplied data arg, never a
+bound field Parameter.
+
+Every buffer is n_flat-sized, since a per-basin array is indexed by basin id
+and basin id = pit index + 1 (bid/basin_saddlenode/outlet range over the
+same 0..n_flat-1 index space as every per-node buffer). Required data args,
+by Bag member:
+
+  "ndep":                the `ndep_p` scalar Parameter itself (bag.ndep.read())
+  "depression_counter":   closure: (rec,) - accumulates into ndep_p, bound
+                          directly as a raw field. cupy: (rec, ndep) - ndep_p
+                          is only ever reached through $...$ get() spans
+                          there, which registers it read-only in the
+                          constant block (see cupy_backend.py's
+                          _SpanParser._register_ptr), so the caller instead
+                          passes `ndep_p.get().data` positionally, same as
+                          `rec` - see build_depression_counter in
+                          _cupy_blocks.py. Either way the caller must
+                          ndep_p.set(0) before each launch (mirrors
+                          ops.Reduce.run_sum).
+  "copy_field":           (src, dst) i32        -> dst[:] = src[:]
+  "label_basins" (vanilla): Routine, data names ("rec", "bid", "rec_jump")
+  "label_basins" (optimized, closure): Kernel, data args (rec, rec_jump, bid)
+  "label_basins" (optimized, cupy): Routine, data names ("rec", "rec_jump", "bid")
+    - see _closure_blocks.py/_cupy_blocks.py's build_basin_labelling_* for
+      why cupy needs three real launches where a closure backend needs one.
+  "saddlesort":           Routine (6 kernels, unchanged by `method`), data
+                          names ("bid", "z", "z_prime", "is_border",
+                          "basin_saddle", "basin_saddlenode", "outlet") -
+                          the six constituent KernelBuilders are also
+                          exposed under "saddlesort_<name>".
+  "reroute" (carve, vanilla): Routine, data names ("rec", "rec_work",
+                          "rec_jump", "tag", "tag_alt", "bid",
+                          "basin_saddlenode", "outlet", "rerouted")
+  "reroute" (carve, optimized): Kernel, data args (rec, basin_saddlenode, outlet)
+  "reroute" (jump, closure): Kernel, data args (rec, outlet, rerouted)
+  "reroute" (jump, cupy): Routine, data names ("rec", "outlet", "rerouted")
+    - split for the same real-launch-barrier reason as label_basins above.
+
+Every "label_basins"/"reroute" constituent KernelBuilder is also exposed
+under "label_basins_<name>"/"reroute_<name>" respectively, mirroring
+make_accumulation's own routine+constituent-kernels convention.
+
+`reroute_jump`'s pit write is deliberately `rec[i - 1]`, not `rec[i]`: the
+loop is over basin ids and basin id = pit index + 1 - ported exactly as
+legacy has it, not "fixed" - see _closure_blocks.py's build_reroute_jump.
+
+`ops.bitpack` (pack/unpack_value/unpack_index) replaces legacy's
+f32_i32_struct module for the lexicographic (elevation, target-basin) and
+(elevation, node) argmins saddlesort's atomic_min passes need; on cupy,
+i64 atomic_min is a CAS loop (CUDA has no native atomicMin over signed long
+long) - see _cupy_blocks.py's build_atomic_min_ll.
+
+make_depressions builds the routines/kernels only. make_depression_solver
+wraps that Bag into the outer host-driven loop the algorithm needs, as a
+compiled Sequence:
+
+    solver = make_depression_solver(
+        "taichi", deps, method="vanilla", reroute="carve",
+        rec=rec.data, z=z.data, bid=bid.data, ...)
+    solver()
+    solver.last_trip_counts   # passes the loop actually took
+
+    depression_counter -> ndep;  ndep == 0 -> nothing to do
+    loop max_times = ceil(log2(max(2, ndep))) + 2:
+        <label basins>  <saddlesort>  <reroute>
+        depression_counter -> ndep;  until ndep == 0
+
+`max_times` returns 0 when the entry count is already 0, which is what
+Sequence.add_loop's documented "max_times <= 0 runs the body zero times"
+case is for, and matches legacy runtime.py's `if ndep == 0: return`.
+
+Buffer naming: `rec` is the caller's authoritative receiver buffer, read at
+entry and holding the resolved graph on return, in every combination. The
+vanilla carve routine's own two receiver buffers are its internal working
+copy (bound to `rec_scratch`) and the authoritative one (bound to `rec`) -
+see build_reroute_carve_vanilla, whose last step copies the working buffer
+back into the authoritative one.
+
 Author: B.G (07/2026)
 """
 
@@ -137,6 +227,9 @@ import math
 
 from ..core.context.bag import Bag
 from ..core.context.backends import backend_classes
+from ..core.context.routine import RoutineBuilder
+from ..core.context.sequence import host_step, kernel_step, routine_step
+from ..ops import make_bitpack
 from ..noise import make_hash_u32
 
 _MODES = frozenset({"steepest", "stochastic"})
@@ -355,3 +448,423 @@ def make_accumulation(
     out = dict(kernels)
     out["routine"] = rb
     return Bag(out)
+
+
+# ---------------------------------------------------------------------------
+# depressions
+# ---------------------------------------------------------------------------
+
+_DEP_METHODS = frozenset({"vanilla", "optimized"})
+_DEP_REROUTES = frozenset({"carve", "jump"})
+
+
+def make_depressions(
+    backend: str,
+    grid: Bag,
+    depression_counter_p,
+    *,
+    method: str = "vanilla",
+    reroute: str = "carve",
+    n_flat: int | None = None,
+) -> Bag:
+    """
+    Build one depression-handling Bag for `method` "vanilla"|"optimized" x
+    `reroute` "carve"|"jump" - see the module docstring for the exact Bag
+    keys, their types (Kernel vs Routine) per combination/backend, and the
+    data args each expects.
+
+    `depression_counter_p` is a caller-allocated scalar Parameter (mode
+    "scalar", dtype i32) - required, not built here (this factory takes no
+    pool). `n_flat` defaults to grid.nx.get() * grid.ny.get(), same as
+    make_accumulation.
+
+    This builds the routines/kernels only; running them in the
+    label -> saddlesort -> reroute -> recount loop the algorithm needs is
+    the outer Sequence's job, not this factory's.
+
+    Author: B.G (07/2026)
+    """
+    if method not in _DEP_METHODS:
+        raise ValueError(f"make_depressions: method must be one of {sorted(_DEP_METHODS)}, got {method!r}")
+    if reroute not in _DEP_REROUTES:
+        raise ValueError(f"make_depressions: reroute must be one of {sorted(_DEP_REROUTES)}, got {reroute!r}")
+
+    backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
+    KernelCls = _kernel_cls(backend)
+    RoutineCls = _routine_cls(backend)
+    blocks = _blocks_for(backend)
+    n_flat_resolved = _resolve_n_flat(grid, n_flat)
+    closure = backend in ("taichi", "quadrants")
+    logn = math.ceil(math.log2(n_flat_resolved)) + 1
+
+    bitpack_bag = make_bitpack(backend)
+    bitpack = {"pack": bitpack_bag.pack, "unpack_value": bitpack_bag.unpack_value, "unpack_index": bitpack_bag.unpack_index}
+
+    out: dict = {"ndep": depression_counter_p}
+
+    if closure:
+        copy_field = blocks.build_copy_field(KernelCls, backend=backend, backend_mod=backend_mod)
+        depression_counter = blocks.build_depression_counter(
+            KernelCls, backend=backend, backend_mod=backend_mod, grid=grid,
+            ndep_raw=depression_counter_p.get().data,
+        )
+    else:
+        copy_field = blocks.build_copy_field(KernelCls, n_flat=n_flat_resolved)
+        depression_counter = blocks.build_depression_counter(
+            KernelCls, grid=grid, n_flat=n_flat_resolved,
+        )
+    out["copy_field"] = copy_field
+    out["depression_counter"] = depression_counter
+
+    # basin labelling
+    if method == "vanilla":
+        if closure:
+            lb_rb, lb_kernels = blocks.build_basin_labelling_vanilla(
+                RoutineCls, KernelCls, backend=backend, backend_mod=backend_mod,
+                grid=grid, copy_field=copy_field, logn=logn,
+            )
+        else:
+            lb_rb, lb_kernels = blocks.build_basin_labelling_vanilla(
+                RoutineCls, KernelCls, grid=grid, copy_field=copy_field,
+                n_flat=n_flat_resolved, logn=logn,
+            )
+        out["label_basins"] = lb_rb
+        for name, kb in lb_kernels.items():
+            out[f"label_basins_{name}"] = kb
+    else:  # optimized
+        if closure:
+            out["label_basins"] = blocks.build_basin_labelling_optimized(
+                KernelCls, backend=backend, backend_mod=backend_mod, grid=grid, n_flat=n_flat_resolved,
+            )
+        else:
+            lb_rb, lb_kernels = blocks.build_basin_labelling_optimized(
+                RoutineCls, KernelCls, grid=grid, n_flat=n_flat_resolved,
+            )
+            out["label_basins"] = lb_rb
+            for name, kb in lb_kernels.items():
+                out[f"label_basins_{name}"] = kb
+
+    # saddlesort - shared, unchanged by `method`
+    if closure:
+        ss_rb, ss_kernels = blocks.build_saddlesort(
+            RoutineCls, KernelCls, backend=backend, backend_mod=backend_mod, grid=grid, bitpack=bitpack,
+        )
+    else:
+        ss_rb, ss_kernels = blocks.build_saddlesort(
+            RoutineCls, KernelCls, HelperCls, grid=grid, bitpack=bitpack, n_flat=n_flat_resolved,
+        )
+    out["saddlesort"] = ss_rb
+    for name, kb in ss_kernels.items():
+        out[f"saddlesort_{name}"] = kb
+
+    # reroute
+    if reroute == "carve":
+        if method == "vanilla":
+            if closure:
+                rr_rb, rr_kernels = blocks.build_reroute_carve_vanilla(
+                    RoutineCls, KernelCls, backend=backend, backend_mod=backend_mod,
+                    bitpack=bitpack, copy_field=copy_field, logn=logn,
+                )
+            else:
+                rr_rb, rr_kernels = blocks.build_reroute_carve_vanilla(
+                    RoutineCls, KernelCls, bitpack=bitpack, copy_field=copy_field,
+                    n_flat=n_flat_resolved, logn=logn,
+                )
+            out["reroute"] = rr_rb
+            for name, kb in rr_kernels.items():
+                out[f"reroute_{name}"] = kb
+        else:  # optimized
+            if closure:
+                out["reroute"] = blocks.build_reroute_carve_optimized(
+                    KernelCls, backend=backend, backend_mod=backend_mod, bitpack=bitpack,
+                )
+            else:
+                out["reroute"] = blocks.build_reroute_carve_optimized(
+                    KernelCls, bitpack=bitpack, n_flat=n_flat_resolved,
+                )
+    else:  # jump
+        if closure:
+            out["reroute"] = blocks.build_reroute_jump(
+                KernelCls, backend=backend, backend_mod=backend_mod, bitpack=bitpack,
+            )
+        else:
+            rr_rb, rr_kernels = blocks.build_reroute_jump(
+                RoutineCls, KernelCls, bitpack=bitpack, n_flat=n_flat_resolved,
+            )
+            out["reroute"] = rr_rb
+            for name, kb in rr_kernels.items():
+                out[f"reroute_{name}"] = kb
+
+    return Bag(out)
+
+
+# ---------------------------------------------------------------------------
+# depressions: the outer host-driven loop
+# ---------------------------------------------------------------------------
+
+
+def _sequence_cls(backend: str):
+    """
+    The SequenceBuilder class for `backend` - not exposed by
+    backend_classes(), mirrors _kernel_cls/_routine_cls above.
+
+    Author: B.G (07/2026)
+    """
+    if backend == "taichi":
+        from ..core.context.taichi_backend import TaichiSequenceBuilder
+
+        return TaichiSequenceBuilder
+    if backend == "quadrants":
+        from ..core.context.quadrants_backend import QuadrantsSequenceBuilder
+
+        return QuadrantsSequenceBuilder
+    if backend == "cupy":
+        from ..core.context.cupy_backend import CupySequenceBuilder
+
+        return CupySequenceBuilder
+    raise ValueError(f"unknown backend {backend!r}")
+
+
+def _union_bag(deps: Bag, extra: dict) -> Bag:
+    """
+    One Bag carrying every name any KernelBuilder in `deps` binds, plus
+    `extra`.
+
+    A Sequence rebinds every block - and every step of every inner Routine -
+    against a single bag, so that bag must carry every name those blocks
+    bind: the grid, the backend module, the bitpack helpers, the raw
+    depression-counter cell, cupy's i64 atomic_min helper. Each of those is
+    reached here off the KernelBuilders make_depressions already exposes,
+    so the objects put in the bag are the very ones the blocks were built
+    against and rebinding is a no-op rather than a substitution. A name bound
+    to two different objects across the Bag raises - that is the same
+    condition check_handles enforces, caught here where the offending Bag key
+    can be named.
+
+    Author: B.G (07/2026)
+    """
+    members: dict = {}
+    owner: dict = {}
+    for key, obj in deps.items():
+        bindings = getattr(obj, "bindings", None)
+        if not isinstance(bindings, dict):
+            continue
+        for name, bound in bindings.items():
+            prior = members.get(name)
+            if prior is not None and prior is not bound:
+                raise ValueError(
+                    f"make_depression_solver: '{name}' is bound to two different objects "
+                    f"across the depression Bag ('{owner[name]}' vs '{key}')"
+                )
+            members[name] = bound
+            owner[name] = key
+    members.update(extra)
+    return Bag(members)
+
+
+def _fill_routine_data(routine_builder, table: dict, label: str) -> None:
+    """
+    Give every data name a depression RoutineBuilder registered a real
+    buffer, in place.
+
+    The flow block modules register their routines' data names as
+    `add_data(name, None)` placeholders, since those factories take no pool
+    and the buffers are the caller's. RoutineBuilder offers no public way to
+    replace an already-registered placeholder - add_data raises on a name it
+    already holds - so this writes the builder's data table directly. It has
+    to be the registered defaults rather than a call-time override: a Routine
+    compiled by a Sequence on cupy is graph-captured, and a captured Routine
+    both warms up against its registered handles and rejects call-time
+    overrides outright (see cupy_backend.py, _CapturedRoutine).
+
+    Author: B.G (07/2026)
+    """
+    registered = routine_builder._data
+    missing = [name for name in registered if name not in table]
+    if missing:
+        raise KeyError(f"make_depression_solver: {label} needs data for {sorted(missing)}")
+    for name in registered:
+        registered[name] = table[name]
+
+
+def _require(label: str, **buffers):
+    """
+    Raise naming every buffer this combination needs that was left None.
+
+    Author: B.G (07/2026)
+    """
+    missing = sorted(name for name, buf in buffers.items() if buf is None)
+    if missing:
+        raise ValueError(f"make_depression_solver: {label} requires {missing}")
+
+
+def make_depression_solver(
+    backend: str,
+    deps: Bag,
+    *,
+    method: str = "vanilla",
+    reroute: str = "carve",
+    rec=None,
+    z=None,
+    bid=None,
+    rec_jump=None,
+    z_prime=None,
+    is_border=None,
+    basin_saddle=None,
+    basin_saddlenode=None,
+    outlet=None,
+    rerouted=None,
+    tag=None,
+    tag_alt=None,
+    rec_scratch=None,
+    n_flat: int | None = None,
+    block_size: int = 256,
+):
+    """
+    Compile the outer depression-resolution loop over a Bag from
+    make_depressions, as a Sequence - see the module docstring for its shape.
+
+    `method`/`reroute` must be the ones `deps` was built with; they decide
+    which buffers are required and how they map onto each block's data
+    arguments. Every buffer is a raw device buffer (a DataHandle's `.data`),
+    n_flat-sized, caller-allocated - this factory allocates nothing.
+
+    Required in every combination: `rec` (the authoritative receiver buffer,
+    read at entry, resolved on return), `z`, `bid`, `rec_jump`, `z_prime`,
+    `is_border`, `basin_saddle`, `basin_saddlenode`, `outlet`. reroute="jump"
+    and method="vanilla"+reroute="carve" additionally need `rerouted`; that
+    same vanilla carve additionally needs `tag`, `tag_alt` and `rec_scratch`.
+    `rerouted` is zeroed by the jump reroute itself but not by the carve one -
+    a caller wanting it to mean "rerouted by this call" zeroes it beforehand.
+
+    `n_flat` is required on cupy, where it sets the launch dimensions for the
+    Sequence's own kernel blocks (`block_size` threads per block); it is
+    unused on taichi/quadrants, which range over the buffers themselves.
+
+    Returns the compiled Sequence. It takes no arguments, holds the buffers
+    given here for its whole life, and reports the passes it took in
+    `last_trip_counts`. Destroying or repooling any of these buffers, or
+    `deps.ndep`, invalidates it - rebuild rather than patch (see
+    sequence.py's contract).
+
+    Author: B.G (07/2026)
+    """
+    if method not in _DEP_METHODS:
+        raise ValueError(f"make_depression_solver: method must be one of {sorted(_DEP_METHODS)}, got {method!r}")
+    if reroute not in _DEP_REROUTES:
+        raise ValueError(f"make_depression_solver: reroute must be one of {sorted(_DEP_REROUTES)}, got {reroute!r}")
+    _require(
+        "every combination", rec=rec, z=z, bid=bid, rec_jump=rec_jump, z_prime=z_prime,
+        is_border=is_border, basin_saddle=basin_saddle, basin_saddlenode=basin_saddlenode, outlet=outlet,
+    )
+
+    closure = backend in ("taichi", "quadrants")
+    if not closure and n_flat is None:
+        raise ValueError("make_depression_solver: n_flat is required on cupy - it sets the launch dimensions")
+
+    ndep_p = deps.ndep
+    SequenceCls = _sequence_cls(backend)
+    if closure:
+        sb = SequenceCls()
+    else:
+        sb = SequenceCls(grid=((int(n_flat) + block_size - 1) // block_size,), block=(block_size,))
+
+    sb.bind_bag(_union_bag(deps, {"ndep": ndep_p}))
+
+    sb.add_data("rec", rec)
+    sb.add_data("rec_jump", rec_jump)
+    sb.add_data("bid", bid)
+    sb.add_data("basin_saddlenode", basin_saddlenode)
+    sb.add_data("outlet", outlet)
+    if rerouted is not None:
+        sb.add_data("rerouted", rerouted)
+    if not closure:
+        sb.add_data("ndep_buf", ndep_p.get().data)
+
+    counter_refs = ("rec",) if closure else ("rec", "ndep_buf")
+
+    def zero_ndep(bag):
+        """
+        Reset the depression counter before each launch of the counting
+        kernel, which only ever accumulates into it.
+
+        Author: B.G (07/2026)
+        """
+        bag.ndep.set(0)
+
+    # basin labelling
+    label = deps.label_basins
+    if isinstance(label, RoutineBuilder):
+        _fill_routine_data(label, {"rec": rec, "bid": bid, "rec_jump": rec_jump}, "label_basins")
+        label_block = routine_step(label)
+    else:
+        label_block = kernel_step(label, ("rec", "rec_jump", "bid"))
+
+    # saddlesort - always a Routine, both backends, both methods
+    _fill_routine_data(
+        deps.saddlesort,
+        {
+            "bid": bid, "z": z, "z_prime": z_prime, "is_border": is_border,
+            "basin_saddle": basin_saddle, "basin_saddlenode": basin_saddlenode, "outlet": outlet,
+        },
+        "saddlesort",
+    )
+    saddlesort_block = routine_step(deps.saddlesort)
+
+    # reroute
+    rr = deps.reroute
+    if reroute == "carve" and method == "vanilla":
+        _require("method='vanilla', reroute='carve'", rerouted=rerouted, tag=tag, tag_alt=tag_alt, rec_scratch=rec_scratch)
+        _fill_routine_data(
+            rr,
+            {
+                "rec": rec_scratch, "rec_work": rec, "rec_jump": rec_jump, "tag": tag, "tag_alt": tag_alt,
+                "bid": bid, "basin_saddlenode": basin_saddlenode, "outlet": outlet, "rerouted": rerouted,
+            },
+            "reroute",
+        )
+        reroute_block = routine_step(rr)
+    elif reroute == "carve":
+        reroute_block = kernel_step(rr, ("rec", "basin_saddlenode", "outlet"))
+    else:
+        _require("reroute='jump'", rerouted=rerouted)
+        if isinstance(rr, RoutineBuilder):
+            _fill_routine_data(rr, {"rec": rec, "outlet": outlet, "rerouted": rerouted}, "reroute")
+            reroute_block = routine_step(rr)
+        else:
+            reroute_block = kernel_step(rr, ("rec", "outlet", "rerouted"))
+
+    def entry_passes(bag):
+        """
+        ceil(log2(max(2, ndep))) + 2 passes, or none at all when the entry
+        count is already zero.
+
+        Author: B.G (07/2026)
+        """
+        ndep = int(bag.ndep.read())
+        if ndep == 0:
+            return 0
+        return math.ceil(math.log2(max(2, ndep))) + 2
+
+    def resolved(bag):
+        """
+        True once the device reports no unresolved depression left.
+
+        Author: B.G (07/2026)
+        """
+        return int(bag.ndep.read()) == 0
+
+    sb.add_host(zero_ndep)
+    sb.add_kernel(deps.depression_counter, counter_refs)
+    sb.add_loop(
+        body=[
+            label_block,
+            saddlesort_block,
+            reroute_block,
+            host_step(zero_ndep),
+            kernel_step(deps.depression_counter, counter_refs),
+        ],
+        max_times=entry_passes,
+        until=resolved,
+    )
+    return sb.compile()
