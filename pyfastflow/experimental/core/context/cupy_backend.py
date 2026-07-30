@@ -155,6 +155,21 @@ def _split_args(argstr: str) -> list[str]:
     return parts
 
 
+def _declared_arity(template: str) -> int:
+    """
+    How many data arguments a kernel template's `__global__` signature
+    declares - the exact number its compiled form must be launched with, and
+    what CupyRoutineBuilder maps a step's data_handle_ref onto.
+
+    Author: B.G (07/2026)
+    """
+    match = _KERNEL_SIG_RE.search(template)
+    if not match:
+        raise ValueError("could not find a __global__ signature in template source")
+    argstr = match.group(2).strip()
+    return len(_split_args(argstr)) if argstr else 0
+
+
 def _walk(path: list[str], bindings: dict[str, Any]):
     """
     Resolve a dotted path against bindings, descending Bag members.
@@ -569,11 +584,12 @@ class CupyKernel(Kernel):
 
     _raw_cache: dict[str, "cp.RawModule"] = {}
 
-    def __init__(self, name: str, compiled, module: "cp.RawModule"):
+    def __init__(self, name: str, compiled, module: "cp.RawModule", arity: int):
         super().__init__()
         self.name = name
         self._compiled = compiled
         self._module = module
+        self._arity = arity
 
     @property
     def compiled(self):
@@ -600,8 +616,19 @@ class CupyKernel(Kernel):
         Launches the compiled kernel. `grid`/`block` are int or tuple launch
         dims, required since a RawModule function has no default range.
 
+        The argument count is checked against the `__global__` signature
+        first. A RawModule launch does no such check itself: the wrong number
+        of arguments reads whatever follows the packed argument buffer on the
+        device and takes the process down with it, so a plain int comparison
+        here - against a ~5 us launch - buys a named error instead of a
+        segfault with no diagnostic.
+
         Author: B.G (07/2026)
         """
+        if len(args) != self._arity:
+            raise TypeError(
+                f"kernel '{self.name}' declares {self._arity} data argument(s), got {len(args)}"
+            )
         grid = (grid,) if isinstance(grid, int) else tuple(grid)
         block = (block,) if isinstance(block, int) else tuple(block)
         return self._compiled(grid, block, tuple(args))
@@ -725,7 +752,7 @@ class CupyKernelBuilder(KernelBuilder):
             CupyKernel._raw_cache[source] = module
         _upload_param_block(module, registry, local_index)
         raw = module.get_function(name)
-        krn = CupyKernel(name, raw, module)
+        krn = CupyKernel(name, raw, module, arity=_declared_arity(template))
         krn._final_source = source
         return krn
 
@@ -848,11 +875,10 @@ class CupyRoutineBuilder(RoutineBuilder):
         template = kernel_builder.template
         if template is None:
             raise ValueError("add_kernel: kernel_builder has no ingested template")
-        match = _KERNEL_SIG_RE.search(template)
-        if not match:
-            raise ValueError("add_kernel: could not find a __global__ signature in template source")
-        argstr = match.group(2).strip()
-        return len(_split_args(argstr)) if argstr else 0
+        try:
+            return _declared_arity(template)
+        except ValueError as exc:
+            raise ValueError(f"add_kernel: {exc}") from exc
 
     def _make_caller(self, compiled_kernel, grid, block):
         grid = grid if grid is not None else self._default_grid

@@ -543,6 +543,13 @@ class ClosureRoutineBuilder(RoutineBuilder):
         ti.kernel/qd.kernel. See _fuse_group for the mechanics and the
         constraints this enforces.
 
+        A group holding a single step has nothing to splice, so it skips
+        _fuse_group and compiles that step directly. Beyond saving the
+        work, this is what lets a routine that split()s after every step -
+        one whose steps each need a global barrier, so fusing them would be
+        wrong - compile on this path at all: _fuse_group's constraints are
+        the splicer's, and a lone step is subject to none of them.
+
         `dump_source`, fused mode only, is a file path; when given, every
         generated group's source is appended to it (truncated first),
         separated by a header naming the group. No file is written when
@@ -558,6 +565,14 @@ class ClosureRoutineBuilder(RoutineBuilder):
         compiled_steps: list[_CompiledStep] = []
         data_names: list[str] = []
         for group_index, group in enumerate(self._grouped_steps()):
+            if len(group) == 1:
+                step = group[0]
+                caller = self._make_caller(step.kernel_builder.compile(), None, None)
+                compiled_steps.append(_CompiledStep(caller, step.canonical_refs))
+                for name in step.canonical_refs:
+                    if name not in data_names:
+                        data_names.append(name)
+                continue
             kernel, group_data_names = self._fuse_group(group, group_index, dump_source)
             caller = self._make_caller(kernel, None, None)
             compiled_steps.append(_CompiledStep(caller, tuple(group_data_names)))
