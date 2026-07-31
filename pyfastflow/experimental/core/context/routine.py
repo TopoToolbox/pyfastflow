@@ -252,7 +252,9 @@ class RoutineBuilder(ABC):
     and compiles them into a Routine.
 
     add_data(name, handle) registers a routine-local name for a pooled data
-    handle. add_kernel(kernel_builder, data_handle_ref=(...)) appends a step:
+    handle. fill_data(name, handle) replaces a None default registered by
+    add_data, for a factory whose real buffer isn't allocated until later.
+    add_kernel(kernel_builder, data_handle_ref=(...)) appends a step:
     `data_handle_ref` is a tuple of names, previously registered with
     add_data, mapped positionally onto the template's own declared data
     arguments. add_swap(a, b) is a build-time relabeling of which handle `a`
@@ -285,6 +287,30 @@ class RoutineBuilder(ABC):
             raise KeyError(f"add_data: '{name}' is already registered")
         self._data[name] = handle
         self._perm[name] = name
+        return self
+
+    def fill_data(self, name: str, handle: Any) -> "RoutineBuilder":
+        """
+        Replace `name`'s registered default with `handle`.
+
+        For a factory that registers add_data(name, None) because its real
+        buffer isn't allocated yet at builder-construction time (no pool of
+        its own - the caller owns the buffers). This is the sanctioned way
+        to fill such a placeholder, and to refill it: the same builder can be
+        wrapped into more than one Sequence (e.g. a solver's own Sequence and
+        a standalone one built around the same constituent builder for
+        verification), and each wrapping fills it again before its own
+        compile(). add_data itself raises on a name already registered,
+        since a second *registration* elsewhere in the tree is normally a
+        bug - fill_data is the deliberate update path, not a registration.
+
+        Raises KeyError if `name` was never registered via add_data().
+
+        Author: B.G (07/2026)
+        """
+        if name not in self._data:
+            raise KeyError(f"fill_data: '{name}' is not registered - call add_data() first")
+        self._data[name] = handle
         return self
 
     def add_kernel(

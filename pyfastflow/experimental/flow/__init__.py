@@ -669,13 +669,12 @@ def _fill_routine_data(routine_builder, table: dict, label: str) -> None:
 
     The flow block modules register their routines' data names as
     `add_data(name, None)` placeholders, since those factories take no pool
-    and the buffers are the caller's. RoutineBuilder offers no public way to
-    replace an already-registered placeholder - add_data raises on a name it
-    already holds - so this writes the builder's data table directly. It has
-    to be the registered defaults rather than a call-time override: a Routine
-    compiled by a Sequence on cupy is graph-captured, and a captured Routine
-    both warms up against its registered handles and rejects call-time
-    overrides outright (see cupy_backend.py, _CapturedRoutine).
+    and the buffers are the caller's. It has to be the registered defaults
+    rather than a call-time override: a Routine compiled by a Sequence on
+    cupy is graph-captured, and a captured Routine both warms up against its
+    registered handles and rejects call-time overrides outright (see
+    cupy_backend.py, _CapturedRoutine). fill_data() is RoutineBuilder's
+    sanctioned way to replace such a placeholder.
 
     Author: B.G (07/2026)
     """
@@ -684,7 +683,7 @@ def _fill_routine_data(routine_builder, table: dict, label: str) -> None:
     if missing:
         raise KeyError(f"make_depression_solver: {label} needs data for {sorted(missing)}")
     for name in registered:
-        registered[name] = table[name]
+        routine_builder.fill_data(name, table[name])
 
 
 def _require(label: str, **buffers):
