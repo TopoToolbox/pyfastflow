@@ -220,6 +220,18 @@ copy (bound to `rec_scratch`) and the authoritative one (bound to `rec`) -
 see build_reroute_carve_vanilla, whose last step copies the working buffer
 back into the authoritative one.
 
+make_fill_reconstruct/make_fill_reconstruct_solver: a standalone alternative
+to make_depressions/make_depression_solver, not a `method` of it - grayscale
+morphological reconstruction against elevation, converging `filled`/`parent`
+(the receiver graph) directly with no basin ids, saddle search or outlet
+routing at all. Ported from
+../../../experimental/LM/fill_reconstruct_optimised.py; see that pair's own
+docstrings and the block modules' section notes above build_fill_reconstruct_*
+for the algorithm, the combined-buffer frontier ping-pong a Sequence's
+fixed-at-compile-time data handles require, and the two closure-backend
+substitutions (no 3-arg `range()`, `atomic_max` standing in for `atomicExch`)
+verified before use.
+
 Author: B.G (07/2026)
 """
 
@@ -374,6 +386,26 @@ def _resolve_n_flat(grid: Bag, n_flat) -> int:
             "make_accumulation: grid.nx/grid.ny are not const-mode - pass n_flat explicitly"
         )
     return nx * ny
+
+
+def _resolve_nx_ny(grid: Bag) -> tuple:
+    """
+    (nx, ny) as plain python ints - raises if grid.nx/grid.ny are not in
+    "const" mode. Unlike _resolve_n_flat there is no override argument: the
+    row-length/row-count split (not just their product) is load-bearing for
+    make_fill_reconstruct's directional sweeps, so there is nothing sensible
+    to fall back to when it is unavailable.
+
+    Author: B.G (07/2026)
+    """
+    nx = grid.nx.get()
+    ny = grid.ny.get()
+    if not isinstance(nx, int) or not isinstance(ny, int):
+        raise ValueError(
+            "make_fill_reconstruct: grid.nx/grid.ny are not const-mode - a fixed-shape "
+            "grid is required for the directional sweep kernels"
+        )
+    return nx, ny
 
 
 def make_accumulation(
@@ -865,5 +897,209 @@ def make_depression_solver(
         ],
         max_times=entry_passes,
         until=resolved,
+    )
+    return sb.compile()
+
+
+# ---------------------------------------------------------------------------
+# fill by grayscale morphological reconstruction - a standalone alternative
+# to make_depressions/make_depression_solver, not a variant of it: no basin
+# ids, no saddle search, no outlet routing - one frontier-relaxation kernel
+# converging `filled`/`parent` (the receiver graph) directly to a fixed
+# point. Ported from experimental/LM/fill_reconstruct_optimised.py - see
+# that file's module docstring for the algorithm's derivation and every
+# optimisation round it documents, and _cupy_blocks.py's/_closure_blocks.py's
+# own section notes above build_fill_reconstruct_* for what changed to make
+# it fit this framework's Sequence-driven, data-args-fixed-at-compile-time
+# shape.
+# ---------------------------------------------------------------------------
+
+
+def make_fill_reconstruct(
+    backend: str,
+    grid: Bag,
+    pass_p,
+    *,
+    n_flat: int | None = None,
+) -> Bag:
+    """
+    Build one reconstruction-fill Bag: `init_filled`, `sweep_row_lr`,
+    `sweep_row_rl`, `sweep_col_tb`, `sweep_col_bt`, `frontier_init`, `relax`
+    (all KernelBuilders, data args per _cupy_blocks.py's/_closure_blocks.py's
+    build_fill_reconstruct_* docstrings) plus `pass_p` itself.
+
+    `pass_p` is a caller-allocated scalar i32 Parameter (mode "scalar"),
+    required - not built here, the same way make_depressions takes
+    `depression_counter_p`: this factory takes no pool, every scratch buffer
+    is a caller-supplied data arg. `relax` reads it every launch
+    (`$P.get(0)$`/`_P.get(0)`) to index `counters[]` and to pick which half
+    of the combined `frontier` buffer is this pass's input - bumping it
+    between passes is make_fill_reconstruct_solver's job, not this one's.
+
+    `n_flat` defaults to grid.nx.get() * grid.ny.get(), same as
+    make_accumulation; the row-length/row-count split the sweeps need
+    (`_resolve_nx_ny`) always requires const-mode grid dimensions, with no
+    override.
+
+    Author: B.G (07/2026)
+    """
+    backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
+    KernelCls = _kernel_cls(backend)
+    blocks = _blocks_for(backend)
+    n_flat_resolved = _resolve_n_flat(grid, n_flat)
+    nx, ny = _resolve_nx_ny(grid)
+    closure = backend in ("taichi", "quadrants")
+
+    if closure:
+        init_filled = blocks.build_fill_reconstruct_init(KernelCls, backend=backend, backend_mod=backend_mod, grid=grid)
+        sweeps = blocks.build_fill_reconstruct_sweeps(
+            KernelCls, backend=backend, backend_mod=backend_mod, nx=nx, ny=ny
+        )
+        frontier_init = blocks.build_fill_reconstruct_frontier_init(KernelCls, backend=backend, backend_mod=backend_mod)
+        relax = blocks.build_fill_reconstruct_relax(
+            KernelCls, backend=backend, backend_mod=backend_mod, grid=grid, pass_p=pass_p, n_flat=n_flat_resolved,
+        )
+    else:
+        init_filled = blocks.build_fill_reconstruct_init(KernelCls, grid=grid, n_flat=n_flat_resolved)
+        sweeps = blocks.build_fill_reconstruct_sweeps(KernelCls, nx=nx, ny=ny)
+        frontier_init = blocks.build_fill_reconstruct_frontier_init(KernelCls, n_flat=n_flat_resolved)
+        relax = blocks.build_fill_reconstruct_relax(KernelCls, grid=grid, pass_p=pass_p, n_flat=n_flat_resolved)
+
+    out: dict = {
+        "init_filled": init_filled, "frontier_init": frontier_init, "relax": relax,
+        "pass_p": pass_p, "grid": grid,
+    }
+    for name, kb in sweeps.items():
+        out[f"sweep_{name}"] = kb
+    return Bag(out)
+
+
+def _read_frontier_count(backend: str, counters, p: int) -> int:
+    """
+    `counters[p]` as a plain python int, synchronizing first - the one
+    device readback make_fill_reconstruct_solver's loop predicate needs each
+    pass, mirroring Parameter.read()'s own sync-then-return contract for a
+    raw buffer that isn't a Parameter.
+
+    Author: B.G (07/2026)
+    """
+    if backend == "cupy":
+        return int(counters[p].get())
+    return int(counters[p])
+
+
+def make_fill_reconstruct_solver(
+    backend: str,
+    deps: Bag,
+    *,
+    z=None,
+    filled=None,
+    parent=None,
+    frontier=None,
+    counters=None,
+    queued_gen=None,
+    n_flat: int | None = None,
+    block_size: int = 256,
+    max_passes: int | None = None,
+):
+    """
+    Compile the reconstruction-fill outer loop over a Bag from
+    make_fill_reconstruct, as a Sequence:
+
+        init_filled; sweep_row_lr; sweep_row_rl; sweep_col_tb; sweep_col_bt;
+        frontier_init -> counters[0]
+        pass_p = 0
+        loop max_times = max_passes:
+            relax(pass_p)
+            pass_p += 1
+            until counters[pass_p] == 0
+
+    Every buffer is a raw device buffer (a DataHandle's `.data`),
+    caller-allocated - this factory allocates nothing, matching
+    make_depression_solver. Required: `z` (n_flat,), `filled` (n_flat,),
+    `parent` (n_flat,) i32 - `filled`/`parent` need no caller-side init,
+    `init_filled` seeds both; `frontier` (2*n_flat,) i32 - the two ping-pong
+    halves combined into one buffer (see make_fill_reconstruct's module
+    note), needs no caller-side init either; `counters` (max_passes+2,) i32,
+    must be **zeroed once, by the caller, before the first call** - every
+    pass writes a slot it never reuses (`counters[p+1]`), so it never needs
+    zeroing again, the same trick `queued_gen` uses; `queued_gen` (n_flat,)
+    i32, must be **filled with -1 once, by the caller, before the first
+    call** for the same reason.
+
+    `n_flat` is required on cupy, where it sets the launch dimensions for
+    every kernel in this Sequence; unused on taichi/quadrants.
+
+    `max_passes` defaults to `4 * max(nx, ny)` (nx, ny read off `deps.grid`) -
+    generous headroom over the measured ~0.6x that ratio in
+    experimental/LM/fill_reconstruct_optimised.py. Reaching it without the
+    frontier emptying is not raised here (a Sequence loop simply stops after
+    max_times body iterations - see sequence.py); check
+    `solver.last_trip_counts[-1] < max_passes` after calling if that
+    matters to the caller.
+
+    Returns the compiled Sequence. It takes no arguments and reports the
+    passes it actually took in `last_trip_counts[-1]` (the loop is the only
+    loop block here, so there is exactly one entry).
+
+    Author: B.G (07/2026)
+    """
+    _require(
+        "make_fill_reconstruct_solver", z=z, filled=filled, parent=parent,
+        frontier=frontier, counters=counters, queued_gen=queued_gen,
+    )
+    closure = backend in ("taichi", "quadrants")
+    if not closure and n_flat is None:
+        raise ValueError("make_fill_reconstruct_solver: n_flat is required on cupy - it sets the launch dimensions")
+
+    pass_p = deps.pass_p
+    SequenceCls = _sequence_cls(backend)
+    if closure:
+        sb = SequenceCls()
+    else:
+        sb = SequenceCls(grid=((int(n_flat) + block_size - 1) // block_size,), block=(block_size,))
+
+    sb.bind_bag(_union_bag(deps, {"pass_p": pass_p}))
+
+    sb.add_data("z", z)
+    sb.add_data("filled", filled)
+    sb.add_data("parent", parent)
+    sb.add_data("frontier", frontier)
+    sb.add_data("counters", counters)
+    sb.add_data("queued_gen", queued_gen)
+
+    zpf = ("z", "filled", "parent")
+    sb.add_kernel(deps.init_filled, zpf)
+    sb.add_kernel(deps.sweep_row_lr, zpf)
+    sb.add_kernel(deps.sweep_row_rl, zpf)
+    sb.add_kernel(deps.sweep_col_tb, zpf)
+    sb.add_kernel(deps.sweep_col_bt, zpf)
+    sb.add_kernel(deps.frontier_init, ("z", "filled", "frontier", "counters"))
+
+    def zero_pass(bag):
+        """Reset pass_p to 0 before the loop - fill_reconstruct's pass 0."""
+        bag.pass_p.set(0)
+
+    def bump_pass(bag):
+        """pass_p += 1 - relax's own next launch reads the bumped value."""
+        bag.pass_p.set(int(bag.pass_p.read()) + 1)
+
+    def frontier_empty(bag):
+        """True once relax's most recent pass produced an empty frontier."""
+        p = int(bag.pass_p.read())
+        return _read_frontier_count(backend, counters, p) == 0
+
+    if max_passes is None:
+        nx, ny = _resolve_nx_ny(deps.grid)
+        max_passes = 4 * max(nx, ny)
+
+    sb.add_host(zero_pass)
+    sb.add_loop(
+        body=[
+            kernel_step(deps.relax, ("z", "filled", "parent", "frontier", "counters", "queued_gen")),
+            host_step(bump_pass),
+        ],
+        max_times=max_passes,
+        until=frontier_empty,
     )
     return sb.compile()
