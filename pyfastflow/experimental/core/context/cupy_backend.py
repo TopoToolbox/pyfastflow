@@ -911,7 +911,7 @@ class CupyRoutineBuilder(RoutineBuilder):
 
         return caller
 
-    def compile(self, captured: bool = True, dump_source: str | None = None) -> Routine:
+    def compile(self, captured: bool = True, dump_source: str | None = None, restore: bool = True) -> Routine:
         """
         Validate (RoutineBuilder._validate), compile every step's kernel, and
         either return a Routine that launches them in order (captured=False)
@@ -921,6 +921,23 @@ class CupyRoutineBuilder(RoutineBuilder):
         `dump_source` is accepted for signature parity with the closure
         backend's fused compile() and ignored - there is no generated source
         on this backend either way.
+
+        `restore` (captured=True only) gates step 2 below. Default True is
+        this method's original, self-contained behaviour - do not change it
+        for a standalone compile() call. `restore=False` is for
+        SequenceBuilder.compile() only (see sequence.py's
+        _routine_compile_kwargs/_snapshot_data/_restore_data): a Sequence
+        chains multiple Routines with real data dependencies between them
+        (e.g. depression routing's label_basins -> saddlesort, where
+        saddlesort's warmup needs label_basins' real output, not label_basins'
+        add_data buffers restored back to whatever pool-recycled garbage they
+        held before label_basins ever ran) - restoring after every single
+        block, independently, erases exactly the output the next block's own
+        warmup depends on. With restore=False this method still warms up and
+        still captures (both matter on their own - see 1 and 3 below) but
+        leaves the warmup's real effect in place for the next block to
+        consume; the Sequence takes over doing exactly one restore, globally,
+        after every block in the chain has had its turn.
 
         captured=False is exactly RoutineBuilder.compile's base behaviour:
         one host-side launch per step, every call. It is the reference the
@@ -942,13 +959,15 @@ class CupyRoutineBuilder(RoutineBuilder):
            first-launch cost CUDA's capture machinery would rather not see
            mid-capture (a launch that fails or behaves unusually the first
            time either fails the capture outright or bakes in a broken graph
-           node).
-        2. Restores every data buffer this routine reaches (add_data's
-           handles) to the values it captured a copy of before warming up
-           - a warmup launch is a real launch and actually computes into
-           those buffers, and compile() otherwise would not be the
-           side-effect-free operation every other compile() in this
-           package is.
+           node). Unconditional - a Sequence block still needs this real
+           first launch before its own capture, restore=False or not.
+        2. If `restore`: restores every data buffer this routine reaches
+           (add_data's handles) to the values it captured a copy of before
+           warming up - a warmup launch is a real launch and actually
+           computes into those buffers, and compile() otherwise would not be
+           the side-effect-free operation every other compile() in this
+           package is. Skipped when the caller (a Sequence) is taking over
+           this responsibility globally instead - see `restore` above.
         3. Captures the same step sequence again, on a dedicated
            non-blocking stream, via cp.cuda.Stream.begin_capture() /
            end_capture(). Nothing on that stream executes during capture -
@@ -1004,15 +1023,18 @@ class CupyRoutineBuilder(RoutineBuilder):
         # first-launch cost happens before capture starts, not during it -
         # the module itself is already built and its constant block already
         # uploaded, by compile() just above.
-        snapshots = {name: buf.copy() for name, buf in defaults.items()}
+        snapshots = {name: buf.copy() for name, buf in defaults.items()} if restore else None
         _launch_all()
         cp.cuda.Device().synchronize()
 
         # 2. undo the warmup launch's real effect - compile() must not leave
-        # the caller's buffers different from how it found them.
-        for name, buf in defaults.items():
-            buf[...] = snapshots[name]
-        cp.cuda.Device().synchronize()
+        # the caller's buffers different from how it found them. Skipped
+        # when restore=False (see the `restore` parameter doc above) - the
+        # caller (a Sequence) is taking over this responsibility globally.
+        if restore:
+            for name, buf in defaults.items():
+                buf[...] = snapshots[name]
+            cp.cuda.Device().synchronize()
 
         # 3. capture the same sequence on a dedicated stream.
         mempool = cp.get_default_memory_pool()
@@ -1080,3 +1102,29 @@ class CupySequenceBuilder(SequenceBuilder):
             return compiled_kernel(*args, grid=grid, block=block)
 
         return caller
+
+    def _routine_compile_kwargs(self) -> dict:
+        """
+        restore=False - see CupyRoutineBuilder.compile()'s `restore`
+        parameter and SequenceBuilder._snapshot_data's docstring.
+
+        Author: B.G (07/2026)
+        """
+        return {"restore": False}
+
+    def _snapshot_data(self):
+        """
+        One real device-side copy per add_data() buffer. See
+        SequenceBuilder._snapshot_data's docstring for why this brackets
+        the whole compile() call rather than each block's own compile().
+
+        Author: B.G (07/2026)
+        """
+        return {name: handle.copy() for name, handle in self._data.items()}
+
+    def _restore_data(self, snapshot) -> None:
+        if snapshot is None:
+            return
+        for name, handle in snapshot.items():
+            self._data[name][...] = handle
+        cp.cuda.Device().synchronize()

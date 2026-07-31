@@ -447,6 +447,60 @@ class SequenceBuilder(ABC):
         """
         ...
 
+    def _routine_compile_kwargs(self) -> dict:
+        """
+        Extra kwargs for a Routine block's own builder.compile() call, one
+        per distinct RoutineBuilder identity (see _compile_block's
+        routine_cache). Empty on Taichi/Quadrants - fused compile() has no
+        such knob, and no need for one: fusion generates one kernel per
+        Routine, no per-step real launch happens at compile time at all, so
+        there is nothing here for a later block to see, correctly or not.
+
+        CupySequenceBuilder overrides this to pass restore=False - see
+        CupyRoutineBuilder.compile()'s `restore` parameter and
+        _snapshot_data/_restore_data below for why.
+
+        Author: B.G (07/2026)
+        """
+        return {}
+
+    def _snapshot_data(self):
+        """
+        An opaque, backend-defined snapshot of every add_data() buffer this
+        Sequence reaches, taken once before any block compiles - paired with
+        _restore_data, taken once after every block (loop bodies included)
+        has compiled. No-op (returns None) except on cupy.
+
+        Why this exists: a captured cupy Routine's compile() warms up with a
+        real launch, computing real values into its buffers - by design,
+        see CupyRoutineBuilder.compile()'s docstring point 1. Two Routine
+        blocks in the same Sequence with a real data dependency between them
+        (block B reads what block A's real output is meant to be, e.g.
+        depression routing's saddlesort reading label_basins' `bid`) need
+        that real value from A still in the buffer when B's own warmup runs
+        - which means restoring after every individual block's compile(),
+        independently, is wrong: it erases A's real output before B's
+        warmup ever sees it, leaving B's warmup to run on whatever the
+        buffer held before A ran at all (uninitialised/pool-recycled
+        garbage on a fresh build - proven to reach illegal array indices and
+        crash, not just compute a wrong answer). One snapshot before
+        anything compiles, one restore after everything has, lets each
+        block's warmup see the previous block's genuine output while still
+        leaving the Sequence's compile() side-effect-free overall, matching
+        every other compile() in this package.
+
+        Author: B.G (07/2026)
+        """
+        return None
+
+    def _restore_data(self, snapshot) -> None:
+        """
+        Undo _snapshot_data's effect. No-op when `snapshot` is None (every
+        backend but cupy, or a Sequence that registered no data at all).
+
+        Author: B.G (07/2026)
+        """
+
     def _flat_blocks(self) -> list[tuple[str, _Block]]:
         """
         Every block of this Sequence paired with a path naming where it sits,
@@ -546,7 +600,7 @@ class SequenceBuilder(ABC):
         key = id(block.builder)
         routine = routine_cache.get(key)
         if routine is None:
-            routine = block.builder.compile()
+            routine = block.builder.compile(**self._routine_compile_kwargs())
             routine_cache[key] = routine
         if block.data_handle_ref:
             if len(block.data_handle_ref) != len(routine.data_names):
@@ -570,10 +624,20 @@ class SequenceBuilder(ABC):
         loop's `max_times` and `until` are kept as given and evaluated on the
         host while the Sequence runs.
 
+        _snapshot_data/_restore_data (cupy only - see their docstrings)
+        bracket the whole compile loop, not each block: every Routine
+        block's own compile() warms up for real and (via
+        _routine_compile_kwargs' restore=False) leaves that real output in
+        place for the next block, so data genuinely flows block to block
+        exactly as it would at runtime, and only the Sequence's own
+        snapshot, taken before any of this starts, is restored - once - at
+        the end.
+
         Author: B.G (07/2026)
         """
         self._validate()
 
+        snapshot = self._snapshot_data()
         routine_cache: dict[int, Any] = {}
         compiled: list[_CompiledBlock] = []
         for i, block in enumerate(self._blocks):
@@ -585,4 +649,5 @@ class SequenceBuilder(ABC):
                 compiled.append(_CompiledBlock("loop", body=body, max_times=block.max_times, until=block.until))
             else:
                 compiled.append(self._compile_block(f"block{i}", block, routine_cache))
+        self._restore_data(snapshot)
         return Sequence(compiled, self._bag)
