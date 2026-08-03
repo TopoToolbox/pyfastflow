@@ -30,6 +30,7 @@ from typing import Any
 
 from ..pool.base import new_uid
 from .bag import Bag, from_builder
+from .need import Kind, Need
 from .parameter import Parameter
 
 
@@ -325,11 +326,14 @@ class CompileBuilder(ABC):
     Author: B.G (07/2026)
     """
 
-    def __init__(self):
+    def __init__(self, *needs: Need):
         self._uid = new_uid()
         self._bindings: dict[str, Any] = {}
         self._bag_names: set[str] = set()
         self._template = None
+        self._needs: dict[str, Need] = {}
+        if needs:
+            self.need(*needs)
 
     @property
     def uid(self) -> int:
@@ -390,6 +394,84 @@ class CompileBuilder(ABC):
             self.bind(name, item)
             self._bag_names.add(name)
         return self
+
+    def need(self, *needs: Need) -> "CompileBuilder":
+        """
+        Declare that this builder's template references each of `needs` by
+        its own `.name` - the single contract PARAM/DATA/HELPER bindings all
+        go through now (see need.py's module docstring). Declaring a Need
+        does not bind it; call `.bind()` on the Need object itself,
+        independently of this builder, whenever the concrete object is
+        available - two builders declaring the *same* Need object share its
+        binding, by identity, not by matching name strings.
+
+        Author: B.G (08/2026)
+        """
+        for n in needs:
+            self._needs[n.name] = n
+        return self
+
+    @property
+    def needs(self) -> dict[str, Need]:
+        """
+        This builder's own declared needs, by name. Read-only - go through
+        need() to add more.
+
+        Author: B.G (08/2026)
+        """
+        return self._needs
+
+    @property
+    def data_needs(self) -> tuple[Need, ...]:
+        """
+        This builder's own declared kind=DATA needs, in declaration order -
+        the contract a compiled Kernel/Routine validates call-time arguments
+        against. Does not include a bound HELPER need's own data needs: a
+        helper never takes call-time data arguments of its own (only a
+        Kernel/Routine's top-level template does), so there is nothing to
+        flatten here the way unmet_needs() flattens PARAM/HELPER.
+
+        Author: B.G (08/2026)
+        """
+        return tuple(n for n in self._needs.values() if n.kind is Kind.DATA)
+
+    def unmet_needs(self) -> list[Need]:
+        """
+        Every currently-unbound need this builder requires, flattened with
+        whatever a bound kind=HELPER need's own HelperBuilder still needs
+        (recursively - automatic flattening, all the way down). Empty means
+        compile() may proceed.
+
+        Author: B.G (08/2026)
+        """
+        unmet: list[Need] = []
+        for n in self._needs.values():
+            unmet.extend(n.unmet_needs())
+        return unmet
+
+    def _resolve_needs(self) -> None:
+        """
+        Raise, listing every unmet need by name and kind, if this builder (or
+        anything it transitively needs through a bound HELPER need) is not
+        fully bound. Otherwise copy every bound PARAM/HELPER need's value
+        into `self._bindings` under its own name, so the existing
+        resolve_binding/AST-scan/cupy-span pipeline sees exactly what it
+        always has - a plain name -> object dict - without needing to know
+        Need exists. kind=DATA needs are deliberately never copied into
+        `self._bindings`: they stay call-time arguments, validated instead
+        via `data_needs` by whichever concrete compile() wires that check in.
+
+        Every concrete compile() must call this first.
+
+        Author: B.G (08/2026)
+        """
+        unmet = self.unmet_needs()
+        if unmet:
+            listing = ", ".join(f"{n.name!r} ({n.kind.value})" for n in unmet)
+            raise ValueError(f"cannot compile: unmet needs: {listing}")
+        for n in self._needs.values():
+            if n.kind is not Kind.DATA:
+                self._bindings[n.name] = n.value
 
     def ingest(self, template) -> "CompileBuilder":
         """

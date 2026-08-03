@@ -74,6 +74,7 @@ import numpy as np
 
 from .bag import Bag
 from .compile import HelperBuilder, Kernel, KernelBuilder, _SpecializedHelper, _SpecializeCtx
+from .need import Need
 from .parameter import MODES, Parameter
 from .routine import Routine, RoutineBuilder, _CompiledStep
 from .sequence import SequenceBuilder
@@ -601,12 +602,17 @@ class CupyKernel(Kernel):
 
     _raw_cache: dict[str, "cp.RawModule"] = {}
 
-    def __init__(self, name: str, compiled, module: "cp.RawModule", arity: int):
+    def __init__(self, name: str, compiled, module: "cp.RawModule", arity: int, data_needs: tuple = ()):
         super().__init__()
         self.name = name
         self._compiled = compiled
         self._module = module
         self._arity = arity
+        # declared kind=DATA Needs (see need.py), positional, from the
+        # KernelBuilder that produced this Kernel - empty for a builder that
+        # never declared any (compile()/__call__ then behave exactly as
+        # before Need existed: only the arity check below runs).
+        self._data_needs = data_needs
 
     @property
     def compiled(self):
@@ -646,6 +652,12 @@ class CupyKernel(Kernel):
             raise TypeError(
                 f"kernel '{self.name}' declares {self._arity} data argument(s), got {len(args)}"
             )
+        if self._data_needs:
+            # dtype-validates each positional arg against its declared Need
+            # (see need.py) - re-binding a kind=DATA Need never freezes it,
+            # so this runs every call, not just the first.
+            for need, arg in zip(self._data_needs, args):
+                need.bind(arg)
         grid = (grid,) if isinstance(grid, int) else tuple(grid)
         block = (block,) if isinstance(block, int) else tuple(block)
         return self._compiled(grid, block, tuple(args))
@@ -741,6 +753,7 @@ class CupyKernelBuilder(KernelBuilder):
 
         Author: B.G (07/2026)
         """
+        self._resolve_needs()
         ctx = _SpecializeCtx()
         ctx.cupy_ptr_registry = {}
         ctx.cupy_local_index = {}
@@ -769,7 +782,7 @@ class CupyKernelBuilder(KernelBuilder):
             CupyKernel._raw_cache[source] = module
         _upload_param_block(module, registry, local_index)
         raw = module.get_function(name)
-        krn = CupyKernel(name, raw, module, arity=_declared_arity(template))
+        krn = CupyKernel(name, raw, module, arity=_declared_arity(template), data_needs=self.data_needs)
         krn._final_source = source
         return krn
 

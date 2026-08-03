@@ -17,7 +17,7 @@ receivers kernel.
 `mode` ("steepest"|"stochastic") and `h_aware` (False: kernel takes (z, rec)
 and slopes read h as 0; True: kernel takes (z, h, rec) and slopes use
 (zi-zj)+(hi-hj)) each pick one of four kernel body variants at build time -
-see _closure_blocks.py/_cupy_blocks.py's build_receivers. mode="stochastic"
+see _closure_receivers.py/_cupy_receivers.py's build_receivers. mode="stochastic"
 additionally requires `seed_p`, a scalar or const Parameter the RNG hash
 mixes in alongside the node index and neighbour direction (see rand_unit in
 the block modules) - the host bumps it between calls for a fresh draw.
@@ -25,7 +25,7 @@ the block modules) - the host bumps it between calls for a fresh draw.
 `diagonal_partition_correction` only changes anything on a D8 grid: it swaps
 the corrected distance/slope helpers in for the grid's own dist_from_k/
 dist_between_nodes, dividing the diagonal-neighbour distance by sqrt(2) (see
-_closure_blocks.py's build_distance_slope_helpers for exactly which k values
+_closure_receivers.py's build_distance_slope_helpers for exactly which k values
 count as diagonal and why). Off, or on a D4 grid, dist_from_k_corrected and
 dist_between_nodes_corrected are simply the grid's own helpers, unchanged.
 
@@ -67,7 +67,7 @@ scalar or field all work with no variant code, since every template reads
     receiver graph (run after depression handling) - a cycle degrades the
     result (the walk gives up once its guard counter reaches n_flat) rather
     than hanging.
-  - "rake_compress": a RoutineBuilder (see _closure_blocks.py's
+  - "rake_compress": a RoutineBuilder (see _closure_accum.py's
     build_rake_compress) plus its constituent KernelBuilders, keyed
     "zero_init", "reset_iteration", "bump_iteration", "decrement_iteration",
     "q_init", "receivers_to_donors", "rake_compress_accum",
@@ -82,11 +82,11 @@ scalar or field all work with no variant code, since every template reads
     a plain call argument (see pyfastflow/general_algorithms/pingpong.py);
     the routine's own "reset_iteration" step zeros it every call, so the
     caller never has to remember to reset it between calls.
-  - "pointer_jump_push": a RoutineBuilder (see _closure_blocks.py's
+  - "pointer_jump_push": a RoutineBuilder (see _closure_accum.py's
     build_pointer_jump_push) plus its constituent KernelBuilders, keyed
     "q_init", "copy_rec_to_work", and (closure backends)
     "accum_pointer_jump_push_step" or (cupy, split into two launches for a
-    real barrier between the copy and the push - see _cupy_blocks.py)
+    real barrier between the copy and the push - see _cupy_accum.py)
     "accum_pointer_jump_push_step_copy"/"accum_pointer_jump_push_step_core".
 
 Both RoutineBuilder methods register their data names as placeholders
@@ -158,14 +158,14 @@ by Bag member:
                           _SpanParser._register_ptr), so the caller instead
                           passes `ndep_p.get().data` positionally, same as
                           `rec` - see build_depression_counter in
-                          _cupy_blocks.py. Either way the caller must
+                          _cupy_depressions.py. Either way the caller must
                           ndep_p.set(0) before each launch (mirrors
                           ops.Reduce.run_sum).
   "copy_field":           (src, dst) i32        -> dst[:] = src[:]
   "label_basins" (vanilla): Routine, data names ("rec", "bid", "rec_jump")
   "label_basins" (optimized, closure): Kernel, data args (rec, rec_jump, bid)
   "label_basins" (optimized, cupy): Routine, data names ("rec", "rec_jump", "bid")
-    - see _closure_blocks.py/_cupy_blocks.py's build_basin_labelling_* for
+    - see _closure_depressions.py/_cupy_depressions.py's build_basin_labelling_* for
       why cupy needs three real launches where a closure backend needs one.
   "saddlesort":           Routine (6 kernels, unchanged by `method`), data
                           names ("bid", "z", "z_prime", "is_border",
@@ -186,13 +186,13 @@ make_accumulation's own routine+constituent-kernels convention.
 
 `reroute_jump`'s pit write is deliberately `rec[i - 1]`, not `rec[i]`: the
 loop is over basin ids and basin id = pit index + 1 - ported exactly as
-legacy has it, not "fixed" - see _closure_blocks.py's build_reroute_jump.
+legacy has it, not "fixed" - see _closure_depressions.py's build_reroute_jump.
 
 `ops.bitpack` (pack/unpack_value/unpack_index) replaces legacy's
 f32_i32_struct module for the lexicographic (elevation, target-basin) and
 (elevation, node) argmins saddlesort's atomic_min passes need; on cupy,
 i64 atomic_min is a CAS loop (CUDA has no native atomicMin over signed long
-long) - see _cupy_blocks.py's build_atomic_min_ll.
+long) - see _cupy_depressions.py's build_atomic_min_ll.
 
 make_depressions builds the routines/kernels only. make_depression_solver
 wraps that Bag into the outer host-driven loop the algorithm needs, as a
@@ -236,6 +236,7 @@ Author: B.G (07/2026)
 """
 
 import math
+from importlib import import_module
 
 from ..core.context.bag import Bag
 from ..core.context.backends import backend_classes
@@ -248,20 +249,27 @@ _MODES = frozenset({"steepest", "stochastic"})
 _ACCUM_METHODS = frozenset({"atomic", "rake_compress", "pointer_jump_push"})
 
 
-def _blocks_for(backend: str):
+def _blocks_for(backend: str, section: str):
     """
-    The private block module implementing make_receivers's device code for
-    one backend name.
+    The private block module implementing one flow section's device code
+    for one backend name - e.g. ("cupy", "depressions") -> _cupy_depressions.
+
+    `section` is one of "receivers", "accum", "depressions", "reconstruct" -
+    each has its own {_cupy,_closure}_<section>.py module
+    (see those modules' own docstrings for why: flow used to keep every
+    algorithm's blocks in one _cupy_blocks.py/_closure_blocks.py pair, split
+    apart per algorithm since none of them share device code with each
+    other).
 
     Author: B.G (07/2026)
     """
     if backend in ("taichi", "quadrants"):
-        from . import _closure_blocks as blocks
+        prefix = "_closure"
     elif backend == "cupy":
-        from . import _cupy_blocks as blocks
+        prefix = "_cupy"
     else:
-        raise ValueError(f"make_receivers: unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
-    return blocks
+        raise ValueError(f"unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
+    return import_module(f".{prefix}_{section}", __package__)
 
 
 def _kernel_cls(backend: str):
@@ -316,7 +324,7 @@ def make_receivers(
 
     backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
     KernelCls = _kernel_cls(backend)
-    blocks = _blocks_for(backend)
+    blocks = _blocks_for(backend, "receivers")
     hash_u32 = make_hash_u32(backend) if mode == "stochastic" else None
 
     if backend in ("taichi", "quadrants"):
@@ -416,18 +424,50 @@ def make_accumulation(
     method: str = "rake_compress",
     n_flat: int | None = None,
     iteration_p=None,
+    fr_stage: int = 2048,
+    blocks_per_sm: int = 2,
+    threads: int = 256,
 ) -> Bag:
     """
     Build one accumulation Bag for `method` "atomic"|"rake_compress"|
-    "pointer_jump_push" - see the module docstring for what each returns and
-    the RoutineBuilder methods' data_names/fused=False conventions.
+    "pointer_jump_push"|"persistent_mfd" - see the module docstring for what
+    each returns and the RoutineBuilder methods' data_names/fused=False
+    conventions.
 
     `source` is a Parameter in any mode (const/scalar/field). `iteration_p`
     is required, and only used, for method="rake_compress". `n_flat`
     defaults to grid.nx.get() * grid.ny.get() (see _resolve_n_flat).
 
+    `method="persistent_mfd"` is cupy-only (raises for any other backend -
+    see _cupy_mfd_accum.py's module docstring for why there is, and will
+    never be, a closure-backend equivalent): a persistent-kernel,
+    level-synchronous MFD accumulation over a caller-supplied receiver mask
+    (`dirs`, u8) + dense per-direction weights (`mfd_w`, f32, this grid's
+    n_neighbours values per cell) + `indegree` - this factory does not build
+    MFD topology, only accumulates over one already built. Returns a Bag
+    with "q_init" (data arg (accum,)) and "accum" (data args (frontier0,
+    frontier1, count, barrier, dirs, mfd_w, accum, indegree), launched with
+    `persistent_grid_block(blocks_per_sm=blocks_per_sm, threads=threads)`'s
+    fixed (grid, block), not n_flat-sized). `fr_stage`/`blocks_per_sm`/
+    `threads` are only used by this method.
+
     Author: B.G (07/2026)
     """
+    if method == "persistent_mfd":
+        if backend != "cupy":
+            raise ValueError(
+                f"make_accumulation: method='persistent_mfd' is cupy-only (got backend={backend!r}) - "
+                "see _cupy_mfd_accum.py's module docstring for why there is no closure-backend equivalent"
+            )
+        from . import _cupy_mfd_accum
+
+        n_flat_resolved = _resolve_n_flat(grid, n_flat)
+        KernelCls = _kernel_cls(backend)
+        kbs = _cupy_mfd_accum.build_persistent_mfd(
+            KernelCls, grid=grid, source=source, n_flat=n_flat_resolved, fr_stage=fr_stage,
+        )
+        return Bag(kbs)
+
     if method not in _ACCUM_METHODS:
         raise ValueError(f"make_accumulation: method must be one of {sorted(_ACCUM_METHODS)}, got {method!r}")
     if method == "rake_compress" and iteration_p is None:
@@ -435,7 +475,7 @@ def make_accumulation(
 
     backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
     KernelCls = _kernel_cls(backend)
-    blocks = _blocks_for(backend)
+    blocks = _blocks_for(backend, "accum")
     n_flat_resolved = _resolve_n_flat(grid, n_flat)
     closure = backend in ("taichi", "quadrants")
 
@@ -443,7 +483,7 @@ def make_accumulation(
         if closure:
             kb = blocks.build_atomic(KernelCls, backend=backend, backend_mod=backend_mod, source=source, n_flat=n_flat_resolved)
             return Bag({"accum": kb})
-        # cupy: two real launches, not one - see _cupy_blocks.py's
+        # cupy: two real launches, not one - see _cupy_accum.py's
         # build_atomic. "q_init" must be launched before "accum".
         kbs = blocks.build_atomic(KernelCls, source=source, n_flat=n_flat_resolved)
         return Bag(kbs)
@@ -524,7 +564,7 @@ def make_depressions(
     backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
     KernelCls = _kernel_cls(backend)
     RoutineCls = _routine_cls(backend)
-    blocks = _blocks_for(backend)
+    blocks = _blocks_for(backend, "depressions")
     n_flat_resolved = _resolve_n_flat(grid, n_flat)
     closure = backend in ("taichi", "quadrants")
     logn = math.ceil(math.log2(n_flat_resolved)) + 1
@@ -908,8 +948,9 @@ def make_depression_solver(
 # converging `filled`/`parent` (the receiver graph) directly to a fixed
 # point. Ported from experimental/LM/fill_reconstruct_optimised.py - see
 # that file's module docstring for the algorithm's derivation and every
-# optimisation round it documents, and _cupy_blocks.py's/_closure_blocks.py's
-# own section notes above build_fill_reconstruct_* for what changed to make
+# optimisation round it documents, and _cupy_reconstruct.py's/
+# _closure_reconstruct.py's own section notes above build_fill_reconstruct_*
+# for what changed to make
 # it fit this framework's Sequence-driven, data-args-fixed-at-compile-time
 # shape.
 # ---------------------------------------------------------------------------
@@ -925,8 +966,9 @@ def make_fill_reconstruct(
     """
     Build one reconstruction-fill Bag: `init_filled`, `sweep_row_lr`,
     `sweep_row_rl`, `sweep_col_tb`, `sweep_col_bt`, `frontier_init`, `relax`
-    (all KernelBuilders, data args per _cupy_blocks.py's/_closure_blocks.py's
-    build_fill_reconstruct_* docstrings) plus `pass_p` itself.
+    (all KernelBuilders, data args per _cupy_reconstruct.py's/
+    _closure_reconstruct.py's build_fill_reconstruct_* docstrings) plus
+    `pass_p` itself.
 
     `pass_p` is a caller-allocated scalar i32 Parameter (mode "scalar"),
     required - not built here, the same way make_depressions takes
@@ -945,7 +987,7 @@ def make_fill_reconstruct(
     """
     backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
     KernelCls = _kernel_cls(backend)
-    blocks = _blocks_for(backend)
+    blocks = _blocks_for(backend, "reconstruct")
     n_flat_resolved = _resolve_n_flat(grid, n_flat)
     nx, ny = _resolve_nx_ny(grid)
     closure = backend in ("taichi", "quadrants")
