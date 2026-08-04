@@ -12,6 +12,13 @@ kernel, static, u8, i32, i64 - carry the same names and the same behaviour in
 both modules. A backend subclass therefore only pins `_backend` to the ti or qd
 module; nothing else varies.
 
+`_backend` is also always available inside a template body under the
+reserved name `_BK` - specialize_closure's `extra_globals` (helper/kernel
+compile) and _fuse_group's own equivalent line inject it unconditionally, so
+a template calling `_BK.sqrt(...)` or similar never needs an explicit
+`.bind("_BK", backend_mod)` for it. An existing explicit bind under that name
+still works exactly as before - same module object either way.
+
 cupy does not appear here: CUDA source text has no globals to patch, and that
 backend substitutes into the source directly instead.
 
@@ -43,7 +50,9 @@ from .routine import Routine, RoutineBuilder, _CompiledStep, _template_label
 from .sequence import SequenceBuilder
 
 
-def specialize_closure(template, bindings: dict[str, Any], ctx: _SpecializeCtx) -> FunctionType:
+def specialize_closure(
+    template, bindings: dict[str, Any], ctx: _SpecializeCtx, *, extra_globals: "dict[str, Any] | None" = None
+) -> FunctionType:
     """
     Rebuild `template` as a new function whose globals carry the resolved
     bindings, leaving the original untouched.
@@ -55,11 +64,25 @@ def specialize_closure(template, bindings: dict[str, Any], ctx: _SpecializeCtx) 
     belongs to - it is what lets a bound HelperBuilder be specialized here,
     against these same bindings, rather than standing for a stale one.
 
+    `extra_globals`, if given, is merged in before `resolved` - see
+    ClosureHelperBuilder._specialize/ClosureKernelBuilder.compile, which pass
+    `{"_BK": self._backend}` here so a template referencing `_BK` resolves to
+    the bound ti/qd module with no explicit `.bind("_BK", ...)` call needed.
+    It is applied through plain dict.update, never through `filter_bindings`,
+    so it never appears in - and never triggers - the "bound but unused"
+    warning that scans `bindings`: a template that happens not to reference
+    `_BK` simply never sees it, and nothing was ever "bound" for it to report.
+    An explicit `_BK` entry already present in `bindings` still wins, since
+    `resolved` is applied after `extra_globals` here - auto-injection only
+    fills a gap, it never overrides a builder's own bind() call.
+
     Author: B.G (07/2026)
     """
     resolved = {name: resolve_binding(value, ctx) for name, value in bindings.items()}
     source = getattr(template, "__wrapped__", template)
     func_globals = dict(source.__globals__)
+    if extra_globals:
+        func_globals.update(extra_globals)
     func_globals.update(resolved)
 
     specialised = FunctionType(
@@ -395,10 +418,16 @@ class ClosureHelperBuilder(HelperBuilder):
         Splice the referenced bindings into the template's globals against
         `ctx`, and compile the result as a device func.
 
+        `_BK` (this builder's own `_backend`) is always available to the
+        template - see specialize_closure's `extra_globals` - so a helper
+        calling e.g. `_BK.sqrt(...)` needs no explicit `.bind("_BK", ...)`.
+
         Author: B.G (07/2026)
         """
         self._resolve_needs()
-        specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings), ctx)
+        specialised = specialize_closure(
+            self._template, filter_bindings(self._template, self._bindings), ctx, extra_globals={"_BK": self._backend}
+        )
         return ClosureHelper(specialised.__name__, self._backend.func(specialised))
 
 
@@ -419,11 +448,17 @@ class ClosureKernelBuilder(KernelBuilder):
         reachable from this kernel's bindings is specialized once, against
         these bindings - and compile the result as a launchable kernel.
 
+        `_BK` (this builder's own `_backend`) is always available to the
+        template - see specialize_closure's `extra_globals` - so a kernel
+        calling e.g. `_BK.sqrt(...)` needs no explicit `.bind("_BK", ...)`.
+
         Author: B.G (07/2026)
         """
         self._resolve_needs()
         ctx = _SpecializeCtx()
-        specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings), ctx)
+        specialised = specialize_closure(
+            self._template, filter_bindings(self._template, self._bindings), ctx, extra_globals={"_BK": self._backend}
+        )
         return ClosureKernel(specialised.__name__, self._backend.kernel(specialised), data_needs=self.data_needs)
 
 
@@ -779,6 +814,12 @@ class ClosureRoutineBuilder(RoutineBuilder):
         exec_globals.update(module_globals)
         exec_globals.update(resolved_globals)
         exec_globals[annotation_alias] = backend
+        # same auto-injection as specialize_closure's extra_globals (see its
+        # docstring) - a fused body calling `_BK.sqrt(...)` needs no step to
+        # have bound it explicitly. An explicit per-step `.bind("_BK", ...)`
+        # already landed in resolved_globals above and is the same module
+        # object either way, so this is a no-op when one exists.
+        exec_globals["_BK"] = resolved_globals.get("_BK", backend)
 
         # Name the fused function deterministically from its own content
         # rather than a process-global uid: build it under a stable

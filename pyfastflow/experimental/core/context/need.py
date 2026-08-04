@@ -32,6 +32,20 @@ on a DATA Need is only ever used to validate a *declared* dtype against
 whatever gets passed at call time, never to freeze which buffer a compiled
 object reads.
 
+kind=BAG covers the fourth shape: a slot whose value is itself a Bag
+(bag.py), for a builder reaching a group of Parameters/Helpers/nested Bags
+under one dotted name (`grid.neighbour(i, k)`) rather than one object.
+`contains=[sub_need, ...]` declares, by name, what that Bag is required to
+carry - each `sub_need` is an ordinary Need of any kind (PARAM/DATA/HELPER/
+BAG, so nesting follows Bag's own nesting) whose `.name` must appear as a
+member of the bound Bag, checked against that sub-need's own dtype/mode/
+contains exactly as if it had been bound directly. This is what makes a
+context object structurally swappable - a future irregular-grid Bag
+satisfies a `Need("grid", kind=Kind.BAG, contains=[...])` the same way the
+regular grid's Bag does, provided it carries the same named members, without
+either side knowing about the other's concrete type. Like PARAM/HELPER,
+frozen forever once bound.
+
 Author: B.G (08/2026)
 """
 
@@ -44,7 +58,8 @@ class Kind(Enum):
     What a Need's slot holds. PARAM: a Parameter (parameter.py). DATA: a raw
     buffer, checked at call time, never frozen into a compiled object. HELPER:
     a HelperBuilder (compile.py), itself possibly carrying its own unmet
-    Needs - see Need.unmet_needs.
+    Needs - see Need.unmet_needs. BAG: a Bag (bag.py) required to carry the
+    named members declared in `contains` - see the module docstring.
 
     Author: B.G (08/2026)
     """
@@ -52,6 +67,7 @@ class Kind(Enum):
     PARAM = "param"
     DATA = "data"
     HELPER = "helper"
+    BAG = "bag"
 
 
 class Need:
@@ -63,18 +79,23 @@ class Need:
     bind() time (PARAM/HELPER) - fail fast, not at compile() or worse, at a
     CUDA launch. `modes`, only meaningful for kind=PARAM, is the set of
     Parameter.mode values this slot accepts (e.g. rake_compress's
-    iteration_p needing exactly {"scalar"}) - checked the same way.
+    iteration_p needing exactly {"scalar"}) - checked the same way. `contains`,
+    only meaningful for kind=BAG, is the list of sub-Needs the bound Bag must
+    satisfy by member name - see the module docstring.
 
     Author: B.G (08/2026)
     """
 
-    def __init__(self, name: str, kind: Kind, *, dtype: Any = None, modes=None):
+    def __init__(self, name: str, kind: Kind, *, dtype: Any = None, modes=None, contains=None):
         if kind != Kind.PARAM and modes is not None:
             raise ValueError(f"Need({name!r}): modes= is only meaningful for kind=Kind.PARAM")
+        if kind != Kind.BAG and contains is not None:
+            raise ValueError(f"Need({name!r}): contains= is only meaningful for kind=Kind.BAG")
         self.name = name
         self.kind = kind
         self.dtype = dtype
         self.modes = frozenset(modes) if modes is not None else None
+        self.contains = tuple(contains) if contains is not None else (() if kind is Kind.BAG else None)
         self._bound: Any = None
         self._is_bound = False
 
@@ -112,7 +133,7 @@ class Need:
         Attach `obj` to this slot, validating its kind/dtype/mode immediately
         (bind-time checking, not compile-time or runtime).
 
-        kind=PARAM/HELPER: raises if already bound - these are frozen
+        kind=PARAM/HELPER/BAG: raises if already bound - these are frozen
         forever (see the module docstring); construct a new Need instead of
         rebinding one already in use.
         kind=DATA: never raises for "already bound" - re-binding (i.e.
@@ -121,7 +142,7 @@ class Need:
 
         Author: B.G (08/2026)
         """
-        if self.kind in (Kind.PARAM, Kind.HELPER) and self._is_bound:
+        if self.kind in (Kind.PARAM, Kind.HELPER, Kind.BAG) and self._is_bound:
             raise ValueError(
                 f"Need({self.name!r}, kind={self.kind.value}) is already bound and frozen - "
                 "construct a new Need (and a new Parameter/HelperBuilder) instead of rebinding"
@@ -139,6 +160,7 @@ class Need:
 
         Author: B.G (08/2026)
         """
+        from .bag import Bag
         from .compile import HelperBuilder
         from .parameter import Parameter
 
@@ -155,6 +177,22 @@ class Need:
         elif self.kind is Kind.DATA:
             if self.dtype is not None and getattr(obj, "dtype", None) is not None and obj.dtype != self.dtype:
                 raise TypeError(f"Need({self.name!r}, kind=data): dtype mismatch, need {self.dtype}, got {obj.dtype}")
+        elif self.kind is Kind.BAG:
+            if not isinstance(obj, Bag):
+                raise TypeError(f"Need({self.name!r}, kind=bag): expected a Bag, got {type(obj).__name__}")
+            for sub in self.contains:
+                if sub.name not in obj:
+                    raise KeyError(
+                        f"Need({self.name!r}, kind=bag): bag has no member '{sub.name}' "
+                        f"(required, kind={sub.kind.value})"
+                    )
+                member = obj[sub.name]
+                try:
+                    sub._check(member)
+                except (TypeError, ValueError, KeyError) as exc:
+                    raise type(exc)(
+                        f"Need({self.name!r}, kind=bag): member '{sub.name}': {exc}"
+                    ) from exc
         else:
             raise ValueError(f"Need({self.name!r}): unknown kind {self.kind!r}")
 
@@ -164,6 +202,17 @@ class Need:
         kind=HELPER need's HelperBuilder itself still needs (automatic
         flattening, all the way down). Empty list if this need is fully
         satisfied.
+
+        A bound kind=BAG need deliberately does *not* flatten the same way:
+        its `contains` sub-needs were already checked, once, against the
+        bound Bag's members at bind() time (see _check) - what's sitting in
+        the Bag are concrete objects the caller supplied, not further Need
+        slots waiting to be filled. Flattening into them the way HELPER
+        flattens into a HelperBuilder's still-unbound needs would ask a
+        different, meaningless question here ("are grid.neighbour's own
+        Needs unmet?" - a bound HelperBuilder has none of its own that this
+        Need's contract cares about). Do not "fix" this into matching
+        HELPER's recursion.
 
         Author: B.G (08/2026)
         """

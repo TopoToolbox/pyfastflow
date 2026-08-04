@@ -27,6 +27,15 @@ Need is the contract for the other shape - a caller in a different module
 builds an object and hands it to a factory that binds it at a distance; see
 need.py's module docstring.
 
+`CompileBuilder(strict_needs=True)` makes that contract mandatory rather than
+optional: `_bind_raw`/`bind` then refuse a name with no `.need()`-declared
+Need and forward to that Need's own `.bind()` instead of writing into
+`_bindings` unchecked - see `_bind_raw`'s docstring. This includes
+`Kind.BAG` (need.py) for a name bound to a whole Bag rather than a single
+Parameter/HelperBuilder. It is opt-in per builder instance, off by default,
+so a builder that has not been converted to declare its Needs keeps today's
+permissive behaviour with zero change.
+
 Author: B.G (07/2026)
 """
 
@@ -340,15 +349,20 @@ class CompileBuilder(ABC):
     Everything here is backend-independent. A backend supplies compile(), and
     may override ingest() if its templates need different handling.
 
+    `strict_needs=True` (default False) makes every bind()/bind_bag() call on
+    this instance require a pre-declared `.need()` for that name - see
+    _bind_raw's docstring and the module docstring's paragraph on it.
+
     Author: B.G (07/2026)
     """
 
-    def __init__(self, *needs: Need):
+    def __init__(self, *needs: Need, strict_needs: bool = False):
         self._uid = new_uid()
         self._bindings: dict[str, Any] = {}
         self._bag_names: set[str] = set()
         self._template = None
         self._needs: dict[str, Need] = {}
+        self._strict_needs = strict_needs
         if needs:
             self.need(*needs)
 
@@ -401,10 +415,27 @@ class CompileBuilder(ABC):
         _bind_bag_raw(): which bag member is meant is ambiguous once the bag
         itself may have changed, so this raises instead of guessing.
 
+        With `strict_needs=True` (see __init__), `name` must already have a
+        Need declared for it via `.need()` - `_bind_raw` then forwards `obj`
+        to that Need's own `.bind()` (its kind/dtype/mode - or, for
+        kind=BAG, its member contract - check runs there) before recording it
+        here exactly as the permissive path does. This is the enforcement
+        the Need-restructuring plan calls for; it is opt-in per builder
+        instance so builders that have not been converted keep today's
+        permissive behaviour unchanged (see the module docstring).
+
         Author: B.G (08/2026)
         """
         if name in self._bag_names:
             raise KeyError(f"'{name}' was bound via bind_bag() and cannot be rebound directly")
+        if self._strict_needs:
+            need = self._needs.get(name)
+            if need is None:
+                raise KeyError(
+                    f"'{name}' has no Need declared on this builder (strict_needs=True) - "
+                    f"call .need(Need({name!r}, kind=...)) before .bind()"
+                )
+            need.bind(obj)
         self._bindings[name] = obj
         return self
 
@@ -430,6 +461,17 @@ class CompileBuilder(ABC):
 
         See _bind_raw()'s docstring: same standing as that method, and the
         name to reach for in new code. `bind_bag()` is the older alias.
+
+        With `strict_needs=True`, no special handling lives here: each member
+        is registered through the very same `_bind_raw(name, item)` call this
+        method already makes, so each one independently requires its own
+        pre-declared Need under that member's name - the same rule as any
+        other strict `_bind_raw` call, applied once per member. This is
+        deliberately different from binding a whole Bag under one name via
+        `_bind_raw("grid", some_bag)`, which wants a single kind=BAG Need
+        declared under `"grid"` instead (see need.py's module docstring) -
+        `_bind_bag_raw` never produces that shape, it only ever produces flat,
+        per-member bindings, so a kind=BAG Need is never what it consults.
 
         Author: B.G (08/2026)
         """
