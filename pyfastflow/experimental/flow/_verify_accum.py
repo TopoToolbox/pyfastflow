@@ -60,6 +60,8 @@ from collections import deque
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
+from pyfastflow.experimental.core.context.need import Kind, Need
+
 DX = 1.0
 SEED = 2024
 # Grid side length; make_accumulation's own n_flat default (grid.nx*grid.ny)
@@ -67,6 +69,20 @@ SEED = 2024
 # free GPU memory - the rake-compress donor buffers are n_flat*n_neighbours
 # int32 each (two of them), the dominant cost.
 SIDE = 1024
+
+
+def _source_need(source_p) -> Need:
+    """
+    Wrap an already-built `source_p` Parameter in a fresh, bound
+    `Need("source", kind=Kind.PARAM)` - the boundary contract
+    make_accumulation now requires (see flow/__init__.py's module
+    docstring).
+
+    Author: B.G (08/2026)
+    """
+    n = Need("source", kind=Kind.PARAM)
+    n.bind(source_p)
+    return n
 
 
 def numpy_topological_accum(rec: np.ndarray, source: np.ndarray) -> np.ndarray:
@@ -202,8 +218,8 @@ def run(backend: str):
         p = Param("SRC", dtype=f32, mode="field", value=source_np, pool=pool, n_flat=n)
         return p
 
-    def run_atomic(source_p):
-        accum = make_accumulation(backend, grid, source_p, method="atomic")
+    def run_atomic(source_need):
+        accum = make_accumulation(backend, grid, source_need, method="atomic")
         q = pool.get_data(f32, (n,))
         if backend == "cupy":
             q_init_k = accum.q_init.compile()
@@ -218,9 +234,13 @@ def run(backend: str):
         pool.release_data(q)
         return got
 
-    def run_rake_compress(source_p, fused=False):
+    def run_rake_compress(source_need, fused=False):
         iteration_p = Param("ITER", dtype=i32, mode="scalar", value=0, pool=pool)
-        accum = make_accumulation(backend, grid, source_p, method="rake_compress", n_flat=n, iteration_p=iteration_p)
+        iteration_need = Need("iteration_p", kind=Kind.PARAM, dtype=i32, modes={"scalar"})
+        iteration_need.bind(iteration_p)
+        accum = make_accumulation(
+            backend, grid, source_need, method="rake_compress", n_flat=n, iteration_p=iteration_need
+        )
         q = pool.get_data(f32, (n,))
         donors = pool.get_data(i32, (n * nn,))
         ndonors = pool.get_data(i32, (n,))
@@ -246,8 +266,8 @@ def run(backend: str):
         iteration_p.destroy()
         return got
 
-    def run_pointer_jump_push(source_p, fused=False):
-        accum = make_accumulation(backend, grid, source_p, method="pointer_jump_push", n_flat=n)
+    def run_pointer_jump_push(source_need, fused=False):
+        accum = make_accumulation(backend, grid, source_need, method="pointer_jump_push", n_flat=n)
         q = pool.get_data(f32, (n,))
         work = pool.get_data(i32, (n,))
         work2 = pool.get_data(i32, (n,))
@@ -270,9 +290,10 @@ def run(backend: str):
     rows = []
     for mode in modes:
         source_p = get_source_param(mode)
-        got_atomic = run_atomic(source_p)
-        got_rake = run_rake_compress(source_p)
-        got_pjp = run_pointer_jump_push(source_p)
+        source_need = _source_need(source_p)
+        got_atomic = run_atomic(source_need)
+        got_rake = run_rake_compress(source_need)
+        got_pjp = run_pointer_jump_push(source_need)
         source_p.destroy()
 
         for name, got in (("atomic", got_atomic), ("rake_compress", got_rake), ("pointer_jump_push", got_pjp)):
@@ -292,10 +313,11 @@ def run(backend: str):
     # backends.
     if backend != "cupy":
         source_p = get_source_param("field")
-        got_rake_unfused = run_rake_compress(source_p, fused=False)
-        got_rake_fused = run_rake_compress(source_p, fused=True)
-        got_pjp_unfused = run_pointer_jump_push(source_p, fused=False)
-        got_pjp_fused = run_pointer_jump_push(source_p, fused=True)
+        source_need = _source_need(source_p)
+        got_rake_unfused = run_rake_compress(source_need, fused=False)
+        got_rake_fused = run_rake_compress(source_need, fused=True)
+        got_pjp_unfused = run_pointer_jump_push(source_need, fused=False)
+        got_pjp_fused = run_pointer_jump_push(source_need, fused=True)
         source_p.destroy()
         rows.append(("fuse-check", "rake_compress_fused_vs_unfused",
                      float(np.max(np.abs(got_rake_fused - got_rake_unfused))),
@@ -318,9 +340,10 @@ def run(backend: str):
     source_noninteger_np = (rng2.random(n).astype(np.float32) * 2.0 + 0.1)
     ref_noninteger = numpy_topological_accum(rec_np, source_noninteger_np)
     source_p = Param("SRC", dtype=f32, mode="field", value=source_noninteger_np, pool=pool, n_flat=n)
-    got_atomic = run_atomic(source_p)
-    got_rake = run_rake_compress(source_p)
-    got_pjp = run_pointer_jump_push(source_p)
+    source_need = _source_need(source_p)
+    got_atomic = run_atomic(source_need)
+    got_rake = run_rake_compress(source_need)
+    got_pjp = run_pointer_jump_push(source_need)
     source_p.destroy()
     for name, got in (("atomic", got_atomic), ("rake_compress", got_rake), ("pointer_jump_push", got_pjp)):
         abs_diff = float(np.max(np.abs(got - ref_noninteger)))
@@ -484,6 +507,7 @@ def run_mfd_cupy():
     pool = CupyPool()
     grid = make_grid("cupy", pool, nx, ny, DX, topology="D8", boundary="normal", outlet="edge")
     source_p = Param("SRC", dtype=f32, mode="const", value=1.0, pool=pool)
+    source_need = _source_need(source_p)
 
     dirs = pool.get_data(np.dtype(np.uint8), (n,))
     mfd_w = pool.get_data(f32, (n * 8,))
@@ -498,7 +522,7 @@ def run_mfd_cupy():
     mfd_w.data.set(mfd_w_np)
     indegree.data.set(indegree_np.astype(np.int32))
 
-    accum = make_accumulation("cupy", grid, source_p, method="persistent_mfd", n_flat=n)
+    accum = make_accumulation("cupy", grid, source_need, method="persistent_mfd", n_flat=n)
     q_init_k = accum.q_init.compile()
     accum_k = accum.accum.compile()
 

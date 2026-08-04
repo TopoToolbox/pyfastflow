@@ -345,10 +345,15 @@ class ClosureKernel(Kernel):
     Author: B.G (07/2026)
     """
 
-    def __init__(self, name: str, compiled):
+    def __init__(self, name: str, compiled, data_needs: tuple = ()):
         super().__init__()
         self.name = name
         self._compiled = compiled
+        # declared kind=DATA Needs (see need.py), positional, from the
+        # KernelBuilder that produced this Kernel - empty for a builder that
+        # never declared any (__call__ then behaves exactly as before Need
+        # existed, relying on ti.kernel/qd.kernel's own signature checking).
+        self._data_needs = data_needs
 
     @property
     def compiled(self):
@@ -365,6 +370,12 @@ class ClosureKernel(Kernel):
 
         Author: B.G (07/2026)
         """
+        if self._data_needs:
+            # dtype-validates each positional arg against its declared Need
+            # (see need.py); re-binding a kind=DATA Need never freezes it, so
+            # this runs every call, not just the first.
+            for need, arg in zip(self._data_needs, args):
+                need.bind(arg)
         return self._compiled(*args, **kwargs)
 
 
@@ -386,6 +397,7 @@ class ClosureHelperBuilder(HelperBuilder):
 
         Author: B.G (07/2026)
         """
+        self._resolve_needs()
         specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings), ctx)
         return ClosureHelper(specialised.__name__, self._backend.func(specialised))
 
@@ -409,9 +421,10 @@ class ClosureKernelBuilder(KernelBuilder):
 
         Author: B.G (07/2026)
         """
+        self._resolve_needs()
         ctx = _SpecializeCtx()
         specialised = specialize_closure(self._template, filter_bindings(self._template, self._bindings), ctx)
-        return ClosureKernel(specialised.__name__, self._backend.kernel(specialised))
+        return ClosureKernel(specialised.__name__, self._backend.kernel(specialised), data_needs=self.data_needs)
 
 
 class _RenameNames(ast.NodeTransformer):
@@ -638,7 +651,7 @@ class ClosureRoutineBuilder(RoutineBuilder):
                     data_names.append(name)
 
         defaults = {name: self._data[name] for name in data_names}
-        return Routine(compiled_steps, tuple(data_names), defaults)
+        return Routine(compiled_steps, tuple(data_names), defaults, self._data_needs_tuple(data_names))
 
     def _fuse_group(self, group: list, group_index: int, dump_source: "str | None"):
         """
@@ -695,6 +708,13 @@ class ClosureRoutineBuilder(RoutineBuilder):
 
         for step_index, step in enumerate(group):
             kernel_builder = step.kernel_builder
+            # a fused group reads kernel_builder.bindings directly below
+            # (there is no per-step compile() call on this path to do it) -
+            # so any .need()-declared PARAM/HELPER need must be resolved into
+            # that dict here first, exactly as compile() does for the
+            # unfused/single-step path (see compile.py, CompileBuilder.
+            # _resolve_needs).
+            kernel_builder._resolve_needs()
             template = kernel_builder.template
             label = f"group{group_index}/step{step_index}:{_template_label(template)}"
 

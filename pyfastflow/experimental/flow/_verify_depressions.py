@@ -249,6 +249,7 @@ def run(backend: str):
     else:
         raise ValueError(f"unknown backend {backend!r}")
 
+    from ..core.context.need import Kind, Need
     from ..grid import make_grid
     from . import make_depression_solver, make_depressions, make_receivers
 
@@ -284,6 +285,8 @@ def run(backend: str):
     rerouted = pool.get_data(u8, (n,))
 
     ndep_p = Param("NDEP", dtype=i32, mode="scalar", value=0, pool=pool)
+    ndep_need = Need("depression_counter_p", kind=Kind.PARAM, dtype=i32, modes={"scalar"})
+    ndep_need.bind(ndep_p)
 
     recv = make_receivers(backend, grid)
     recv_kernel = recv.receivers.compile()
@@ -299,7 +302,7 @@ def run(backend: str):
     solvers = {}
     labellers = {}
     for method, reroute in COMBOS:
-        deps = make_depressions(backend, grid, ndep_p, method=method, reroute=reroute, n_flat=n)
+        deps = make_depressions(backend, grid, ndep_need, method=method, reroute=reroute, n_flat=n)
         solvers[(method, reroute)] = make_depression_solver(
             backend, deps, method=method, reroute=reroute, n_flat=n, block_size=BLOCK, **buffers
         )

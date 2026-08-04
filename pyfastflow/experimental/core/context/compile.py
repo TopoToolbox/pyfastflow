@@ -17,6 +17,16 @@ Only the abstract builders live here; the concrete Taichi*, Quadrants* and
 Cupy* ones sit alongside in their own modules. See parameter.py's module docstring
 for what the whole scheme is for.
 
+CompileBuilder._bind_raw()/._bind_bag_raw() are the actual binding
+implementation, for a factory's own internal, same-breath wiring - build a
+Parameter, bind it into a template two lines later, done. `.bind()`/
+`.bind_bag()` are older aliases to the same methods, predating Need (need.py)
+and kept working for the many existing call sites across grid/, noise/, ops/
+and flow/ that already use those names; not the names to prefer in new code.
+Need is the contract for the other shape - a caller in a different module
+builds an object and hands it to a factory that binds it at a distance; see
+need.py's module docstring.
+
 Author: B.G (07/2026)
 """
 
@@ -305,10 +315,17 @@ class CompileBuilder(ABC):
     Collects dependencies and a template, and compiles them into one
     Specializable.
 
-    A builder is used as a chain: any number of bind() calls, one ingest(),
-    then compile(). Bound objects are not inspected as they arrive - what
-    each one is (Parameter, Helper, Bag, handle, plain value) is worked out
-    when the template is specialized, so bind() accepts anything.
+    A builder is used as a chain: any number of _bind_raw()/bind() calls, one
+    ingest(), then compile(). Bound objects are not inspected as they arrive -
+    what each one is (Parameter, Helper, Bag, handle, plain value) is worked
+    out when the template is specialized, so binding accepts anything.
+
+    _bind_raw()/_bind_bag_raw() are the real binding implementation and the
+    names to reach for in new code, for a factory's own internal, same-breath
+    wiring. bind()/bind_bag() are older aliases to the same two methods,
+    predating Need (need.py) and kept working unchanged for the many existing
+    call sites that already use them - not the names to prefer first when
+    writing something new. Neither pair is deprecated; both work identically.
 
     The builder stays authoritative for the recipe throughout its life:
     `template` and `bindings` below are a read-only view onto the same state
@@ -366,34 +383,69 @@ class CompileBuilder(ABC):
         """
         return self._bindings
 
-    def bind(self, name: str, obj: Any) -> "CompileBuilder":
+    def _bind_raw(self, name: str, obj: Any) -> "CompileBuilder":
         """
         Register `obj` under `name` for injection into the template body.
 
+        This is the name to reach for in new code for a factory's own
+        internal, same-breath wiring - building a Parameter and binding it
+        into a template two lines later, where no caller ever holds the
+        object and there is no "where did this go" question to answer (see
+        need.py's module docstring for the contrast with a caller-supplied
+        Need). `bind()` is the older, still-working alias to this same
+        method - see its own docstring.
+
         Binding a name a second time replaces what it pointed to - handy for
         editing a builder in place before recompiling. The one case this
-        refuses is rebinding a name that arrived through bind_bag(): which
-        bag member is meant is ambiguous once the bag itself may have
-        changed, so this raises instead of guessing.
+        refuses is rebinding a name that arrived through bind_bag()/
+        _bind_bag_raw(): which bag member is meant is ambiguous once the bag
+        itself may have changed, so this raises instead of guessing.
 
-        Author: B.G (07/2026)
+        Author: B.G (08/2026)
         """
         if name in self._bag_names:
             raise KeyError(f"'{name}' was bound via bind_bag() and cannot be rebound directly")
         self._bindings[name] = obj
         return self
 
-    def bind_bag(self, bag: "Bag") -> "CompileBuilder":
+    def bind(self, name: str, obj: Any) -> "CompileBuilder":
+        """
+        Alias for _bind_raw() - see its docstring for what this actually
+        does. Predates Need (need.py) and is kept working for the many
+        existing call sites that already use this name across grid/, noise/,
+        ops/ and flow/; still correct for internal, same-breath wiring, but
+        not the name to prefer when writing something new - call
+        _bind_raw()/_bind_bag_raw() directly instead, and reach for a Need
+        when what is being bound was constructed by a caller in a different
+        module and consumed only later.
+
+        Author: B.G (08/2026)
+        """
+        return self._bind_raw(name, obj)
+
+    def _bind_bag_raw(self, bag: "Bag") -> "CompileBuilder":
         """
         Bind every member of `bag` at top level under its own name (flat), for
         when a kernel refers to members directly rather than via a bag path.
 
-        Author: B.G (07/2026)
+        See _bind_raw()'s docstring: same standing as that method, and the
+        name to reach for in new code. `bind_bag()` is the older alias.
+
+        Author: B.G (08/2026)
         """
         for name, item in bag.items():
-            self.bind(name, item)
+            self._bind_raw(name, item)
             self._bag_names.add(name)
         return self
+
+    def bind_bag(self, bag: "Bag") -> "CompileBuilder":
+        """
+        Alias for _bind_bag_raw() - see its docstring and _bind_raw()'s for
+        what this actually does and why it still exists unchanged.
+
+        Author: B.G (08/2026)
+        """
+        return self._bind_bag_raw(bag)
 
     def need(self, *needs: Need) -> "CompileBuilder":
         """

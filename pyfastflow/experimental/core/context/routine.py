@@ -37,6 +37,25 @@ in for it, and the compiled Routine keeps re-running correctly precisely
 because the net effect of every swap in it is required to be the identity -
 see RoutineBuilder.compile.
 
+A routine-local name may optionally carry a kind=DATA Need (need.py):
+add_data(name, handle, need=...). This Need belongs to the *name* - the slot
+add_data created - not to any one step's reference to it, and add_swap never
+touches it: a swap only relabels which name a later add_kernel's
+data_handle_ref resolves to, it does not move or duplicate the Need attached
+to the name that was swapped. compile() checks it two ways: the name must by
+then have a real handle (add_data(name, None, need=...) plus a later
+fill_data() is the only legal way to defer that, exactly as without a Need),
+and that handle's dtype must satisfy the Need. A step's own kernel_builder may
+separately declare its own per-argument data_needs (see compile.py and
+_cupy_mfd_accum.py's build_persistent_mfd for such a builder); compile() cross
+-checks those against whatever handle the step's data_handle_ref currently
+points at too, so a step wired to the wrong-dtype buffer is caught here rather
+than at its first launch. Whichever names carried a Need this way, the
+compiled Routine re-validates again on every call that supplies a positional
+override for them - see Routine.__call__ - exactly as a Kernel's own
+data_needs are re-validated on every call. A name given no Need behaves
+exactly as it always has.
+
 Executing a routine
 --------------------
     routine = (TaichiRoutineBuilder()
@@ -113,6 +132,7 @@ from typing import Any
 
 from .bag import Bag, check_handles
 from .compile import CompileBuilder
+from .need import Kind, Need
 
 _C_FUNC_NAME_RE = re.compile(r"(?:__global__|__device__)\s+[\w:\*&]*\s*(\w+)\s*\(")
 
@@ -209,10 +229,21 @@ class Routine:
     Author: B.G (07/2026)
     """
 
-    def __init__(self, steps: list[_CompiledStep], data_names: tuple, defaults: dict[str, Any]):
+    def __init__(
+        self,
+        steps: list[_CompiledStep],
+        data_names: tuple,
+        defaults: dict[str, Any],
+        data_needs: tuple = (),
+    ):
         self._steps = steps
         self._data_names = data_names
         self._defaults = defaults
+        # one slot per data_names entry, None where add_data was given no
+        # Need for that name - see RoutineBuilder._data_needs_tuple. Empty
+        # tuple in means "nothing here declared a single Need", normalised
+        # to all-None so __call__'s zip below never has to special-case it.
+        self._data_needs = data_needs if data_needs else (None,) * len(data_names)
 
     @property
     def data_names(self) -> tuple:
@@ -224,6 +255,18 @@ class Routine:
         """
         return self._data_names
 
+    @property
+    def data_needs(self) -> tuple:
+        """
+        The kind=DATA Need (need.py), or None, declared for each entry of
+        `data_names`, in the same order - whatever add_data(name, handle,
+        need=...) attached to that name, aggregated at compile() time. A
+        name given no Need reports None here.
+
+        Author: B.G (08/2026)
+        """
+        return self._data_needs
+
     def __call__(self, *args) -> None:
         """
         Launch every step in order. With no arguments, each data name
@@ -232,6 +275,14 @@ class Routine:
         for this call, matched by position against `data_names`. Any other
         argument count raises.
 
+        Any positional argument whose matching data_names entry carries a
+        Need (see data_needs) is dtype-validated against it before any step
+        launches - re-validated every such call, exactly as a Kernel's own
+        data_needs are (see cupy_backend.py/_closure_backend.py,
+        CupyKernel/ClosureKernel.__call__). A call with no override
+        arguments validates nothing here: the defaults were already
+        validated once, at compile() time - see RoutineBuilder._validate.
+
         Author: B.G (07/2026)
         """
         if args and len(args) != len(self._data_names):
@@ -239,6 +290,10 @@ class Routine:
                 f"Routine: expected 0 or {len(self._data_names)} argument(s) "
                 f"matching data_names={self._data_names}, got {len(args)}"
             )
+        if args:
+            for need, arg in zip(self._data_needs, args):
+                if need is not None:
+                    need.bind(arg)
         table = dict(self._defaults)
         if args:
             table.update(zip(self._data_names, args))
@@ -269,6 +324,7 @@ class RoutineBuilder(ABC):
 
     def __init__(self):
         self._data: dict[str, Any] = {}
+        self._data_needs: dict[str, Need] = {}
         self._perm: dict[str, str] = {}
         self._steps: list[_Step] = []
         self._splits: set[int] = set()
@@ -276,15 +332,30 @@ class RoutineBuilder(ABC):
         self._recording: "list | None" = None
         self._repeat_times: int = 0
 
-    def add_data(self, name: str, handle: Any) -> "RoutineBuilder":
+    def add_data(self, name: str, handle: Any, need: "Need | None" = None) -> "RoutineBuilder":
         """
         Register `handle` under routine-local `name`, and the default it
         resolves to unless a call to the compiled Routine overrides it.
+
+        `need`, if given, must be a kind=DATA Need (need.py) - it declares
+        this name's own dtype contract, independent of any step's reference
+        to it and untouched by add_swap (see the module docstring). Checked
+        immediately against `handle` if `handle` is not None; skipped if
+        `handle` is None (the fill_data() placeholder pattern - see
+        fill_data), deferred to compile() instead, which raises naming this
+        name if it is still unfilled by then. A name given no `need` behaves
+        exactly as it always has.
 
         Author: B.G (07/2026)
         """
         if name in self._data:
             raise KeyError(f"add_data: '{name}' is already registered")
+        if need is not None:
+            if need.kind is not Kind.DATA:
+                raise TypeError(f"add_data: '{name}' need must be kind=Kind.DATA, got {need.kind.value}")
+            self._data_needs[name] = need
+            if handle is not None:
+                need.bind(handle)
         self._data[name] = handle
         self._perm[name] = name
         return self
@@ -304,12 +375,19 @@ class RoutineBuilder(ABC):
         since a second *registration* elsewhere in the tree is normally a
         bug - fill_data is the deliberate update path, not a registration.
 
-        Raises KeyError if `name` was never registered via add_data().
+        Raises KeyError if `name` was never registered via add_data(). If
+        `name` was registered with a Need (add_data's `need=`), `handle` is
+        validated against it here too - fill_data is the only place a
+        deferred placeholder's real buffer is ever attached, so this is the
+        first point such a contract can be checked.
 
         Author: B.G (07/2026)
         """
         if name not in self._data:
             raise KeyError(f"fill_data: '{name}' is not registered - call add_data() first")
+        need = self._data_needs.get(name)
+        if need is not None:
+            need.bind(handle)
         self._data[name] = handle
         return self
 
@@ -527,6 +605,64 @@ class RoutineBuilder(ABC):
         if drift:
             raise ValueError(f"compile: net swap permutation is not the identity, still swapped: {drift}")
 
+        self._check_data_needs()
+
+    def _check_data_needs(self) -> None:
+        """
+        Validate every add_data()-declared Need (see need.py, and the module
+        docstring's paragraph on this) against the handle currently
+        registered for its name, and every step's own
+        kernel_builder.data_needs - its own per-argument dtype contract, if
+        it declared any - against whatever handle its data_handle_ref
+        currently maps that argument onto. Both run here, at compile() time,
+        rather than waiting for a mismatch to reach a launch.
+
+        A name given a Need but never given a real handle (add_data(name,
+        None, need=...) with no matching fill_data() call before compile())
+        raises here, naming it - unlike Need.unmet_needs(), which never
+        reports a kind=DATA need as unmet (see need.py): that question is
+        "has this Need ever been bound", a different one from "is this
+        routine about to compile with a name we declared a contract for but
+        never gave a real buffer".
+
+        Author: B.G (08/2026)
+        """
+        missing = [name for name, need in self._data_needs.items() if self._data.get(name) is None]
+        if missing:
+            raise ValueError(
+                f"compile: data need(s) declared via add_data() but never given a handle "
+                f"(fill_data()?): {sorted(missing)}"
+            )
+        for name, need in self._data_needs.items():
+            need.bind(self._data[name])
+
+        for i, step in enumerate(self._steps):
+            step_needs = step.kernel_builder.data_needs
+            if not step_needs:
+                continue
+            for name, step_need in zip(step.canonical_refs, step_needs):
+                handle = self._data.get(name)
+                if handle is None:
+                    continue
+                try:
+                    step_need.bind(handle)
+                except (TypeError, ValueError) as exc:
+                    label = _template_label(step.kernel_builder.template)
+                    raise TypeError(
+                        f"compile: step {i} ({label!r}) data '{name}' violates its kernel_builder's "
+                        f"own Need contract: {exc}"
+                    ) from exc
+
+    def _data_needs_tuple(self, data_names: tuple) -> tuple:
+        """
+        The Need (or None) declared for each entry of `data_names`, in
+        order - what a compiled Routine's own `data_needs` carries. See
+        add_data's `need=` and Routine.data_needs.
+
+        Author: B.G (08/2026)
+        """
+        return tuple(self._data_needs.get(name) for name in data_names)
+
     def _grouped_steps(self) -> list[list[_Step]]:
         """
         `self._steps` partitioned at every split() boundary, in order. With
@@ -591,4 +727,4 @@ class RoutineBuilder(ABC):
                     data_names.append(name)
 
         defaults = {name: self._data[name] for name in data_names}
-        return Routine(compiled_steps, tuple(data_names), defaults)
+        return Routine(compiled_steps, tuple(data_names), defaults, self._data_needs_tuple(data_names))

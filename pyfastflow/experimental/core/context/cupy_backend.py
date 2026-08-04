@@ -698,6 +698,7 @@ class CupyHelperBuilder(HelperBuilder):
 
         Author: B.G (07/2026)
         """
+        self._resolve_needs()
         template = self._template
         name = _extract_name(_DEVICE_NAME_RE, template, "__device__")
         parser = _SpanParser(self._bindings, ctx=ctx)
@@ -848,8 +849,8 @@ class _CapturedRoutine(Routine):
     Author: B.G (07/2026)
     """
 
-    def __init__(self, steps: list, data_names: tuple, defaults: dict, graph, stream):
-        super().__init__(steps, data_names, defaults)
+    def __init__(self, steps: list, data_names: tuple, defaults: dict, graph, stream, data_needs: tuple = ()):
+        super().__init__(steps, data_names, defaults, data_needs)
         self._graph = graph
         self._stream = stream
 
@@ -1068,7 +1069,9 @@ class CupyRoutineBuilder(RoutineBuilder):
                 "CUDA graph capture does not support"
             )
 
-        return _CapturedRoutine(compiled_steps, tuple(data_names), defaults, graph, stream)
+        return _CapturedRoutine(
+            compiled_steps, tuple(data_names), defaults, graph, stream, self._data_needs_tuple(data_names)
+        )
 
 
 class CupySequenceBuilder(SequenceBuilder):

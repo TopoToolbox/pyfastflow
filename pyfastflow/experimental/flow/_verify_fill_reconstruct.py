@@ -152,6 +152,7 @@ def run(backend: str):
     else:
         raise ValueError(f"unknown backend {backend!r}")
 
+    from ..core.context.need import Kind, Need
     from ..grid import make_grid
     from . import make_fill_reconstruct, make_fill_reconstruct_solver
 
@@ -179,8 +180,10 @@ def run(backend: str):
     queued_gen = pool.get_data(i32, (n,))
 
     pass_p = Param("PASS", dtype=i32, mode="scalar", value=0, pool=pool)
+    pass_need = Need("pass_p", kind=Kind.PARAM, dtype=i32, modes={"scalar"})
+    pass_need.bind(pass_p)
 
-    deps = make_fill_reconstruct(backend, grid, pass_p, n_flat=n)
+    deps = make_fill_reconstruct(backend, grid, pass_need, n_flat=n)
     max_passes = 4 * max(nx, ny)
     counters = pool.get_data(i32, (max_passes + 2,))
 

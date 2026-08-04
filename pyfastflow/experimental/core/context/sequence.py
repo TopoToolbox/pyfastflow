@@ -104,6 +104,17 @@ There is no whole-Sequence graph capture and there will not be one: a loop
 whose trip count is read back from the device is not expressible as a single
 graph. Capture lives inside the blocks, where it belongs.
 
+add_data(name, handle, need=...) may attach a kind=DATA Need (need.py) to a
+sequence-local name, exactly as RoutineBuilder.add_data does (see routine.py's
+module docstring for the full reasoning) - independent of any one block's
+reference to it. compile() checks it against whatever handle the name
+currently holds, and cross-checks any kernel block's own kernel_builder.data_
+needs against the same handle, both before any block compiles; a compiled
+Sequence itself never takes call-time data arguments (see Sequence.__call__),
+so, unlike a Routine, there is nothing left to re-validate on every call - the
+one compile()-time check is this layer's whole cost for it. A name given no
+Need behaves exactly as it always has.
+
 Author: B.G (07/2026)
 """
 
@@ -112,6 +123,7 @@ from typing import Any, Callable
 
 from .bag import Bag, check_handles
 from .compile import CompileBuilder
+from .need import Kind, Need
 from .routine import RoutineBuilder, _flatten_bindings, _template_label
 
 
@@ -322,18 +334,32 @@ class SequenceBuilder(ABC):
 
     def __init__(self):
         self._data: dict[str, Any] = {}
+        self._data_needs: dict[str, Need] = {}
         self._blocks: list[_Block] = []
         self._bag: "Bag | None" = None
 
-    def add_data(self, name: str, handle: Any) -> "SequenceBuilder":
+    def add_data(self, name: str, handle: Any, need: "Need | None" = None) -> "SequenceBuilder":
         """
         Register `handle` under sequence-local `name`, for a kernel or
         Routine block's data_handle_ref to refer to.
+
+        `need`, if given, must be a kind=DATA Need (need.py) - it declares
+        this name's own dtype contract; checked immediately against `handle`
+        if `handle` is not None, otherwise deferred to compile() (which
+        raises naming this name if it is still None by then). See the
+        module docstring's paragraph on this. A name given no `need` behaves
+        exactly as it always has.
 
         Author: B.G (07/2026)
         """
         if name in self._data:
             raise KeyError(f"add_data: '{name}' is already registered")
+        if need is not None:
+            if need.kind is not Kind.DATA:
+                raise TypeError(f"add_data: '{name}' need must be kind=Kind.DATA, got {need.kind.value}")
+            self._data_needs[name] = need
+            if handle is not None:
+                need.bind(handle)
         self._data[name] = handle
         return self
 
@@ -574,6 +600,52 @@ class SequenceBuilder(ABC):
             elif block.kind == "host":
                 if not callable(block.fn):
                     raise TypeError(f"compile: {path} host block is not callable")
+
+        self._check_data_needs(flat)
+
+    def _check_data_needs(self, flat: list[tuple[str, _Block]]) -> None:
+        """
+        Validate every add_data()-declared Need (see need.py, and the module
+        docstring's paragraph on this) against the handle currently
+        registered for its name, and every kernel block's own
+        kernel_builder.data_needs - its own per-argument dtype contract, if
+        it declared any - against whatever handle its data_handle_ref
+        currently maps that argument onto. Both run here, at compile() time.
+
+        A name given a Need but never given a real handle raises here,
+        naming it - see RoutineBuilder._check_data_needs for why this is a
+        different question from Need.unmet_needs(). A Routine block's own
+        data contracts are entirely that Routine's own concern - checked
+        when block.builder.compile() runs, inside _compile_block - so only
+        kernel blocks are cross-checked here.
+
+        Author: B.G (08/2026)
+        """
+        missing = [name for name, need in self._data_needs.items() if self._data.get(name) is None]
+        if missing:
+            raise ValueError(
+                f"compile: data need(s) declared via add_data() but never given a handle: {sorted(missing)}"
+            )
+        for name, need in self._data_needs.items():
+            need.bind(self._data[name])
+
+        for path, block in flat:
+            if block.kind != "kernel":
+                continue
+            step_needs = block.builder.data_needs
+            if not step_needs:
+                continue
+            for name, step_need in zip(block.data_handle_ref, step_needs):
+                handle = self._data.get(name)
+                if handle is None:
+                    continue
+                try:
+                    step_need.bind(handle)
+                except (TypeError, ValueError) as exc:
+                    raise TypeError(
+                        f"compile: {path} data '{name}' violates its kernel_builder's own Need "
+                        f"contract: {exc}"
+                    ) from exc
 
     def _compile_block(self, path: str, block: _Block, routine_cache: dict) -> _CompiledBlock:
         """

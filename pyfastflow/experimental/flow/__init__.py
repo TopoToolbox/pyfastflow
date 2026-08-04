@@ -17,10 +17,16 @@ receivers kernel.
 `mode` ("steepest"|"stochastic") and `h_aware` (False: kernel takes (z, rec)
 and slopes read h as 0; True: kernel takes (z, h, rec) and slopes use
 (zi-zj)+(hi-hj)) each pick one of four kernel body variants at build time -
-see _closure_receivers.py/_cupy_receivers.py's build_receivers. mode="stochastic"
-additionally requires `seed_p`, a scalar or const Parameter the RNG hash
-mixes in alongside the node index and neighbour direction (see rand_unit in
-the block modules) - the host bumps it between calls for a fresh draw.
+see _closure_receivers.py/_cupy_receivers.py's build_receivers.
+
+mode="stochastic" additionally requires `seed_p`, a `Need(kind=Kind.PARAM)`
+already `.bind()`ed to a scalar or const Parameter that the RNG hash mixes in
+alongside the node index and neighbour direction (see rand_unit in the block
+modules) - the caller builds its own Parameter, wraps it in a
+`Need("seed_p", kind=Kind.PARAM)`, `.bind()`s it, and hands the Need to
+make_receivers already bound (see `_require_param_need`, the same boundary
+contract make_accumulation uses for `source`/`iteration_p`); the host bumps
+the underlying Parameter between calls for a fresh draw.
 
 `diagonal_partition_correction` only changes anything on a D8 grid: it swaps
 the corrected distance/slope helpers in for the grid's own dist_from_k/
@@ -46,11 +52,22 @@ Reproducibility itself diverges from legacy (hash-based vs ti.random()'s
 counter-based PRNG) - only the selection distribution's shape is preserved.
 
 make_accumulation: the SFD downstream-accumulation Bag factory, built on the
-same core plus a `grid` Bag and a `source` Parameter (any mode - const,
-scalar or field all work with no variant code, since every template reads
-`source.get(i)`).
+same core plus a `grid` Bag and a `source` Need (need.py) - a boundary
+contract, not a bare Parameter: the caller builds its own Parameter (any mode
+- const, scalar or field all work with no variant code, since every template
+reads `source.get(i)`) in its own script, wraps it in a
+`Need("source", kind=Kind.PARAM)`, `.bind()`s it to that Parameter, and hands
+the Need to make_accumulation already bound - make_accumulation raises
+immediately if `source` is not a Need, is not kind=Kind.PARAM, or is not yet
+bound. This is not a new deferral: every existing caller already builds the
+concrete Parameter before calling make_accumulation, so nothing about *when*
+a Parameter is built changes - only that the slot it fills is now inspectable
+(each returned Bag member's own `.unmet_needs()`) rather than swallowed
+invisibly by an internal `.bind()`.
 
-    accum = make_accumulation("taichi", grid, source_p, method="atomic")
+    source = Need("source", kind=Kind.PARAM)
+    source.bind(source_p)
+    accum = make_accumulation("taichi", grid, source, method="atomic")
     accum_kernel = accum.accum.compile()
     accum_kernel(rec.data, q.data)
 
@@ -75,13 +92,16 @@ scalar or field all work with no variant code, since every template reads
     part of the routine's own step list on closure backends: the increment
     it performs is folded into rake_compress_accum's own second top-level
     `for` loop instead (see build_rake_compress), which removes one
-    single-thread kernel launch per rake round. Requires `iteration_p` (a
-    scalar Parameter, i32) -
-    it is the device-side "which ping-pong buffer holds each node's current
-    data, and which round last touched it" counter the legacy kernel took as
-    a plain call argument (see pyfastflow/general_algorithms/pingpong.py);
-    the routine's own "reset_iteration" step zeros it every call, so the
-    caller never has to remember to reset it between calls.
+    single-thread kernel launch per rake round. Requires `iteration_p`, a
+    `Need("iteration_p", kind=Kind.PARAM, dtype=<i32>, modes={"scalar"})`
+    already `.bind()`ed to a scalar i32 Parameter - the same boundary
+    contract as `source` (see above), with its dtype/mode enforced at
+    `.bind()` time rather than left as prose. It is the device-side "which
+    ping-pong buffer holds each node's current data, and which round last
+    touched it" counter the legacy kernel took as a plain call argument (see
+    pyfastflow/general_algorithms/pingpong.py); the routine's own
+    "reset_iteration" step zeros it every call, so the caller never has to
+    remember to reset it between calls.
   - "pointer_jump_push": a RoutineBuilder (see _closure_accum.py's
     build_pointer_jump_push) plus its constituent KernelBuilders, keyed
     "q_init", "copy_rec_to_work", and (closure backends)
@@ -133,16 +153,20 @@ explicitly for a grid built with scalar-mode dimensions.
 make_depressions: the depression-handling Bag factory, porting
 ../../flow/flow_reroute_kernels.py. Two orthogonal build flags:
 
-    deps = make_depressions("taichi", grid, ndep_p, method="vanilla", reroute="carve")
+    ndep_need = Need("depression_counter_p", kind=Kind.PARAM, dtype=i32, modes={"scalar"})
+    ndep_need.bind(ndep_p)
+    deps = make_depressions("taichi", grid, ndep_need, method="vanilla", reroute="carve")
 
 `method` ("vanilla"|"optimized") picks how basins are labelled and, for
 reroute="carve", how the carve itself runs; `reroute` ("carve"|"jump") picks
 how a resolved basin's pit is reconnected to its outlet. All four
-combinations build. `ndep_p` (a caller-allocated scalar i32 Parameter, mode
-"scalar") is required - it is not built here, the same way make_accumulation
-takes iteration_p rather than allocating it, since this factory takes no
-pool: every scratch buffer below is a caller-supplied data arg, never a
-bound field Parameter.
+combinations build. `depression_counter_p` is a `Need(kind=Kind.PARAM,
+dtype=i32, modes={"scalar"})`, already `.bind()`ed to a caller-allocated
+scalar i32 Parameter - the same boundary contract as make_accumulation's
+`source`/`iteration_p` (see `_require_param_need`); the underlying Parameter
+is not built here, the same way make_accumulation takes iteration_p rather
+than allocating it, since this factory takes no pool: every scratch buffer
+below is a caller-supplied data arg, never a bound field Parameter.
 
 Every buffer is n_flat-sized, since a per-basin array is indexed by basin id
 and basin id = pit index + 1 (bid/basin_saddlenode/outlet range over the
@@ -240,6 +264,7 @@ from importlib import import_module
 
 from ..core.context.bag import Bag
 from ..core.context.backends import backend_classes
+from ..core.context.need import Kind, Need
 from ..core.context.routine import RoutineBuilder
 from ..core.context.sequence import host_step, kernel_step, routine_step
 from ..ops import make_bitpack
@@ -311,16 +336,25 @@ def make_receivers(
     mode="stochastic".
 
     `mode` "steepest"|"stochastic" picks the kernel body variant (see the
-    module docstring). `seed_p` is required, and only used, when
-    mode="stochastic". `diagonal_partition_correction` and `h_aware` are
-    documented in the module docstring.
+    module docstring). `seed_p` is a `Need(kind=Kind.PARAM)`, already
+    `.bind()`ed to a Parameter - the same boundary contract as
+    make_accumulation's `source`/`iteration_p` (see the module docstring and
+    `_require_param_need`): the caller builds its own Parameter, wraps it in
+    a `Need("seed_p", kind=Kind.PARAM)`, `.bind()`s it, and hands the Need
+    here already bound. Required, and only used, when mode="stochastic";
+    raises immediately (TypeError if not a Need at all, ValueError if unbound
+    or the wrong kind) rather than failing later inside a compile.
+    `diagonal_partition_correction` and `h_aware` are documented in the
+    module docstring.
 
     Author: B.G (07/2026)
     """
     if mode not in _MODES:
         raise ValueError(f"make_receivers: mode must be one of {sorted(_MODES)}, got {mode!r}")
-    if mode == "stochastic" and seed_p is None:
-        raise ValueError("make_receivers: mode='stochastic' requires seed_p")
+    if mode == "stochastic":
+        if seed_p is None:
+            raise ValueError("make_receivers: mode='stochastic' requires seed_p")
+        _require_param_need(seed_p, "seed_p", factory="make_receivers")
 
     backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
     KernelCls = _kernel_cls(backend)
@@ -336,7 +370,7 @@ def make_receivers(
             grid=grid,
             hash_u32=hash_u32,
             mode=mode,
-            seed_p=seed_p,
+            seed_need=seed_p,
             diagonal_partition_correction=diagonal_partition_correction,
             h_aware=h_aware,
         )
@@ -347,7 +381,7 @@ def make_receivers(
             grid=grid,
             hash_u32=hash_u32,
             mode=mode,
-            seed_p=seed_p,
+            seed_need=seed_p,
             diagonal_partition_correction=diagonal_partition_correction,
             h_aware=h_aware,
         )
@@ -416,6 +450,30 @@ def _resolve_nx_ny(grid: Bag) -> tuple:
     return nx, ny
 
 
+def _require_param_need(need_obj, label: str, *, factory: str = "make_accumulation") -> None:
+    """
+    Raise immediately and clearly unless `need_obj` is a `Need(kind=Kind.PARAM)`
+    already `.bind()`ed to a Parameter - the boundary check make_accumulation
+    runs on `source`/`iteration_p`, make_receivers on `seed_p` and
+    make_depressions on `depression_counter_p` before threading each into a
+    block module's build_* function (see the module docstring). TypeError for
+    anything that is not a Need at all (a bare Parameter passed by mistake);
+    ValueError for a Need of the wrong kind or one that is not yet bound.
+
+    Author: B.G (08/2026)
+    """
+    if not isinstance(need_obj, Need):
+        raise TypeError(
+            f"{factory}: {label} must be a Need(kind=Kind.PARAM), got "
+            f"{type(need_obj).__name__} - build a Need, .bind() it to your Parameter, "
+            "and pass that instead of the bare Parameter"
+        )
+    if need_obj.kind is not Kind.PARAM:
+        raise ValueError(f"{factory}: {label} must be kind=Kind.PARAM, got kind={need_obj.kind.value}")
+    if not need_obj.is_bound:
+        raise ValueError(f"{factory}: {label} is not bound yet - .bind() it to a Parameter before calling")
+
+
 def make_accumulation(
     backend: str,
     grid: Bag,
@@ -434,9 +492,13 @@ def make_accumulation(
     each returns and the RoutineBuilder methods' data_names/fused=False
     conventions.
 
-    `source` is a Parameter in any mode (const/scalar/field). `iteration_p`
-    is required, and only used, for method="rake_compress". `n_flat`
-    defaults to grid.nx.get() * grid.ny.get() (see _resolve_n_flat).
+    `source` is a `Need(kind=Kind.PARAM)`, already `.bind()`ed to a Parameter
+    in any mode (const/scalar/field) - see the module docstring. `iteration_p`
+    is a `Need(kind=Kind.PARAM, dtype=<i32>, modes={"scalar"})`, already
+    bound; required, and only used, for method="rake_compress". Both raise
+    immediately (TypeError if not a Need at all, ValueError if unbound or the
+    wrong kind) rather than failing later inside a compile. `n_flat` defaults
+    to grid.nx.get() * grid.ny.get() (see _resolve_n_flat).
 
     `method="persistent_mfd"` is cupy-only (raises for any other backend -
     see _cupy_mfd_accum.py's module docstring for why there is, and will
@@ -453,6 +515,8 @@ def make_accumulation(
 
     Author: B.G (07/2026)
     """
+    _require_param_need(source, "source")
+
     if method == "persistent_mfd":
         if backend != "cupy":
             raise ValueError(
@@ -470,8 +534,10 @@ def make_accumulation(
 
     if method not in _ACCUM_METHODS:
         raise ValueError(f"make_accumulation: method must be one of {sorted(_ACCUM_METHODS)}, got {method!r}")
-    if method == "rake_compress" and iteration_p is None:
-        raise ValueError("make_accumulation: method='rake_compress' requires iteration_p")
+    if method == "rake_compress":
+        if iteration_p is None:
+            raise ValueError("make_accumulation: method='rake_compress' requires iteration_p")
+        _require_param_need(iteration_p, "iteration_p")
 
     backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
     KernelCls = _kernel_cls(backend)
@@ -545,9 +611,18 @@ def make_depressions(
     keys, their types (Kernel vs Routine) per combination/backend, and the
     data args each expects.
 
-    `depression_counter_p` is a caller-allocated scalar Parameter (mode
-    "scalar", dtype i32) - required, not built here (this factory takes no
-    pool). `n_flat` defaults to grid.nx.get() * grid.ny.get(), same as
+    `depression_counter_p` is a `Need(kind=Kind.PARAM, dtype=i32,
+    modes={"scalar"})`, already `.bind()`ed to a caller-allocated scalar i32
+    Parameter - the same boundary contract as make_accumulation's `source`/
+    `iteration_p` (see the module docstring and `_require_param_need`): the
+    caller builds its own Parameter, wraps it in a
+    `Need("depression_counter_p", kind=Kind.PARAM, dtype=i32,
+    modes={"scalar"})`, `.bind()`s it, and hands the Need here already bound.
+    Not built here (this factory takes no pool). Its dtype/mode is enforced a
+    second time at this factory's own boundary, not left to whatever the
+    caller's Need happened to declare (mirrors iteration_p's internal
+    `_ITER`/`_SOURCE` re-Need pattern in _closure_accum.py/_cupy_accum.py).
+    `n_flat` defaults to grid.nx.get() * grid.ny.get(), same as
     make_accumulation.
 
     This builds the routines/kernels only; running them in the
@@ -569,16 +644,21 @@ def make_depressions(
     closure = backend in ("taichi", "quadrants")
     logn = math.ceil(math.log2(n_flat_resolved)) + 1
 
+    _require_param_need(depression_counter_p, "depression_counter_p", factory="make_depressions")
+    ndep_need = Need("_NDEP", kind=Kind.PARAM, dtype=dtypes["i32"], modes={"scalar"})
+    ndep_need.bind(depression_counter_p.value)
+    ndep_param = ndep_need.value
+
     bitpack_bag = make_bitpack(backend)
     bitpack = {"pack": bitpack_bag.pack, "unpack_value": bitpack_bag.unpack_value, "unpack_index": bitpack_bag.unpack_index}
 
-    out: dict = {"ndep": depression_counter_p}
+    out: dict = {"ndep": ndep_param}
 
     if closure:
         copy_field = blocks.build_copy_field(KernelCls, backend=backend, backend_mod=backend_mod)
         depression_counter = blocks.build_depression_counter(
             KernelCls, backend=backend, backend_mod=backend_mod, grid=grid,
-            ndep_raw=depression_counter_p.get().data,
+            ndep_raw=ndep_param.get().data,
         )
     else:
         copy_field = blocks.build_copy_field(KernelCls, n_flat=n_flat_resolved)
@@ -968,23 +1048,29 @@ def make_fill_reconstruct(
     `sweep_row_rl`, `sweep_col_tb`, `sweep_col_bt`, `frontier_init`, `relax`
     (all KernelBuilders, data args per _cupy_reconstruct.py's/
     _closure_reconstruct.py's build_fill_reconstruct_* docstrings) plus
-    `pass_p` itself.
+    `pass_p` itself (the underlying Parameter, for the solver's own
+    `.set()`/`.read()` use - see make_fill_reconstruct_solver).
 
-    `pass_p` is a caller-allocated scalar i32 Parameter (mode "scalar"),
-    required - not built here, the same way make_depressions takes
-    `depression_counter_p`: this factory takes no pool, every scratch buffer
-    is a caller-supplied data arg. `relax` reads it every launch
-    (`$P.get(0)$`/`_P.get(0)`) to index `counters[]` and to pick which half
-    of the combined `frontier` buffer is this pass's input - bumping it
-    between passes is make_fill_reconstruct_solver's job, not this one's.
+    `pass_p` is a `Need(kind=Kind.PARAM, dtype=i32, modes={"scalar"})`,
+    already `.bind()`ed to a caller-allocated scalar i32 Parameter - the same
+    boundary contract as make_accumulation's `source`/`iteration_p` (see the
+    module docstring and `_require_param_need`): not built here, this factory
+    takes no pool, every scratch buffer is a caller-supplied data arg.
+    `relax` reads it every launch (`$P.get(0)$`/`_P.get(0)`) to index
+    `counters[]` and to pick which half of the combined `frontier` buffer is
+    this pass's input - bumping it between passes is
+    make_fill_reconstruct_solver's job, not this one's.
 
     `n_flat` defaults to grid.nx.get() * grid.ny.get(), same as
     make_accumulation; the row-length/row-count split the sweeps need
     (`_resolve_nx_ny`) always requires const-mode grid dimensions, with no
     override.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
+    _require_param_need(pass_p, "pass_p", factory="make_fill_reconstruct")
+    pass_param = pass_p.value
+
     backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
     KernelCls = _kernel_cls(backend)
     blocks = _blocks_for(backend, "reconstruct")
@@ -1009,7 +1095,7 @@ def make_fill_reconstruct(
 
     out: dict = {
         "init_filled": init_filled, "frontier_init": frontier_init, "relax": relax,
-        "pass_p": pass_p, "grid": grid,
+        "pass_p": pass_param, "grid": grid,
     }
     for name, kb in sweeps.items():
         out[f"sweep_{name}"] = kb
