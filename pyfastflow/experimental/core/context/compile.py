@@ -65,6 +65,7 @@ import textwrap
 import warnings
 from abc import ABC, abstractmethod
 from functools import lru_cache
+from types import FunctionType
 from typing import Any
 
 from ..pool.base import new_uid
@@ -748,5 +749,126 @@ class KernelBuilder(CompileBuilder):
 
     Author: B.G (07/2026)
     """
+
+
+def resolve_binding_host(value):
+    """
+    Host-mode counterpart to resolve_binding: what a bound object becomes
+    inside a host callback's globals, when there is no backend compilation
+    step at all - only host python running the callback directly.
+
+    Parameter      itself, unwrapped - host code reads/writes it through
+                   parameter.py's own host-facing surface (.get()/.set()/
+                   .read()), never through device_view(), which does not
+                   exist for host use.
+    HelperBuilder  raises - a device helper is compiled for and only
+                   callable from device/kernel scope; there is nothing a
+                   host callback could do with one.
+    Bag            a _HostLazyBagView, so a dotted path resolves each member
+                   the same way, recursively, on first access.
+    anything else  passed through untouched, exactly as resolve_binding.
+
+    Author: B.G (08/2026)
+    """
+    if isinstance(value, Parameter):
+        return value
+    if isinstance(value, HelperBuilder):
+        name = getattr(value.template, "__name__", value.template)
+        raise TypeError(
+            f"cannot resolve device helper {name!r} for host use: a HelperBuilder is "
+            f"specialized by a kernel's own compile() and only callable from device/kernel "
+            f"scope, not host python - bind a Parameter or a plain value instead"
+        )
+    if isinstance(value, Bag):
+        return _HostLazyBagView(value)
+    return value
+
+
+class _HostLazyBagView:
+    """
+    Host-mode counterpart to _LazyBagView: what a Bag looks like from inside
+    a host callback once spliced into its globals by HostHelperBuilder.
+
+    No _SpecializeCtx to thread through: resolving a member here never
+    reaches a backend compile (a Parameter unwraps to itself, a HelperBuilder
+    raises - see resolve_binding_host), so there is nothing across two
+    resolutions of the same object to memoize the way device resolution does
+    (see _SpecializeCtx). Member resolution is still deferred to first access
+    and cached in the instance dict from then on, same as _LazyBagView.
+
+    Author: B.G (08/2026)
+    """
+
+    def __init__(self, bag: "Bag"):
+        object.__setattr__(self, "_bag", bag)
+
+    def __getattr__(self, name: str) -> Any:
+        # only called on a genuine miss (cached hits never reach here)
+        bag = object.__getattribute__(self, "_bag")
+        if name not in bag:
+            raise AttributeError(name)
+        resolved = resolve_binding_host(bag[name])
+        self.__dict__[name] = resolved
+        return resolved
+
+
+class HostHelperBuilder(CompileBuilder):
+    """
+    Builds a host callback: a plain python function plus its bindings, held
+    as a recipe, resolved for host python rather than for any device
+    backend.
+
+    A brother class to HelperBuilder, not a subclass of it - deliberately
+    much lighter. HelperBuilder's three backend subclasses, its
+    _SpecializeCtx memoization/cycle detection, and its Parameter ->
+    device_view() resolution step all exist because *device* code needs
+    backend-specific compilation; one HelperBuilder subclass per backend, one
+    ClosureHelper/ti.func per specialize. A host callback is already a plain
+    python function on every backend - there is nothing backend-specific left
+    to dispatch on, so one class covers Taichi, Quadrants and cupy alike.
+    "Compiling" it is exactly the closure-injection _closure_backend.py's
+    specialize_closure already does for a device func - rebuild the function
+    around a globals dict carrying the resolved bindings - minus handing the
+    result to ti.func/qd.func; the rebuilt function is returned directly,
+    already callable from host python.
+
+    Reuses CompileBuilder's .need()/.bind()/strict_needs/.needs/
+    .unmet_needs()/_resolve_needs() unchanged, by inheritance - nothing new
+    is added to that surface here.
+
+    Author: B.G (08/2026)
+    """
+
+    def compile(self) -> FunctionType:
+        """
+        Splice this builder's referenced bindings - resolved host-mode, see
+        resolve_binding_host - into the ingested template's own globals, and
+        return the rebuilt function. The result is ordinary host python,
+        directly callable; no backend object is involved anywhere in this
+        path.
+
+        Author: B.G (08/2026)
+        """
+        self._resolve_needs()
+        template = self._template
+        filtered = filter_bindings(template, self._bindings)
+        resolved = {name: resolve_binding_host(value) for name, value in filtered.items()}
+
+        source = getattr(template, "__wrapped__", template)
+        func_globals = dict(source.__globals__)
+        func_globals.update(resolved)
+
+        specialised = FunctionType(
+            source.__code__,
+            func_globals,
+            source.__name__,
+            source.__defaults__,
+            source.__closure__,
+        )
+        specialised.__kwdefaults__ = source.__kwdefaults__
+        specialised.__annotations__ = dict(source.__annotations__)
+        specialised.__doc__ = source.__doc__
+        specialised.__qualname__ = source.__qualname__
+        return specialised
 
 

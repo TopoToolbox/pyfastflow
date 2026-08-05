@@ -46,8 +46,12 @@ Four kinds, all recorded in the order added:
   kernel on Taichi/Quadrants, its own captured CUDA graph on cupy - so a
   loop over it replays that graph per iteration and pays the host sync only
   at block boundaries, not per kernel;
-- host code (add_host / host_step): any callable, called with the bag. It
-  may read Parameters with read() and write them with set();
+- host code (add_host / host_step): a plain callable, called with the bag,
+  free to read Parameters with read() and write them with set(); or a
+  HostHelperBuilder (compile.py), a Need-declaring recipe compiled at this
+  Sequence's own compile() time into a plain function with its bound Needs
+  already spliced into its globals, then called with no arguments - see
+  add_host's own docstring for both shapes;
 - a loop (add_loop): a body of the three above, run under a host-evaluated
   trip count and predicate.
 
@@ -129,7 +133,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Callable
 
 from .bag import Bag, check_handles
-from .compile import CompileBuilder
+from .compile import CompileBuilder, HostHelperBuilder
 from .need import Kind, Need
 from .routine import RoutineBuilder, _flatten_bindings, _template_label
 
@@ -182,6 +186,8 @@ class _Block:
         if self.kind == "routine":
             return f"routine:{type(self.builder).__name__}"
         if self.kind == "host":
+            if isinstance(self.fn, HostHelperBuilder):
+                return f"host:{_template_label(self.fn.template)}"
             return f"host:{getattr(self.fn, '__name__', repr(self.fn)[:40])}"
         return "loop"
 
@@ -206,10 +212,11 @@ def routine_step(routine_builder: RoutineBuilder, data_handle_ref: tuple = ()) -
     return _Block("routine", builder=routine_builder, data_handle_ref=tuple(data_handle_ref))
 
 
-def host_step(fn: Callable[[Bag], Any]) -> _Block:
+def host_step(fn: "Callable[[Bag], Any] | HostHelperBuilder") -> _Block:
     """
     A host-code block, for use in an add_loop() body. The same block
-    add_host() appends, as a value rather than an append.
+    add_host() appends, as a value rather than an append. See add_host's
+    docstring for the two accepted shapes of `fn`.
 
     Author: B.G (07/2026)
     """
@@ -402,6 +409,46 @@ class SequenceBuilder(ABC):
                 block.builder.bind(bag)
         return self
 
+    @property
+    def needs(self) -> dict[str, Need]:
+        """
+        Every Need declared by any block's own builder, keyed by name - a
+        kernel block's kernel_builder, a Routine block's whole RoutineBuilder
+        (itself derived the same way, from its own steps - see routine.py),
+        and now a host block's HostHelperBuilder, if it is one (a plain
+        callable host block declares none). Loop bodies are included via
+        _flat_blocks(). Not separately bookkept here - walked fresh every
+        time this is read; see RoutineBuilder.needs for what happens when two
+        blocks declare distinct Needs under the same name.
+
+        Author: B.G (08/2026)
+        """
+        out: dict[str, Need] = {}
+        for _, block in self._flat_blocks():
+            if block.kind in ("kernel", "routine"):
+                out.update(block.builder.needs)
+            elif block.kind == "host" and isinstance(block.fn, HostHelperBuilder):
+                out.update(block.fn.needs)
+        return out
+
+    def unmet_needs(self) -> list[Need]:
+        """
+        Every currently-unbound Need reachable from any block's own builder -
+        kernel, routine and (when it is a HostHelperBuilder) host blocks,
+        loop bodies included via _flat_blocks() - flattened exactly as
+        CompileBuilder.unmet_needs() flattens through a bound HELPER need
+        (compile.py). No separate Need bookkeeping at this layer.
+
+        Author: B.G (08/2026)
+        """
+        unmet: list[Need] = []
+        for _, block in self._flat_blocks():
+            if block.kind in ("kernel", "routine"):
+                unmet.extend(block.builder.unmet_needs())
+            elif block.kind == "host" and isinstance(block.fn, HostHelperBuilder):
+                unmet.extend(block.fn.unmet_needs())
+        return unmet
+
     def add_kernel(
         self,
         kernel_builder: CompileBuilder,
@@ -439,11 +486,19 @@ class SequenceBuilder(ABC):
         self._blocks.append(routine_step(routine_builder, data_handle_ref))
         return self
 
-    def add_host(self, fn: Callable[[Bag], Any]) -> "SequenceBuilder":
+    def add_host(self, fn: "Callable[[Bag], Any] | HostHelperBuilder") -> "SequenceBuilder":
         """
-        Append a block calling `fn(bag)` on the host, with the Sequence's
-        bag. Its return value is discarded; it is there to read Parameters
-        with read() and write them with set() between blocks.
+        Append a host-code block. Two shapes of `fn` are accepted:
+
+        - a plain callable, called as `fn(bag)` with the Sequence's bag, its
+          return value discarded - the original, untracked shape, reading
+          Parameters with read() and writing them with set() straight off
+          the bag it is handed.
+        - a HostHelperBuilder (compile.py): a Need-declaring recipe, compiled
+          at this Sequence's own compile() time into a plain function with
+          its bound Needs already spliced into its globals, and then called
+          with no arguments - a host callback that declares what it needs
+          instead of reaching for the raw bag.
 
         Author: B.G (07/2026)
         """
@@ -628,8 +683,8 @@ class SequenceBuilder(ABC):
                     raise KeyError(f"compile: {path} refers to data not registered via add_data: {sorted(unknown)}")
                 block.builder.bind_bag(self._bag)
             elif block.kind == "host":
-                if not callable(block.fn):
-                    raise TypeError(f"compile: {path} host block is not callable")
+                if not isinstance(block.fn, HostHelperBuilder) and not callable(block.fn):
+                    raise TypeError(f"compile: {path} host block is not callable and not a HostHelperBuilder")
 
         self._check_data_needs(flat)
 
@@ -690,6 +745,9 @@ class SequenceBuilder(ABC):
         """
         if block.kind == "host":
             fn = block.fn
+            if isinstance(fn, HostHelperBuilder):
+                compiled_fn = fn.compile()
+                return _CompiledBlock("host", run=lambda: compiled_fn())
             bag = self._bag
             return _CompiledBlock("host", run=lambda: fn(bag))
 

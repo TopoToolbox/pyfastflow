@@ -596,6 +596,44 @@ class RoutineBuilder(ABC):
             step.kernel_builder.bind(bag)
         return self
 
+    @property
+    def needs(self) -> dict[str, Need]:
+        """
+        Every Need declared on any step's kernel_builder, keyed by name -
+        not separately bookkept at this layer, walked fresh from each
+        step.kernel_builder.needs (compile.py) every time this is read. Two
+        steps declaring distinct Need objects under the same name are both
+        legal (see need.py's module docstring and CompileBuilder.bind()'s);
+        a plain dict can only show one object per key, so this view keeps
+        whichever comes last in step order - use unmet_needs() when what
+        matters is which Needs are unmet rather than which single object a
+        name currently maps to here.
+
+        Author: B.G (08/2026)
+        """
+        out: dict[str, Need] = {}
+        for step in self._steps:
+            out.update(step.kernel_builder.needs)
+        return out
+
+    def unmet_needs(self) -> list[Need]:
+        """
+        Every currently-unbound Need reachable from any step's
+        kernel_builder, flattened exactly as CompileBuilder.unmet_needs()
+        flattens through a bound HELPER need (compile.py) - no separate Need
+        bookkeeping at this layer, this walks each step's kernel_builder
+        fresh. A Need shared by two steps (the same object, declared on
+        both) that is still unbound is reported once per step that declares
+        it, same as CompileBuilder's own list is per-declaration, not
+        deduplicated by identity.
+
+        Author: B.G (08/2026)
+        """
+        unmet: list[Need] = []
+        for step in self._steps:
+            unmet.extend(step.kernel_builder.unmet_needs())
+        return unmet
+
     @abstractmethod
     def _data_arity(self, kernel_builder: CompileBuilder) -> int:
         """
