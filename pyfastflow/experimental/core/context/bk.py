@@ -69,7 +69,16 @@ ternary-style branchless select over that) and `atomic_min`/`atomic_max`
 (reduce's per-thread accumulation into a 0-d field) plus the `i32`/`i64`/`f32`
 dtype tokens alongside the existing `u32`, needed as `ctx.bk.cast(x, ctx.bk.
 i64)`'s second argument and, for `i64`, the same oversized-literal exemption
-`u32` already gets (`ctx.bk.i64(0xFFFFFFFF)` - see below).
+`u32` already gets (`ctx.bk.i64(0xFFFFFFFF)` - see below). Extended again for
+ops/'s elementwise port (08/2026) with `grouped` (`ti.grouped`/`qd.grouped` -
+`swap`'s dimensionality-agnostic iteration over a possibly multi-dimensional
+field/ndarray, `for idx in ctx.bk.grouped(array1)`), a plain pass-through with
+no oversized-literal or identity concern of its own. Extended again for
+flow/'s accumulation port (08/2026) with `atomic_add` (accum_downstream_
+atomic's own per-node downstream accumulation into a DATA-typed `q` buffer -
+the same "genuinely concurrent write, so DATA not PARAM" shape reduce's
+`atomic_min`/`atomic_max` already cover, just the third of the three atomic
+ops Taichi/Quadrants both expose that this surface had not yet needed).
 
 `abs`/`min`/`max` stay plain python builtins, as grid already established;
 `int()`/`float()` join them here rather than becoming `ctx.bk` members -
@@ -131,7 +140,8 @@ class BkError(Exception):
 
 _BK_METHOD_NAMES = (
     "sqrt", "atan2", "cos", "sin", "floor", "u32",
-    "bit_cast", "select", "cast", "atomic_min", "atomic_max", "i32", "i64", "f32",
+    "bit_cast", "select", "cast", "atomic_min", "atomic_max", "atomic_add", "i32", "i64", "f32",
+    "grouped",
 )
 """Every name `ctx.bk` resolves - see the module docstring's "Surface" section."""
 
@@ -166,9 +176,11 @@ class ClosureBkNode:
             "cast": backend.cast,
             "atomic_min": backend.atomic_min,
             "atomic_max": backend.atomic_max,
+            "atomic_add": backend.atomic_add,
             "i32": backend.i32,
             "i64": backend.i64,
             "f32": backend.f32,
+            "grouped": backend.grouped,
         }
 
     def __getattr__(self, name: str) -> Any:

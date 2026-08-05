@@ -125,6 +125,256 @@ __device__ int {t}_unpack_index(long long packed) {{
 
 
 # ---------------------------------------------------------------------------
+# math
+# ---------------------------------------------------------------------------
+
+
+def build_math_group() -> "FrozenGroup":
+    """
+    atan(x) via atan2f(x, 1); nextafter(x, y), one ULP of f32 towards y via
+    the same bit-twiddling as _closure_blocks.build_math_group - composed
+    onto a fresh GroupBuilder under those two public names. No PARAM slots.
+
+    Author: B.G (08/2026)
+    """
+    t = f"pf{new_uid()}"
+    atan = _helper(f"__device__ float {t}_atan(float x) {{ return atan2f(x, 1.0f); }}")
+    nextafter = _helper(
+        f"""
+__device__ float {t}_nextafter(float x, float y) {{
+    float result = y;
+    if (x != y) {{
+        unsigned int sign_mask = 0x80000000u;
+        unsigned int ix = __float_as_uint(x);
+        if (x == 0.0f) {{
+            ix = (__float_as_uint(y) & sign_mask) | 1u;
+        }} else if ((x > 0.0f) == (y > x)) {{
+            ix += 1u;
+        }} else {{
+            ix -= 1u;
+        }}
+        result = __uint_as_float(ix);
+    }}
+    return result;
+}}
+"""
+    )
+
+    group = GroupBuilder()
+    group.wire_helper("atan").compose("atan", atan)
+    group.wire_helper("nextafter").compose("nextafter", nextafter)
+    return group.close()
+
+
+# ---------------------------------------------------------------------------
+# elementwise (kernels, returned unbuilt) - `n` is baked as a python int at
+# build time (this build's own closure), not a data argument - see
+# _closure_blocks.build_elementwise's own docstring; the pre-rewrite cupy
+# text carried `n` as a real kernel argument instead, which this port
+# tightens to match every other backend's already-closed-over `n`.
+# ---------------------------------------------------------------------------
+
+
+def build_elementwise(n: int) -> dict:
+    """
+    swap/add_B_to_A/add_B_to_weighted_A/weighted_mean_B_in_A/arange/
+    multiply_by_scalar over a flat f32 buffer of length `n`, as unbuilt
+    FrozenKernels.
+
+    Author: B.G (08/2026)
+    """
+    t = f"pf{new_uid()}"
+
+    def _k(template, names):
+        b = KernelBuilder()
+        for name in names:
+            b.wire_data(name)
+        return b.ingest(template)
+
+    return {
+        "swap": _k(
+            f"""
+extern "C" __global__ void {t}_swap(float* array1, float* array2) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= {int(n)}) return;
+    float temp = array1[i];
+    array1[i] = array2[i];
+    array2[i] = temp;
+}}
+""",
+            ["array1", "array2"],
+        ),
+        "add_B_to_A": _k(
+            f"""
+extern "C" __global__ void {t}_add_B_to_A(float* array1, const float* array2) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= {int(n)}) return;
+    array1[i] += array2[i];
+}}
+""",
+            ["array1", "array2"],
+        ),
+        "add_B_to_weighted_A": _k(
+            f"""
+extern "C" __global__ void {t}_add_B_to_weighted_A(float* array1, const float* array2, float weight) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= {int(n)}) return;
+    array1[i] += array2[i] * weight;
+}}
+""",
+            ["array1", "array2", "weight"],
+        ),
+        "weighted_mean_B_in_A": _k(
+            f"""
+extern "C" __global__ void {t}_weighted_mean_B_in_A(float* array1, const float* array2, float weight) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= {int(n)}) return;
+    array1[i] = array2[i] * weight + array1[i] * (1.0f - weight);
+}}
+""",
+            ["array1", "array2", "weight"],
+        ),
+        "arange": _k(
+            f"""
+extern "C" __global__ void {t}_arange(float* array) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= {int(n)}) return;
+    array[i] = (float)i;
+}}
+""",
+            ["array"],
+        ),
+        "multiply_by_scalar": _k(
+            f"""
+extern "C" __global__ void {t}_multiply_by_scalar(float* A, float scalar) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= {int(n)}) return;
+    A[i] *= scalar;
+}}
+""",
+            ["A", "scalar"],
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# slope (grid-aware) - the first ops/ case of a nested FrozenGroup-in-Frozen
+# Group child on cupy, mirroring _closure_blocks.build_slope_group
+# ---------------------------------------------------------------------------
+
+
+def _find_param_paths(frozen, leaf_name: str, prefix: tuple = ()) -> list:
+    """Identical to _closure_blocks.py's own `_find_param_paths`."""
+    from ..core.context.slot import SlotKind
+
+    paths = []
+    if leaf_name in frozen.slots.names(SlotKind.PARAM):
+        paths.append(".".join(prefix + (leaf_name,)))
+    for name, child in frozen.composed.items():
+        paths.extend(_find_param_paths(child, leaf_name, prefix + (name,)))
+    return paths
+
+
+def _share_leaf(group: GroupBuilder, canonical: str) -> None:
+    """Identical to _closure_blocks.py's own `_share_leaf`."""
+    paths = []
+    for name, child in group.composed.items():
+        paths.extend(_find_param_paths(child, canonical, (name,)))
+    if paths:
+        group.share(canonical, *paths)
+
+
+def build_slope_group(grid) -> "FrozenGroup":
+    """
+    sumslope_downstream(z, i) / slope_dir(z, i, k), same arithmetic as
+    _closure_blocks.build_slope_group, walking `grid`'s neighbour/dx/
+    n_neighbours surface through `$ctx.grid...$` spans - `grid` composed
+    independently as each helper's own child, same nested-FrozenGroup shape
+    as the closure port (see that module's own docstring).
+
+    Author: B.G (08/2026)
+    """
+    from ..core.context.slot import SlotKind
+
+    t = f"pf{new_uid()}"
+    sumslope_downstream = _helper(
+        f"""
+__device__ float {t}_sumslope_downstream(const float* z, int i) {{
+    float sumslope = 0.0f;
+    int nk = $ctx.grid.N_NEIGHBOURS.get(0)$;
+    for (int k = 0; k < nk; k++) {{
+        int j = $ctx.grid.neighbour(i, k)$;
+        if (j > -1) {{
+            if (z[j] < z[i]) {{
+                sumslope += (z[i] - z[j]) / $ctx.grid.DX.get(0)$;
+            }}
+        }}
+    }}
+    return sumslope;
+}}
+""",
+        helpers={"grid": grid},
+    )
+    slope_dir = _helper(
+        f"""
+__device__ float {t}_slope_dir(const float* z, int i, int k) {{
+    int j = $ctx.grid.neighbour(i, k)$;
+    float slope = 0.0f;
+    if (j > -1) {{
+        slope = (z[i] - z[j]) / $ctx.grid.DX.get(0)$;
+    }}
+    return slope;
+}}
+""",
+        helpers={"grid": grid},
+    )
+
+    group = GroupBuilder()
+    grid_param_names = grid.slots.names(SlotKind.PARAM)
+    for name in grid_param_names:
+        group.wire_param(name)
+    group.wire_helper("sumslope_downstream").compose("sumslope_downstream", sumslope_downstream)
+    group.wire_helper("slope_dir").compose("slope_dir", slope_dir)
+
+    for name in grid_param_names:
+        _share_leaf(group, name)
+
+    return group.close()
+
+
+# ---------------------------------------------------------------------------
+# block_reduce (cub::BlockReduce wrapper) - cupy only
+# ---------------------------------------------------------------------------
+
+
+def build_block_reduce_group(block_size: int = 128) -> "FrozenGroup":
+    """
+    sum(val): one cub::BlockReduce<float, block_size>::Sum() per calling
+    block, returning the block-wide total to thread 0 (undefined on other
+    threads - cub's own contract), composed under the public name "sum". The
+    first compile that reaches this triggers a one-time jitify header cache
+    warm-up for <cub/block/block_reduce.cuh>, roughly two minutes; that is
+    expected, not a hang.
+
+    Author: B.G (08/2026)
+    """
+    t = f"pf{new_uid()}"
+    sum_helper = _helper(
+        f"""
+#include <cub/block/block_reduce.cuh>
+__device__ float {t}_block_reduce_sum(float val) {{
+    typedef cub::BlockReduce<float, {int(block_size)}> BlockReduceT;
+    __shared__ typename BlockReduceT::TempStorage temp_storage;
+    return BlockReduceT(temp_storage).Sum(val);
+}}
+"""
+    )
+    group = GroupBuilder()
+    group.wire_helper("sum").compose("sum", sum_helper)
+    return group.close()
+
+
+# ---------------------------------------------------------------------------
 # scan compaction: read_count + scatter, as a 2-step FrozenRoutine
 # ---------------------------------------------------------------------------
 

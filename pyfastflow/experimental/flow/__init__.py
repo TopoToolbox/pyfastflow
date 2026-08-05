@@ -1,44 +1,67 @@
 """
-make_receivers: the SFD (single-flow-direction) receiver Bag factory, built
-on the backend-agnostic core (see ..core.context) and on a grid Bag from
-..grid.
+make_receivers: the SFD (single-flow-direction) receiver factory, built on
+the new builder/frozen/bound stack (../core/context/builder.py, frozen.py,
+bound.py) and on a grid FrozenGroup from ../grid's make_grid_group.
 
-Like make_grid/make_noise there is no stateful context class - make_receivers
-builds a Bag once and hands it back: a `receivers` KernelBuilder plus the
-distance/slope helpers it is made of, so a caller can recombine them into its
-own kernel or routine rather than being stuck with only the compiled
-receivers kernel.
+Like grid/noise/ops there is no stateful context class - make_receivers
+returns a dict of unbuilt structures (FrozenKernel/FrozenHelper): a
+`receivers` FrozenKernel plus the distance/slope helpers it is made of, so a
+caller can recombine them into its own kernel or routine rather than being
+stuck with only the compiled receivers kernel. A caller `.build()`s the
+member it wants, binds its PARAM/DATA addresses, `.compile()`s:
 
-    grid = make_grid("taichi", pool, nx, ny, dx, topology="D8")
-    recv = make_receivers("taichi", grid, mode="steepest")
-    receivers_kernel = recv.receivers.compile()
-    receivers_kernel(z.data, rec.data)
+    grid = make_grid_group("taichi", topology="D8")
+    recv = make_receivers("taichi", grid, topology="D8", mode="steepest")
+    bound = recv["receivers"].build()
+    for k, v in grid_params.items():
+        bound.bind(k, v)  # NX/NY/DX/N_NEIGHBOURS - see below
+    bound.bind("z", z_field)
+    bound.bind("rec", rec_field)
+    receivers_kernel = bound.compile("taichi")
+    receivers_kernel()
 
 `mode` ("steepest"|"stochastic") and `h_aware` (False: kernel takes (z, rec)
 and slopes read h as 0; True: kernel takes (z, h, rec) and slopes use
 (zi-zj)+(hi-hj)) each pick one of four kernel body variants at build time -
-see _closure_receivers.py/_cupy_receivers.py's build_receivers.
+see _closure_receivers.py/_cupy_receivers.py's build_receivers. `topology`
+("D4"|"D8") must match whatever `grid` was itself built with (see
+../grid/__init__.py's own module docstring on the two-call structure/data
+split) - it is not readable off `grid` itself, a bare FrozenGroup carrying no
+Parameter values yet, and only matters here for
+`diagonal_partition_correction` (below); the neighbour loop itself is
+already parametrised by `grid.N_NEIGHBOURS`, read as ordinary device data.
 
-mode="stochastic" additionally requires `seed_p`, a `Need(kind=Kind.PARAM)`
-already `.bind()`ed to a scalar or const Parameter that the RNG hash mixes in
-alongside the node index and neighbour direction (see rand_unit in the block
-modules) - the caller builds its own Parameter, wraps it in a
-`Need("seed_p", kind=Kind.PARAM)`, `.bind()`s it, and hands the Need to
-make_receivers already bound (see `_require_param_need`, the same boundary
-contract make_accumulation uses for `source`/`iteration_p`); the host bumps
-the underlying Parameter between calls for a fresh draw.
+mode="stochastic" additionally needs a Parameter bound to the built
+receivers kernel's `rand_unit.SEED` address (`rand_unit`'s own wired PARAM
+slot, any mode - see rand_unit in the block modules; not build-phase-shared
+with anything, so it stays at that nested address rather than being
+promoted to the kernel's own top level the way `grid`'s own PARAM names
+are) after `.build()`, exactly like any other PARAM slot - there is no Need
+indirection in this stack (need.py is part of the pre-rewrite core only);
+the host bumps the underlying Parameter between calls for a fresh draw.
 
-`diagonal_partition_correction` only changes anything on a D8 grid: it swaps
-the corrected distance/slope helpers in for the grid's own dist_from_k/
-dist_between_nodes, dividing the diagonal-neighbour distance by sqrt(2) (see
-_closure_receivers.py's build_distance_slope_helpers for exactly which k values
-count as diagonal and why). Off, or on a D4 grid, dist_from_k_corrected and
-dist_between_nodes_corrected are simply the grid's own helpers, unchanged.
+`diagonal_partition_correction` only changes anything when `topology ==
+"D8"`: it adds the sqrt(2) correction inside dist_from_k_corrected/
+dist_between_nodes_corrected (see _closure_receivers.py's
+build_distance_slope_helpers for exactly which k values count as diagonal and
+why). Off, or on a D4 grid, dist_from_k_corrected/dist_between_nodes_corrected
+call straight through to `grid`'s own dist_from_k/dist_between_nodes, no
+correction applied - either way these two helpers always independently
+compose their own occurrence of `grid` (see _closure_receivers.py's module
+docstring for why: a uniform, always-two-occurrences shape lets
+`build_receivers` collapse them with `share()` unconditionally, never a
+variable number of occurrences depending on the flag).
 
-Bag members: `receivers` (KernelBuilder), `dist_from_k_corrected`,
-`dist_between_nodes_corrected`, `slope_from_values_k`, `slope_between_nodes`
-(HelperBuilders), plus `rand_unit` (HelperBuilder) only when
-mode="stochastic".
+Returned dict: `receivers` (FrozenKernel, data args (z, rec) or (z, h, rec)),
+`dist_from_k_corrected`, `dist_between_nodes_corrected`, `slope_from_values_k`,
+`slope_between_nodes` (FrozenHelper), plus `rand_unit` (FrozenHelper) only
+when mode="stochastic". `receivers`'s own top-level PARAM slots are every
+name `grid` itself wires (NX/NY/DX/N_NEIGHBOURS, plus NODATA_MASK/
+OUTLET_MASK if `grid` has them) - bind those bare names once on the built
+receivers kernel, not once per occurrence (`grid`'s FrozenGroup is composed
+twice inside `receivers`'s own tree - once directly, once nested under
+`slope.dist_from_k_corrected` - and build-phase-shared, `_share_leaf`, into
+one address each).
 
 A node with no downslope neighbour keeps `rec[i] = i` - a self-receiver, the
 same convention a can_out (base level) node uses. This is the pit convention
@@ -267,7 +290,6 @@ from ..core.context.backends import backend_classes
 from ..core.context.need import Kind, Need
 from ..core.context.routine import RoutineBuilder
 from ..core.context.sequence import host_step, kernel_step, routine_step
-from ..ops import make_bitpack
 from ..noise import make_hash_u32
 
 _MODES = frozenset({"steepest", "stochastic"})
@@ -322,71 +344,54 @@ def _kernel_cls(backend: str):
 
 def make_receivers(
     backend: str,
-    grid: Bag,
+    grid,
     *,
+    topology: str = "D8",
     mode: str = "steepest",
-    seed_p=None,
     diagonal_partition_correction: bool = False,
     h_aware: bool = False,
-) -> Bag:
+) -> dict:
     """
-    Build one receivers Bag: the `receivers` KernelBuilder (data args
+    Build one receivers dict: the `receivers` FrozenKernel (data args
     `(z, rec)` or `(z, h, rec)` depending on `h_aware`) plus the distance/
-    slope HelperBuilders it is made of, and `rand_unit` when
-    mode="stochastic".
+    slope FrozenHelpers it is made of, and `rand_unit` when
+    mode="stochastic". See the module docstring for the full contract
+    (`topology`, addressing, `SEED`).
 
-    `mode` "steepest"|"stochastic" picks the kernel body variant (see the
-    module docstring). `seed_p` is a `Need(kind=Kind.PARAM)`, already
-    `.bind()`ed to a Parameter - the same boundary contract as
-    make_accumulation's `source`/`iteration_p` (see the module docstring and
-    `_require_param_need`): the caller builds its own Parameter, wraps it in
-    a `Need("seed_p", kind=Kind.PARAM)`, `.bind()`s it, and hands the Need
-    here already bound. Required, and only used, when mode="stochastic";
-    raises immediately (TypeError if not a Need at all, ValueError if unbound
-    or the wrong kind) rather than failing later inside a compile.
-    `diagonal_partition_correction` and `h_aware` are documented in the
-    module docstring.
+    `mode` "steepest"|"stochastic" picks the kernel body variant.
+    `diagonal_partition_correction`, `h_aware` and `topology` are documented
+    in the module docstring.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     if mode not in _MODES:
         raise ValueError(f"make_receivers: mode must be one of {sorted(_MODES)}, got {mode!r}")
-    if mode == "stochastic":
-        if seed_p is None:
-            raise ValueError("make_receivers: mode='stochastic' requires seed_p")
-        _require_param_need(seed_p, "seed_p", factory="make_receivers")
+    if topology not in ("D4", "D8"):
+        raise ValueError(f"make_receivers: topology must be 'D4' or 'D8', got {topology!r}")
 
-    backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
-    KernelCls = _kernel_cls(backend)
     blocks = _blocks_for(backend, "receivers")
     hash_u32 = make_hash_u32(backend) if mode == "stochastic" else None
 
     if backend in ("taichi", "quadrants"):
-        helpers = blocks.build_receivers(
-            KernelCls,
-            HelperCls,
+        backend_mod, _, _, _ = backend_classes(backend)
+        return blocks.build_receivers(
             backend=backend,
             backend_mod=backend_mod,
             grid=grid,
             hash_u32=hash_u32,
             mode=mode,
-            seed_need=seed_p,
+            topology=topology,
             diagonal_partition_correction=diagonal_partition_correction,
             h_aware=h_aware,
         )
-    else:
-        helpers = blocks.build_receivers(
-            KernelCls,
-            HelperCls,
-            grid=grid,
-            hash_u32=hash_u32,
-            mode=mode,
-            seed_need=seed_p,
-            diagonal_partition_correction=diagonal_partition_correction,
-            h_aware=h_aware,
-        )
-
-    return Bag(helpers)
+    return blocks.build_receivers(
+        grid=grid,
+        hash_u32=hash_u32,
+        mode=mode,
+        topology=topology,
+        diagonal_partition_correction=diagonal_partition_correction,
+        h_aware=h_aware,
+    )
 
 
 def _routine_cls(backend: str):
@@ -476,8 +481,8 @@ def _require_param_need(need_obj, label: str, *, factory: str = "make_accumulati
 
 def make_accumulation(
     backend: str,
-    grid: Bag,
-    source,
+    grid,
+    source=None,
     *,
     method: str = "rake_compress",
     n_flat: int | None = None,
@@ -485,20 +490,36 @@ def make_accumulation(
     fr_stage: int = 2048,
     blocks_per_sm: int = 2,
     threads: int = 256,
-) -> Bag:
+) -> dict:
     """
-    Build one accumulation Bag for `method` "atomic"|"rake_compress"|
-    "pointer_jump_push"|"persistent_mfd" - see the module docstring for what
-    each returns and the RoutineBuilder methods' data_names/fused=False
-    conventions.
+    Build one accumulation structure for `method`
+    "atomic"|"rake_compress"|"pointer_jump_push"|"persistent_mfd".
 
-    `source` is a `Need(kind=Kind.PARAM)`, already `.bind()`ed to a Parameter
-    in any mode (const/scalar/field) - see the module docstring. `iteration_p`
-    is a `Need(kind=Kind.PARAM, dtype=<i32>, modes={"scalar"})`, already
-    bound; required, and only used, for method="rake_compress". Both raise
+    method="atomic" (ported to the new builder/frozen/bound stack, ../core/
+    context/builder.py/frozen.py/bound.py): `grid` is unused (atomic reads no
+    grid at all - it only walks `rec`) and `source` is ignored; `n_flat` is
+    REQUIRED (there is no bare-FrozenGroup equivalent of the old `grid.nx.
+    get() * grid.ny.get()` fallback - a `make_grid_group` result carries no
+    Parameter values to read at build time - see ../grid/__init__.py's own
+    module docstring on the structure/data split). Returns
+    {"accum": FrozenKernel} on Taichi/Quadrants (data args (rec, q); `SOURCE`
+    is this kernel's own wired PARAM slot, bound after `.build()` like any
+    other) or {"q_init": FrozenKernel, "accum": FrozenKernel} on cupy (see
+    _cupy_accum.py's build_atomic for why cupy needs the second real
+    launch): "q_init" (data arg (q,)) must be run, and finish, before
+    "accum" (data args (rec, q)); both wire `SOURCE`.
+
+    Every other method is unported this pass and unchanged: `source` is a
+    `Need(kind=Kind.PARAM)`, already `.bind()`ed to a Parameter in any mode
+    (const/scalar/field) - see the module docstring. `iteration_p` is a
+    `Need(kind=Kind.PARAM, dtype=<i32>, modes={"scalar"})`, already bound;
+    required, and only used, for method="rake_compress". Both raise
     immediately (TypeError if not a Need at all, ValueError if unbound or the
     wrong kind) rather than failing later inside a compile. `n_flat` defaults
-    to grid.nx.get() * grid.ny.get() (see _resolve_n_flat).
+    to grid.nx.get() * grid.ny.get() (see _resolve_n_flat) - which requires
+    `grid` to be an old-stack Bag with bound Parameters, not a
+    make_grid_group FrozenGroup; these methods are not yet callable against
+    the new grid at all.
 
     `method="persistent_mfd"` is cupy-only (raises for any other backend -
     see _cupy_mfd_accum.py's module docstring for why there is, and will
@@ -513,8 +534,20 @@ def make_accumulation(
     fixed (grid, block), not n_flat-sized). `fr_stage`/`blocks_per_sm`/
     `threads` are only used by this method.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
+    if method == "atomic":
+        if n_flat is None:
+            raise ValueError(
+                "make_accumulation: method='atomic' requires n_flat explicitly - "
+                "grid is a bare FrozenGroup with no bound values to read it off"
+            )
+        blocks = _blocks_for(backend, "accum")
+        if backend in ("taichi", "quadrants"):
+            backend_mod, _, _, _ = backend_classes(backend)
+            return {"accum": blocks.build_atomic(backend=backend, backend_mod=backend_mod, n_flat=int(n_flat))}
+        return blocks.build_atomic(n_flat=int(n_flat))
+
     _require_param_need(source, "source")
 
     if method == "persistent_mfd":
@@ -544,15 +577,6 @@ def make_accumulation(
     blocks = _blocks_for(backend, "accum")
     n_flat_resolved = _resolve_n_flat(grid, n_flat)
     closure = backend in ("taichi", "quadrants")
-
-    if method == "atomic":
-        if closure:
-            kb = blocks.build_atomic(KernelCls, backend=backend, backend_mod=backend_mod, source=source, n_flat=n_flat_resolved)
-            return Bag({"accum": kb})
-        # cupy: two real launches, not one - see _cupy_accum.py's
-        # build_atomic. "q_init" must be launched before "accum".
-        kbs = blocks.build_atomic(KernelCls, source=source, n_flat=n_flat_resolved)
-        return Bag(kbs)
 
     logn = math.ceil(math.log2(n_flat_resolved)) + 1
     RoutineCls = _routine_cls(backend)
@@ -648,6 +672,13 @@ def make_depressions(
     ndep_need = Need("_NDEP", kind=Kind.PARAM, dtype=dtypes["i32"], modes={"scalar"})
     ndep_need.bind(depression_counter_p.value)
     ndep_param = ndep_need.value
+
+    # Local import: ops no longer exports a bare make_bitpack (only
+    # make_bitpack_group, the FrozenGroup shape) - make_depressions itself is
+    # still on the pre-rewrite stack below this line and unported this pass;
+    # kept local so importing this module does not require ops to still
+    # carry the old name.
+    from ..ops import make_bitpack
 
     bitpack = make_bitpack(backend)
 

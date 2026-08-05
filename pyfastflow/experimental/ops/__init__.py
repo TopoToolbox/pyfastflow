@@ -1,27 +1,44 @@
 """
 Small device-op factories built on the new builder/frozen/bound stack
 (../core/context/builder.py, frozen.py, bound.py; see parameter.py for
-Parameter, unchanged) - bit packing, a parallel inclusive scan / stream
-compaction, and plain reductions. This pass ports `bitpack`, `scan` and
-`reduce` only - `math`/`elementwise`/`slope`/`block_reduce` (the old stack's
-other ops members) are out of scope for this pass and stay unported; nothing
-here removes them from the old stack.
+Parameter, unchanged) - bit packing, missing math, generic flat-buffer
+kernels, a grid-aware slope helper, a parallel inclusive scan / stream
+compaction, plain reductions, and (cupy only) a cub::BlockReduce wrapper.
 
-Three shapes, mirroring grid/noise/visu's own split
+Four shapes, mirroring grid/noise/visu's own split
 -------------------------------------------------------
-`make_bitpack_group` (structure, no Parameters - bitpack needs none) returns
-a FrozenGroup, composed by name into whatever kernel/helper needs
-pack/unpack_value/unpack_index (`kb.compose("bitpack", bitpack_group)`,
-`ctx.bitpack.pack(f, i)` in a template) - the same two-call structure/data
-split grid/__init__.py's own docstring explains, just with an empty data half
-here. `make_scan`/`make_reduce` are host-orchestrated, like the old stack:
-each returns a plain python object (Scan/Reduce) wrapping one or more
-compiled kernels/routines plus device-side 0-d scalar Parameters for their
-results - not representable as a single composable structure, since calling
-them runs a short host-side sequence. Unlike `make_bitpack_group`,
-`make_scan`/`make_reduce` DO take a `pool` and hand Parameters back to the
-caller - deliberately, and deliberately unlike `flow/`'s factories (which
-take no pool at all): see the Phase 2b brief for why this split holds.
+Helper-group factories (`make_bitpack_group`, `make_math_group`,
+`make_slope_group`, `make_block_reduce_group`) return a FrozenGroup composed
+by name into whatever kernel/helper needs it (`kb.compose("bitpack",
+bitpack_group)`, `ctx.bitpack.pack(f, i)` in a template) - the same
+two-call structure/data split grid/__init__.py's own docstring explains,
+just with an empty data half for every one of these (none of the four owns
+any Parameter). `make_elementwise` is the kernel-builder shape: a
+dict[str, FrozenKernel], unbuilt - a caller `.build()`s the member it wants,
+binds its DATA addresses, `.compile()`s. `make_scan`/`make_reduce` are
+host-orchestrated, like the old stack: each returns a plain python object
+(Scan/Reduce) wrapping one or more compiled kernels/routines plus
+device-side 0-d scalar Parameters for their results - not representable as a
+single composable structure, since calling them runs a short host-side
+sequence. Unlike the helper-group factories, `make_scan`/`make_reduce` DO
+take a `pool` and hand Parameters back to the caller - deliberately, and
+deliberately unlike `flow/`'s factories (which take no pool at all): see the
+Phase 2b brief for why this split holds.
+
+`make_slope_group` is this pass's first nested-FrozenGroup-in-FrozenGroup
+case within `ops/` itself (mirroring visu's own hillshade gradient blocks,
+../visu/__init__.py): `sumslope_downstream`/`slope_dir` each independently
+compose the caller's own grid FrozenGroup as a child (a device template can
+only reach what is composed directly onto its own scope), and `make_slope_
+group` promotes every one of grid's own top-level PARAM names to its own top
+level, build-phase-shared into both nested occurrences via `_share_leaf` -
+identical mechanism to grid/visu's own, copied rather than imported for the
+same reason those two modules copy it from each other (an explicit,
+itemized, per-factory declaration, never name-matching across independently
+authored composites).
+
+`make_block_reduce_group` is cupy-only (raises otherwise) - Taichi/Quadrants
+have no block-level reduction primitive this wraps.
 
 `make_scan`'s/`make_reduce`'s returned Parameters (`Scan.count_param`,
 `Reduce.{sum,min,max,argmin}_param`) are handed back bare, not wrapped in
@@ -118,6 +135,75 @@ def make_bitpack_group(backend: str) -> "FrozenGroup":
     Author: B.G (08/2026)
     """
     return _blocks_for(backend).build_bitpack_group()
+
+
+def make_math_group(backend: str) -> "FrozenGroup":
+    """
+    atan(x) and nextafter(x, y) (f32), filling in for the two functions
+    Taichi/Quadrants/CUDA device code has no direct equivalent for - composed
+    by name (`ctx.math.atan(x)`, `ctx.math.nextafter(x, y)`). No PARAM slots.
+
+    Author: B.G (08/2026)
+    """
+    return _blocks_for(backend).build_math_group()
+
+
+def make_elementwise(backend: str, *, n: "int | None" = None) -> dict:
+    """
+    swap, add_B_to_A, add_B_to_weighted_A, weighted_mean_B_in_A, arange,
+    multiply_by_scalar over a flat buffer, as unbuilt FrozenKernels - call
+    `.build()` then bind DATA addresses then `.compile()` on the member you
+    want. Buffers (and, on cupy, the buffer length `n`, required here since a
+    `cp.RawModule` kernel has no auto-ranging equivalent to Taichi/Quadrants'
+    `for i in array`) are DATA slots, not bound Parameters.
+
+    `n` is required on cupy (baked into the generated launch-bounds check at
+    build time - see _cupy_blocks.build_elementwise) and ignored on Taichi/
+    Quadrants (whose `for i in array` ranges over the buffer's own runtime
+    shape, needing no baked length at all).
+
+    Author: B.G (08/2026)
+    """
+    blocks = _blocks_for(backend)
+    if backend == "cupy":
+        if n is None:
+            raise ValueError("make_elementwise: cupy requires n (the buffer length)")
+        return blocks.build_elementwise(n)
+    backend_mod, _, _, _ = backend_classes(backend)
+    return blocks.build_elementwise(backend, backend_mod)
+
+
+def make_slope_group(backend: str, grid: "FrozenGroup") -> "FrozenGroup":
+    """
+    sumslope_downstream(z, i): sum of (z[i]-z[j])/dx over every downstream
+    neighbour of i. slope_dir(z, i, k): the signed slope towards neighbour k,
+    0 where there is none. Both walk `grid`'s own neighbour/dx/n_neighbours
+    surface (../grid's make_grid_group result), so they follow whatever
+    topology/boundary/nodata `grid` was built with - see this module's own
+    docstring for the nested-FrozenGroup mechanism involved.
+
+    Author: B.G (08/2026)
+    """
+    return _blocks_for(backend).build_slope_group(grid)
+
+
+def make_block_reduce_group(backend: str, *, block_size: int = 128) -> "FrozenGroup":
+    """
+    cupy only: `sum(val)`, one cub::BlockReduce<float, 128>::Sum() per
+    calling CUDA block - composed under the name "sum". Raises on Taichi/
+    Quadrants, which have no block-level primitive this wraps.
+
+    The first compile that reaches this triggers a one-time jitify header
+    cache warm-up for <cub/block/block_reduce.cuh>, roughly two minutes; that
+    is expected, not a hang.
+
+    Author: B.G (08/2026)
+    """
+    if backend != "cupy":
+        raise ValueError(f"make_block_reduce_group: only supported on cupy, got {backend!r}")
+    from . import _cupy_blocks as blocks
+
+    return blocks.build_block_reduce_group(block_size=block_size)
 
 
 # ---------------------------------------------------------------------------

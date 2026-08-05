@@ -174,7 +174,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from ..pool.base import new_uid
-from .frozen import FrozenGroup, FrozenKernel, _Frozen
+from .frozen import FrozenKernel, _Frozen
 from .slot import SlotKind
 
 Address = tuple[str, ...]
@@ -270,9 +270,10 @@ def _walk(
     slot with nothing composed into it - see the module docstring for why
     this is where that gets caught.
 
-    A composed child that is a FrozenGroup with any `.shared` entries is
-    walked by `_walk_group` instead - see the module docstring's "Build-
-    phase sharing" section. `redirect`, optional, collects the
+    A composed child with any `.shared` entries of its own (a FrozenGroup,
+    typically, but a FrozenHelper composed as a child may also carry them -
+    see `_Builder.share()`, builder.py) is walked by `_walk_group` instead -
+    see the module docstring's "Build-phase sharing" section. `redirect`, optional, collects the
     collapsed-address -> canonical-address table that mechanism needs;
     every caller that does not care about it (routine_v2.py/sequence_v2.py/
     host_block.py's own direct `_walk()` calls, which only ever want a
@@ -296,7 +297,7 @@ def _walk(
                 f"it - compose() a frozen helper under that name before build()"
             )
         child = frozen.composed[name]
-        if isinstance(child, FrozenGroup) and child.shared:
+        if child.shared:
             _walk_group(addr, child, table, redirect, frozen.split.get(name, frozenset()))
         else:
             _walk(addr, child, table, redirect)
@@ -304,7 +305,7 @@ def _walk(
 
 def _walk_group(
     prefix: Address,
-    group: FrozenGroup,
+    group: _Frozen,
     table: dict[Address, _LeafInfo],
     redirect: dict[Address, Address],
     split_paths: frozenset,
@@ -312,14 +313,22 @@ def _walk_group(
 ) -> None:
     """
     `_walk`'s group-aware entry point: mints `group`'s own top-level PARAM/
-    HELPER slots exactly as `_walk` always has - except each PARAM name is
-    first checked against `scopes`, the ENCLOSING scopes already active when
-    this group was reached (empty at the outermost group in a tree), since
-    an enclosing group's own sharing may claim this group's own top-level
-    name for further redirection (see the module docstring's "Nested
-    groups" section) - then descends into its composed subtree via
+    DATA/HELPER slots exactly as `_walk` always has - except each PARAM name
+    is first checked against `scopes`, the ENCLOSING scopes already active
+    when this group was reached (empty at the outermost group in a tree),
+    since an enclosing group's own sharing may claim this group's own
+    top-level name for further redirection (see the module docstring's
+    "Nested groups" section) - then descends into its composed subtree via
     `_walk_group_subtree`, pushing this group's own scope (built from
     `group.shared`/`split_paths`) onto `scopes` for that descent.
+
+    `group` is not always a GroupBuilder's own FrozenGroup (which indeed
+    never carries DATA - GroupBuilder.wire_data always raises): a
+    KernelBuilder that calls `share()` on itself produces a FrozenKernel that
+    also reaches this function, as build()'s own top-level dispatch (see
+    build(), below) - and a FrozenKernel's own DATA slots are exactly as real
+    as a plain `_walk` would mint them, so this mints them here too rather
+    than silently dropping them.
 
     Author: B.G (08/2026)
     """
@@ -338,8 +347,8 @@ def _walk_group(
             redirect[full] = canonical
         else:
             table[full] = _LeafInfo(SlotKind.PARAM, None)
-    # group.slots carries no DATA (GroupBuilder.wire_data always raises), so
-    # nothing else to mint at this level.
+    for name in group.slots.names(SlotKind.DATA):
+        table[prefix + (name,)] = _LeafInfo(SlotKind.DATA, group.slots[name].dtype)
 
     helper_roots = group.slots.names(SlotKind.HELPER) | set(group.composed)
     for name in helper_roots:
@@ -396,7 +405,7 @@ def _walk_group_subtree(
             )
         child = frozen.composed[name]
         child_split = frozen.split.get(name, frozenset())
-        if isinstance(child, FrozenGroup) and child.shared:
+        if child.shared:
             _walk_group(addr, child, table, redirect, child_split, scopes=scopes)
         else:
             _walk_group_subtree(addr, child, table, redirect, scopes)
@@ -414,11 +423,13 @@ def build(frozen: _Frozen) -> "BoundKernel | BoundHelper":
     """
     table: dict[Address, _LeafInfo] = {}
     redirect: dict[Address, Address] = {}
-    if isinstance(frozen, FrozenGroup) and frozen.shared:
-        # `frozen` is itself the group being build()-ed directly (e.g. for
-        # standalone inspection) rather than reached as someone else's
-        # composed child - no enclosing object exists to have declared a
-        # `split`, so there is none.
+    if frozen.shared:
+        # `frozen` is itself the object being build()-ed directly (e.g. for
+        # standalone inspection, or a KernelBuilder/HelperBuilder that
+        # declared its own share() - see _Builder.share(), builder.py)
+        # rather than reached as someone else's composed child - no
+        # enclosing object exists to have declared a `split`, so there is
+        # none.
         _walk_group((), frozen, table, redirect, frozenset())
     else:
         _walk((), frozen, table, redirect)

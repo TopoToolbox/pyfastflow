@@ -24,6 +24,14 @@ Both are produced only by KernelBuilder.ingest() / HelperBuilder.ingest()
              subtree` for where this is actually consulted - build() time,
              the only point split is decided (see GroupBuilder.share()'s own
              docstring, builder.py).
+  shared     {canonical PARAM slot name (wired directly on this object):
+             frozenset(relative Address)} - this object's own build-phase
+             sharing declarations (`_Builder.share()`, builder.py). Every
+             frozen object carries this, not only a FrozenGroup: a
+             FrozenKernel's own `.shared` matters when it is reached
+             directly as build()'s top-level argument, a FrozenHelper's
+             when it is composed as someone else's child - see bound.py's
+             module docstring for the mechanism both are walked with.
 
 Nothing here is a recipe any more - a frozen object is done being built.
 Mutability alternates through the scheme this module is one step of: builder
@@ -93,12 +101,14 @@ class _Frozen:
         composed: dict[str, "_Frozen"],
         contract: Contract,
         split: "dict[str, frozenset] | None" = None,
+        shared: "dict[str, list] | None" = None,
     ):
         object.__setattr__(self, "template", template)
         object.__setattr__(self, "slots", slots)
         object.__setattr__(self, "composed", dict(composed))
         object.__setattr__(self, "contract", contract)
         object.__setattr__(self, "split", {k: frozenset(v) for k, v in (split or {}).items()})
+        object.__setattr__(self, "shared", {k: frozenset(v) for k, v in (shared or {}).items()})
         object.__setattr__(self, "_uid", new_uid())
 
     @property
@@ -197,7 +207,7 @@ class FrozenGroup(_Frozen):
     FrozenGroup's own composed children (where real contracts live) but
     finds no PARAM chain of the group's own to check.
 
-    `.shared` is build-phase sharing (GroupBuilder.share()): {canonical PARAM
+    `.shared` is build-phase sharing (`_Builder.share()`): {canonical PARAM
     slot name (wired directly on this group): frozenset(relative Address)},
     each Address a dotted path into this group's own composed subtree that
     reads the "same" quantity as `canonical` - the private per-axis blocks a
@@ -216,15 +226,3 @@ class FrozenGroup(_Frozen):
 
     Author: B.G (08/2026)
     """
-
-    def __init__(
-        self,
-        template: Any,
-        slots: SlotGroup,
-        composed: dict[str, "_Frozen"],
-        contract: Contract,
-        split: "dict[str, frozenset] | None" = None,
-        shared: "dict[str, list] | None" = None,
-    ):
-        super().__init__(template, slots, composed, contract, split=split)
-        object.__setattr__(self, "shared", {k: frozenset(v) for k, v in (shared or {}).items()})

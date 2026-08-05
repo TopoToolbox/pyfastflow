@@ -26,6 +26,7 @@ Author: B.G (07/2026)
 """
 
 from ..core.context.backends import helper_need
+from ..core.context.builder import KernelBuilder
 from ..core.context.need import Kind, Need
 from ._closure_shared import _tensor_annotation
 
@@ -72,46 +73,53 @@ def build_ping_pong_helpers(HelperCls, *, iteration_need: Need):
     return get_src, update_src
 
 
-def build_atomic(KernelCls, *, backend, backend_mod, source: Need, n_flat: int):
+def build_atomic(*, backend: str, backend_mod, n_flat: int):
     """
-    accum_downstream_atomic KernelBuilder, data args (rec, q): q[i] is
-    initialized from `source.get(i)`, then every node walks its receiver
-    chain to the root atomic-adding its own weight into each downstream
-    node. Requires an acyclic receiver graph (run after depression
-    handling); the `guard < n_flat` bound makes a cycle degrade the result
-    instead of hanging, rather than guaranteeing correctness on one.
+    accum_downstream_atomic KernelBuilder (new builder/frozen/bound stack -
+    ../core/context/builder.py, frozen.py, bound.py), data args (rec, q):
+    q[i] is initialized from `ctx.SOURCE.get(i)`, then every node walks its
+    receiver chain to the root atomic-adding its own weight into each
+    downstream node. Requires an acyclic receiver graph (run after
+    depression handling); the `guard < n_flat` bound makes a cycle degrade
+    the result instead of hanging, rather than guaranteeing correctness on
+    one.
 
-    `source` is the caller's already-bound `Need("source", kind=Kind.PARAM)`
-    (see make_accumulation) - a fresh, internally-named `Need("_SOURCE", ...)`,
-    matching this template's own `_SOURCE.get(i)` references, is bound here
-    to the same underlying Parameter and declared on the KernelBuilder via
-    `.need()`. `strict_needs=True`. `_BK` needs no bind at all - auto-
-    injected (see core/context/_closure_backend.py's module docstring).
+    `SOURCE` is this kernel's own wired PARAM slot (any mode - const,
+    scalar or field) - a caller binds a Parameter there after `.build()`,
+    exactly like any other PARAM slot; there is no Need indirection in this
+    stack. `ctx.bk.atomic_add` (bk.py) is what a genuinely concurrent
+    accumulation into a DATA-typed `q` needs - PARAM access stays strict
+    get()/set_node() (a plain, non-atomic write), so `q` is wired as DATA,
+    not PARAM, the same "genuinely concurrent write" classification
+    ../ops/__init__.py's Reduce already establishes for its own accumulator.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
     NFLAT = n_flat
 
-    source_need = Need("_SOURCE", kind=Kind.PARAM, dtype=source.dtype, modes=source.modes)
-    source_need.bind(source.value)
-
-    def accum_downstream_atomic_template(rec: T, q: T):
+    def accum_downstream_atomic_tmpl(ctx, rec: T, q: T):
         for i in q:
-            q[i] = _SOURCE.get(i)
+            q[i] = ctx.SOURCE.get(i)
         for i in rec:
             if rec[i] == i:
                 continue
-            wi = _SOURCE.get(i)
+            wi = ctx.SOURCE.get(i)
             j = rec[i]
             guard = 0
             while j != rec[j] and guard < NFLAT:
-                _BK.atomic_add(q[j], wi)
+                ctx.bk.atomic_add(q[j], wi)
                 j = rec[j]
                 guard += 1
-            _BK.atomic_add(q[j], wi)
+            ctx.bk.atomic_add(q[j], wi)
 
-    return KernelCls(strict_needs=True).need(source_need).ingest(accum_downstream_atomic_template)
+    return (
+        KernelBuilder()
+        .wire_param("SOURCE")
+        .wire_data("rec")
+        .wire_data("q")
+        .ingest(accum_downstream_atomic_tmpl)
+    )
 
 
 def build_rake_compress(

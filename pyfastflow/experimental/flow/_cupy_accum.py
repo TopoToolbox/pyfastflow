@@ -17,6 +17,7 @@ Author: B.G (07/2026)
 """
 
 from ..core.context.backends import helper_need
+from ..core.context.builder import KernelBuilder
 from ..core.context.need import Kind, Need
 from ..core.pool.base import new_uid
 
@@ -61,37 +62,42 @@ __device__ void {t}_update_src(int* src, int tid, int flip) {{
     return get_src, update_src
 
 
-def build_atomic(KernelCls, *, source: Need, n_flat: int):
+def build_atomic(*, n_flat: int):
     """
-    Two KernelBuilders, data args (q) and (rec, q): "q_init" (q[i] =
-    source.get(i)) must be launched before "accum" (the atomic descent). Two
-    real launches rather than one, unlike the closure backends' single
-    KernelBuilder (see _closure_accum.py's build_atomic) - a single CUDA
-    __global__ has no portable grid-wide barrier the way two consecutive
-    top-level Taichi/Quadrants for-loops do, so without a second launch a
-    thread could atomic_add into q[j] before node j's own thread has run its
-    q[j] = source.get(j) initialization.
+    Two FrozenKernels (new builder/frozen/bound stack - ../core/context/
+    builder.py, frozen.py, bound.py), data args (q,) and (rec, q): "q_init"
+    (q[i] = SOURCE.get(i)) must be run, and finish, before "accum" (the
+    atomic descent). Two real launches rather than one, unlike the closure
+    backends' single KernelBuilder (see _closure_accum.py's build_atomic) -
+    a single CUDA __global__ has no portable grid-wide barrier the way two
+    consecutive top-level Taichi/Quadrants for-loops do, so without a second
+    launch a thread could atomicAdd into q[j] before node j's own thread has
+    run its q[j] = SOURCE.get(j) initialization.
 
-    `source` is the caller's already-bound `Need("source", kind=Kind.PARAM)`
-    (see make_accumulation) - a fresh, internally-named `Need("source", ...)`
-    is bound here to the same underlying Parameter and declared on both
-    KernelBuilders via `.need()`. `strict_needs=True` on both.
+    `SOURCE` is each kernel's own wired PARAM slot (any mode) - a caller
+    binds a Parameter there, on each, after `.build()`; there is no Need
+    indirection in this stack. `q` stays plain DATA (native CUDA
+    `atomicAdd`, no `ctx.bk` involved - cupy keeps native C, see bk.py's own
+    module docstring).
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     t = f"pa{new_uid()}"
-    source_need = Need("source", kind=Kind.PARAM, dtype=source.dtype, modes=source.modes)
-    source_need.bind(source.value)
-    q_init = KernelCls(strict_needs=True).need(source_need).ingest(
-        f"""
-__global__ void {t}_q_init(float* q) {{
+    q_init = (
+        KernelBuilder()
+        .wire_param("SOURCE")
+        .wire_data("q")
+        .ingest(
+            f"""
+extern "C" __global__ void {t}_q_init(float* q) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
-    q[i] = $source.get(i)$;
+    q[i] = $ctx.SOURCE.get(i)$;
 }}
 """
+        )
     )
-    # wi is re-read from `source`, not from q[i]: q[i] is a live accumulation
+    # wi is re-read from `SOURCE`, not from q[i]: q[i] is a live accumulation
     # target every other thread may already be atomic-adding into by the
     # time this thread runs (thread order across blocks is not guaranteed),
     # so reading q[i] here would race against those writes and silently
@@ -101,13 +107,18 @@ __global__ void {t}_q_init(float* q) {{
     # n_flat=1e6 in _verify_accum.py. Matches legacy
     # accum_downstream_atomic_kernel and the closure-backend port, which
     # both re-read the weight function/Parameter directly for this reason.
-    accum = KernelCls(strict_needs=True).need(source_need).ingest(
-        f"""
-__global__ void {t}_accum_downstream_atomic(const int* rec, float* q) {{
+    accum = (
+        KernelBuilder()
+        .wire_param("SOURCE")
+        .wire_data("rec")
+        .wire_data("q")
+        .ingest(
+            f"""
+extern "C" __global__ void {t}_accum_downstream_atomic(const int* rec, float* q) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
     if (rec[i] == i) return;
-    float wi = $source.get(i)$;
+    float wi = $ctx.SOURCE.get(i)$;
     int j = rec[i];
     int guard = 0;
     while (j != rec[j] && guard < {n_flat}) {{
@@ -118,6 +129,7 @@ __global__ void {t}_accum_downstream_atomic(const int* rec, float* q) {{
     atomicAdd(&q[j], wi);
 }}
 """
+        )
     )
     return {"q_init": q_init, "accum": accum}
 

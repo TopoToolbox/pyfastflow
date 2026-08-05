@@ -91,6 +91,7 @@ class _Builder:
         self._slots = SlotGroup()
         self._composed: dict[str, _Frozen] = {}
         self._split: dict[str, frozenset] = {}
+        self._shared: dict[str, list[tuple]] = {}
         self._frozen = False
 
     @property
@@ -251,6 +252,90 @@ class _Builder:
             self._split[name] = frozenset(resolved)
         return self
 
+    def share(self, canonical: str, *paths: str) -> "_Builder":
+        """
+        Declare that `canonical` - a PARAM slot already wire_param()'d on
+        THIS builder - is the same value as each dotted `paths`, a relative
+        address reaching a PARAM slot somewhere in this builder's own
+        already-composed subtree (e.g. `"neighbour_raw.row.NX"`: the `row`
+        helper composed inside the `neighbour_raw` helper composed on this
+        builder, its own `NX` slot). bound.py's build() acts on this: by
+        default, every declared path collapses into `canonical`'s own
+        address - only `canonical` is independently minted, not every
+        private occurrence - which is the whole point (see bound.py's
+        module docstring for why this needed a build-phase mechanism rather
+        than being left to bind-phase wire() or bulk/pattern binding).
+
+        This is explicit and local to one builder's own authoring - never
+        name-based matching across independently-authored composites (which
+        is exactly the kind of accidental collision this architecture's
+        addressing exists to prevent). A caller composing this builder's
+        frozen result elsewhere opts specific paths back OUT of the collapse
+        via compose()'s own `split=` (`_Builder.compose()`).
+
+        Available on KernelBuilder and HelperBuilder as well as GroupBuilder:
+        a kernel or helper that both reads a composed sub-structure's PARAM
+        slot directly (via its own wire_param()) and also composes something
+        that re-composes the same sub-structure may collapse those
+        occurrences itself, exactly as a GroupBuilder does for its own
+        composed children - no group wrapper needed purely to reach share().
+        For a KernelBuilder, `canonical` is only actually usable as a
+        collapse target - and this builder's own `.shared` only actually
+        takes effect - when this object is later reached as build()'s own
+        top-level frozen argument (a FrozenKernel is never itself composed
+        as someone else's child, per compose()'s own FrozenKernel guard
+        above); for a HelperBuilder composed as a child elsewhere, its
+        `.shared` is consulted exactly as a FrozenGroup's is (see bound.py's
+        module docstring).
+
+        Raises if `canonical` is not a PARAM slot wired on this builder, if a
+        path does not resolve (through this builder's already-composed
+        children) to a real PARAM slot, or if a path is already declared
+        shared under a different (or the same) canonical - each relative
+        path may be shared at most once.
+
+        Author: B.G (08/2026)
+        """
+        self._check_mutable()
+        if canonical not in self._slots or self._slots[canonical].kind is not SlotKind.PARAM:
+            raise SlotGroupError(
+                f"share({canonical!r}, ...): {canonical!r} is not a PARAM slot wired on this "
+                f"builder - call wire_param({canonical!r}) before share()"
+            )
+        if not paths:
+            raise SlotGroupError(f"share({canonical!r}): at least one path is required")
+
+        already_shared = {p for ps in self._shared.values() for p in ps}
+        resolved: list[tuple] = []
+        for path in paths:
+            segs = tuple(path.split("."))
+            if len(segs) < 2:
+                raise SlotGroupError(
+                    f"share({canonical!r}, {path!r}): a shared path must reach into a composed "
+                    f"child (at least 'child.PARAM'), got {path!r}"
+                )
+            root = segs[0]
+            if root not in self._composed:
+                raise SlotGroupError(f"share({canonical!r}, {path!r}): {root!r} is not composed on this builder")
+            node: _Frozen = self._composed[root]
+            walked = root
+            for seg in segs[1:-1]:
+                if seg not in node.composed:
+                    raise SlotGroupError(f"share({canonical!r}, {path!r}): {seg!r} is not composed under {walked!r}")
+                node = node.composed[seg]
+                walked = f"{walked}.{seg}"
+            leaf = segs[-1]
+            if leaf not in node.slots.names(SlotKind.PARAM):
+                raise SlotGroupError(f"share({canonical!r}, {path!r}): {leaf!r} is not a PARAM slot under {walked!r}")
+            if segs in already_shared:
+                raise SlotGroupError(f"share({canonical!r}, {path!r}): {path!r} is already shared")
+            resolved.append(segs)
+            already_shared.add(segs)
+
+        self._shared.setdefault(canonical, [])
+        self._shared[canonical].extend(resolved)
+        return self
+
     def _derive_and_check(self, template: Any) -> tuple[SlotGroup, dict[str, _Frozen], Contract]:
         """
         Derive `template`'s Contract and check every chain it requires
@@ -328,7 +413,7 @@ class HelperBuilder(_Builder):
         self._check_mutable()
         slots, composed, contract = self._derive_and_check(template)
         self._frozen = True
-        return FrozenHelper(template, slots, composed, contract, split=self._split)
+        return FrozenHelper(template, slots, composed, contract, split=self._split, shared=self._shared)
 
 
 class KernelBuilder(_Builder):
@@ -350,7 +435,7 @@ class KernelBuilder(_Builder):
         self._check_mutable()
         slots, composed, contract = self._derive_and_check(template)
         self._frozen = True
-        return FrozenKernel(template, slots, composed, contract, split=self._split)
+        return FrozenKernel(template, slots, composed, contract, split=self._split, shared=self._shared)
 
 
 class GroupBuilder(_Builder):
@@ -365,18 +450,14 @@ class GroupBuilder(_Builder):
     `wire_data` always raises, for the same reason it does on HelperBuilder:
     a group is device-structure-only, never a call argument's own signature.
 
-    `share()` is build-phase sharing: a group PARAM slot the group's own
+    `share()` (inherited from `_Builder` - see its own docstring for the full
+    mechanism) is build-phase sharing: a group PARAM slot the group's own
     author declares once, that stands in for the same value re-read by
-    several of the group's own composed children - see share()'s own
-    docstring for the exact mechanism and frozen.py's FrozenGroup for what
-    it freezes into.
+    several of the group's own composed children - frozen.py's FrozenGroup
+    is what it freezes into.
 
     Author: B.G (08/2026)
     """
-
-    def __init__(self):
-        super().__init__()
-        self._shared: dict[str, list[tuple]] = {}
 
     def wire_data(self, name: str, *, dtype: Any = None) -> "GroupBuilder":
         """
@@ -391,75 +472,6 @@ class GroupBuilder(_Builder):
             "only composite - it is never the template a call argument belongs to. Declare "
             "wire_data on whichever KernelBuilder eventually composes this group."
         )
-
-    def share(self, canonical: str, *paths: str) -> "GroupBuilder":
-        """
-        Declare that `canonical` - a PARAM slot already wire_param()'d on
-        THIS group - is the same value as each dotted `paths`, a relative
-        address reaching a PARAM slot somewhere in this group's own already-
-        composed subtree (e.g. `"neighbour_raw.row.NX"`: the `row` helper
-        composed inside the `neighbour_raw` helper composed on this group,
-        its own `NX` slot). bound.py's build() acts on this: by default,
-        every declared path collapses into `canonical`'s own address - only
-        `canonical` is independently minted, not every private occurrence -
-        which is the whole point (see bound.py's module docstring for why
-        this needed a build-phase mechanism rather than being left to
-        bind-phase wire() or bulk/pattern binding).
-
-        This is explicit and local to one group's own authoring - never
-        name-based matching across independently-authored composites (which
-        is exactly the kind of accidental collision this architecture's
-        addressing exists to prevent). A caller composing this group
-        elsewhere opts specific paths back OUT of the collapse via
-        compose()'s own `split=` (builder.py's `_Builder.compose()`).
-
-        Raises if `canonical` is not a PARAM slot wired on this group, if a
-        path does not resolve (through this group's already-composed
-        children) to a real PARAM slot, or if a path is already declared
-        shared under a different (or the same) canonical - each relative
-        path may be shared at most once.
-
-        Author: B.G (08/2026)
-        """
-        self._check_mutable()
-        if canonical not in self._slots or self._slots[canonical].kind is not SlotKind.PARAM:
-            raise SlotGroupError(
-                f"share({canonical!r}, ...): {canonical!r} is not a PARAM slot wired on this "
-                f"group - call wire_param({canonical!r}) before share()"
-            )
-        if not paths:
-            raise SlotGroupError(f"share({canonical!r}): at least one path is required")
-
-        already_shared = {p for ps in self._shared.values() for p in ps}
-        resolved: list[tuple] = []
-        for path in paths:
-            segs = tuple(path.split("."))
-            if len(segs) < 2:
-                raise SlotGroupError(
-                    f"share({canonical!r}, {path!r}): a shared path must reach into a composed "
-                    f"child (at least 'child.PARAM'), got {path!r}"
-                )
-            root = segs[0]
-            if root not in self._composed:
-                raise SlotGroupError(f"share({canonical!r}, {path!r}): {root!r} is not composed on this group")
-            node: _Frozen = self._composed[root]
-            walked = root
-            for seg in segs[1:-1]:
-                if seg not in node.composed:
-                    raise SlotGroupError(f"share({canonical!r}, {path!r}): {seg!r} is not composed under {walked!r}")
-                node = node.composed[seg]
-                walked = f"{walked}.{seg}"
-            leaf = segs[-1]
-            if leaf not in node.slots.names(SlotKind.PARAM):
-                raise SlotGroupError(f"share({canonical!r}, {path!r}): {leaf!r} is not a PARAM slot under {walked!r}")
-            if segs in already_shared:
-                raise SlotGroupError(f"share({canonical!r}, {path!r}): {path!r} is already shared")
-            resolved.append(segs)
-            already_shared.add(segs)
-
-        self._shared.setdefault(canonical, [])
-        self._shared[canonical].extend(resolved)
-        return self
 
     def close(self) -> FrozenGroup:
         """
