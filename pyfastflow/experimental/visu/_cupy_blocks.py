@@ -1,85 +1,95 @@
 """
-cupy (CUDA source) block templates behind make_hillshade.
+cupy (CUDA source) block templates behind make_hillshade_group /
+make_hillshade_kernel.
 
 Mirrors _closure_blocks.py: same gradient rewrite (grid.neighbour(i, k),
-falling back to z[i] where there is no neighbour - see that module's
-docstring for why), same hillshade formula, written as CUDA text. Every
-`__device__`/`__global__` symbol is prefixed with this build's own tag (a
-fresh new_uid()) so two make_hillshade() calls in one process never collide
-inside a single compiled cupy module - see ../grid/_cupy_blocks.py.
+falling back to z[i] where there is no neighbour - see that module's own
+docstring for why), same hillshade formula, written as CUDA text. No
+`ctx.bk` here - cupy stays plain C (`sqrtf`/`atan2f`/`cosf`/`sinf`,
+`fmaxf`/`fminf`), same as grid/_cupy_blocks.py and noise/_cupy_blocks.py.
+Every `__device__`/`__global__` symbol is prefixed with this build's own tag
+(a fresh new_uid()) so two make_hillshade_group()/make_hillshade_kernel()
+calls in one process never collide inside a single compiled cupy module.
 
-Author: B.G (07/2026)
+Author: B.G (08/2026)
 """
 
-import functools
-import math
-
-from ..core.context.backends import make_helper
+from ..core.context.builder import HelperBuilder, KernelBuilder
+from ..core.context.contract import extract_cupy_contract
 from ..core.pool.base import new_uid
 
-_DEG2RAD = math.pi / 180.0
-_HALF_PI = math.pi / 2.0
-_TWO_PI = 2.0 * math.pi
 
-
-def build_helpers(HelperCls, KernelCls, *, grid, azimuth_p, altitude_p, z_factor_p):
+def _helper(template, *, helpers=None):
     """
-    `at` (HelperBuilder, shade value at one node) and `hillshade` (unbuilt
-    KernelBuilder, writes shade for every node). k-indices for
-    left/right/top/bottom are picked from grid.n_neighbours' own const value,
-    same as _closure_blocks.build_helpers.
+    One private/public HelperBuilder: PARAM slots are declared implicitly by
+    every `$ctx.NAME.get(...)$`/`$ctx.NAME.set_node(...)$` span contract.py
+    derives from `template`'s own text - mirrors grid/_cupy_blocks.py's own
+    `_helper`.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
-    n_neighbours = grid.n_neighbours.get()
-    if n_neighbours == 4:
-        k_top, k_left, k_right, k_bottom = 0, 1, 2, 3
-    elif n_neighbours == 8:
-        k_top, k_left, k_right, k_bottom = 1, 3, 4, 6
-    else:
-        raise ValueError(f"make_hillshade: unsupported grid.n_neighbours {n_neighbours!r}, expected 4 or 8")
+    b = HelperBuilder()
+    for chain in extract_cupy_contract(template).chains:
+        if (not helpers) or chain[0] not in helpers:
+            b.wire_param(chain[0])
+    if helpers:
+        for name, frozen in helpers.items():
+            b.compose(name, frozen)
+    return b.ingest(template)
 
+
+def build_group(group, *, grid, k_top, k_left, k_right, k_bottom):
+    """
+    Compose `at(z, i)` (and its private `grad_x`/`grad_y`) onto `group` (a
+    GroupBuilder) for the cupy backend. `grid` (a FrozenGroup) is composed
+    independently under `grad_x` and `grad_y` - see __init__.py's own module
+    docstring.
+
+    Returns nothing - `at` is compose()d onto `group` itself, under its own
+    public name, by this call.
+
+    Author: B.G (08/2026)
+    """
     t = f"pf{new_uid()}"
-    mk = functools.partial(make_helper, HelperCls)
 
-    grad_x = mk(
+    grad_x = _helper(
         f"""
 __device__ float {t}_gradient_x(const float* z, int i) {{
-    int zl = $grid.neighbour(i, {k_left})$;
-    int zr = $grid.neighbour(i, {k_right})$;
+    int zl = $ctx.GRID.neighbour(i, {k_left})$;
+    int zr = $ctx.GRID.neighbour(i, {k_right})$;
     float left_val = (zl != -1) ? z[zl] : z[i];
     float right_val = (zr != -1) ? z[zr] : z[i];
-    return (right_val - left_val) / (2.0f * $grid.dx.get(0)$);
+    return (right_val - left_val) / (2.0f * $ctx.GRID.DX.get(0)$);
 }}
 """,
-        grid=grid,
+        helpers={"GRID": grid},
     )
-    grad_y = mk(
+    grad_y = _helper(
         f"""
 __device__ float {t}_gradient_y(const float* z, int i) {{
-    int zt = $grid.neighbour(i, {k_top})$;
-    int zb = $grid.neighbour(i, {k_bottom})$;
+    int zt = $ctx.GRID.neighbour(i, {k_top})$;
+    int zb = $ctx.GRID.neighbour(i, {k_bottom})$;
     float top_val = (zt != -1) ? z[zt] : z[i];
     float bottom_val = (zb != -1) ? z[zb] : z[i];
-    return (bottom_val - top_val) / (2.0f * $grid.dx.get(0)$);
+    return (bottom_val - top_val) / (2.0f * $ctx.GRID.DX.get(0)$);
 }}
 """,
-        grid=grid,
+        helpers={"GRID": grid},
     )
-    at = mk(
+    at = _helper(
         f"""
 __device__ float {t}_at(const float* z, int i) {{
-    float dzdx = $gradient_x(z, i)$ * $ZFACTOR.get(0)$;
-    float dzdy = $gradient_y(z, i)$ * $ZFACTOR.get(0)$;
+    float dzdx = $ctx.grad_x(z, i)$ * $ctx.ZFACTOR.get(0)$;
+    float dzdy = $ctx.grad_y(z, i)$ * $ctx.ZFACTOR.get(0)$;
 
     float slope_rad = atan2f(sqrtf(dzdx * dzdx + dzdy * dzdy), 1.0f);
-    float azimuth_rad = $AZIMUTH.get(0)$ * {_DEG2RAD}f;
-    float zenith_rad = {_HALF_PI}f - $ALTITUDE.get(0)$ * {_DEG2RAD}f;
+    float azimuth_rad = $ctx.AZIMUTH.get(0)$ * 0.017453292519943295f;
+    float zenith_rad = 1.5707963267948966f - $ctx.ALTITUDE.get(0)$ * 0.017453292519943295f;
 
     float aspect_rad = 0.0f;
     if (dzdx != 0.0f || dzdy != 0.0f) {{
-        aspect_rad = {_HALF_PI}f - atan2f(dzdy, dzdx);
-        if (aspect_rad < 0.0f) aspect_rad += {_TWO_PI}f;
+        aspect_rad = 1.5707963267948966f - atan2f(dzdy, dzdx);
+        if (aspect_rad < 0.0f) aspect_rad += 6.283185307179586f;
     }}
 
     float hillshade_value = cosf(zenith_rad) * cosf(slope_rad)
@@ -87,21 +97,34 @@ __device__ float {t}_at(const float* z, int i) {{
     return fmaxf(0.0f, fminf(1.0f, hillshade_value));
 }}
 """,
-        gradient_x=grad_x,
-        gradient_y=grad_y,
-        AZIMUTH=azimuth_p,
-        ALTITUDE=altitude_p,
-        ZFACTOR=z_factor_p,
+        helpers={"grad_x": grad_x, "grad_y": grad_y},
     )
+    group.wire_helper("at").compose("at", at)
 
-    hillshade_kernel = KernelCls().bind("at", at).ingest(
-        f"""
+
+def build_kernel(hillshade_group):
+    """
+    The standalone `hillshade` FrozenKernel for the cupy backend - see
+    __init__.py's own `make_hillshade_kernel`. `n` (the node count) is a
+    third DATA slot, unlike the closure backends: a `cp.RawModule` kernel
+    has no auto-ranging equivalent to Taichi/Quadrants' `for i in
+    range(n)`.
+
+    Author: B.G (08/2026)
+    """
+    t = f"pf{new_uid()}"
+    template = f"""
 extern "C" __global__ void {t}_hillshade(const float* z, float* out, int n) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    out[i] = $at(z, i)$;
+    out[i] = $ctx.hillshade.at(z, i)$;
 }}
 """
+    return (
+        KernelBuilder()
+        .wire_data("z")
+        .wire_data("out")
+        .wire_data("n")
+        .compose("hillshade", hillshade_group)
+        .ingest(template)
     )
-
-    return {"at": at, "hillshade": hillshade_kernel}

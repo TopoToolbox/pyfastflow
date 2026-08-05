@@ -1,151 +1,183 @@
 """
-Taichi/Quadrants (closure) block templates behind make_hillshade.
+Taichi/Quadrants (closure) block templates behind make_hillshade_group /
+make_hillshade_kernel, on the new builder/frozen/bound stack
+(core/context/builder.py, frozen.py, bound.py).
 
-Same private/public split as ../grid/_closure_blocks.py: private blocks are
-plain python defs, picked - never branched on inside one function body - by
-build_helpers() according to the grid's own topology (which fixes which
-neighbour index `k` means "left", "right", "top", "south" - see
-build_helpers). `_BK` is the bound backend module (ti or qd); `azimuth`,
-`altitude` and `z_factor` are mode-overridable Parameters, read uniformly
-through `.get(0)` (see ../core/context/parameter.py, "Reading a Parameter in
-device code is uniform across modes").
+`_gradient_x`/`_gradient_y` each independently compose the caller's grid
+FrozenGroup (under name `GRID`) and call `ctx.GRID.neighbour(i, k)` /
+`ctx.GRID.DX.get(0)` - see __init__.py's own module docstring for why this
+is the first nested-FrozenGroup-in-FrozenGroup case in this rewrite, and why
+`k_left`/`k_right`/`k_top`/`k_bottom` (which axis of D4/D8's own delta table
+means which direction - picked once in __init__.py from `topology`) are
+baked into freshly generated source text via `_exec_def` rather than closed
+over as ordinary python closure variables: compile_closure.py's own rebuild
+(`_compile_dropping_ctx`) only carries a template's `__globals__` forward,
+never an enclosing function's local cells, so a per-call int smuggled in as
+a closure variable would resolve to a `NameError` the moment the template is
+actually compiled - baked directly into the generated source text, it needs
+no name lookup at all.
 
 The gradient here is deliberately not the legacy fixed-stencil,
 clamped-index version (pyfastflow/visu/hillshading.py's gradient_x_flat /
 gradient_y_flat): those are wrong under a periodic grid and wrong at a
-nodata cell, since clamping an index at a nodata boundary silently reads
-the wrong neighbour instead of recognising there is none. Going through
-`grid.neighbour(i, k)` instead gets both cases right for free - see the
-grid's own contract (../grid/_closure_blocks.py, lines 184-230): a -1 return
+nodata cell, since clamping an index at a nodata boundary silently reads the
+wrong neighbour instead of recognising there is none. Going through
+`grid.neighbour(i, k)` instead gets both cases right for free: a -1 return
 means "no neighbour" (off a bounded edge, off a nodata source, or into a
 nodata target), and a periodic axis wraps automatically. A missing sample is
 substituted with z[i] itself, i.e. that side of the central difference
 degenerates to a one-sided difference against the cell's own elevation
 rather than an out-of-range read.
 
-Author: B.G (07/2026)
+`ctx.bk` (core/context/bk.py) supplies `sqrt`/`atan2`/`cos`/`sin` for `_at`'s
+own hillshade formula - `max`/`min` stay plain python builtins, as grid
+already established.
+
+Author: B.G (08/2026)
 """
 
-import functools
+import importlib
+import linecache
 import math
 
-from ..core.context.backends import make_helper
-from ..core.context.bag import Bag
+from ..core.context.builder import HelperBuilder, KernelBuilder
+from ..core.pool.base import new_uid
 
 _DEG2RAD = math.pi / 180.0
 _HALF_PI = math.pi / 2.0
 _TWO_PI = 2.0 * math.pi
 
-# ---------------------------------------------------------------------------
-# gradient
-# ---------------------------------------------------------------------------
+
+def _exec_def(name: str, src: str, extra_globals: dict | None = None):
+    """
+    Compile and exec `src` (expected to define exactly one function called
+    `name`) into a fresh, throwaway globals dict, registering the source in
+    `linecache` under a synthetic filename first so `inspect.getsource` -
+    contract.py's own extraction, and Taichi/Quadrants' own re-inspection
+    when a `ti.func`/`qd.func` is re-traced - can still find it. See the
+    module docstring for why this, not a python closure, is what carries a
+    per-call constant into a template's own source text.
+
+    Author: B.G (08/2026)
+    """
+    ns = dict(extra_globals) if extra_globals else {}
+    filename = f"<pf-visu:{name}:{new_uid()}>"
+    linecache.cache[filename] = (len(src), None, src.splitlines(keepends=True), filename)
+    code = compile(src, filename, "exec")
+    exec(code, ns)
+    return ns[name]
 
 
-def _gradient_x_tmpl(z, i):
-    zl = _GRID.neighbour(i, _KLEFT)
-    zr = _GRID.neighbour(i, _KRIGHT)
+def _make_gradient_x_tmpl(k_left: int, k_right: int):
+    src = f"""
+def _gradient_x_tmpl(ctx, z, i):
+    zl = ctx.GRID.neighbour(i, {k_left})
+    zr = ctx.GRID.neighbour(i, {k_right})
     left_val = z[i]
     if zl != -1:
         left_val = z[zl]
     right_val = z[i]
     if zr != -1:
         right_val = z[zr]
-    return (right_val - left_val) / (2.0 * _GRID.dx.get(0))
+    return (right_val - left_val) / (2.0 * ctx.GRID.DX.get(0))
+"""
+    return _exec_def("_gradient_x_tmpl", src)
 
 
-def _gradient_y_tmpl(z, i):
-    zt = _GRID.neighbour(i, _KTOP)
-    zb = _GRID.neighbour(i, _KBOTTOM)
+def _make_gradient_y_tmpl(k_top: int, k_bottom: int):
+    src = f"""
+def _gradient_y_tmpl(ctx, z, i):
+    zt = ctx.GRID.neighbour(i, {k_top})
+    zb = ctx.GRID.neighbour(i, {k_bottom})
     top_val = z[i]
     if zt != -1:
         top_val = z[zt]
     bottom_val = z[i]
     if zb != -1:
         bottom_val = z[zb]
-    return (bottom_val - top_val) / (2.0 * _GRID.dx.get(0))
+    return (bottom_val - top_val) / (2.0 * ctx.GRID.DX.get(0))
+"""
+    return _exec_def("_gradient_y_tmpl", src)
 
 
-# ---------------------------------------------------------------------------
-# hillshade at one node
-# ---------------------------------------------------------------------------
+def _at_tmpl(ctx, z, i):
+    dzdx = ctx.grad_x(z, i) * ctx.ZFACTOR.get(0)
+    dzdy = ctx.grad_y(z, i) * ctx.ZFACTOR.get(0)
 
-
-def _at_tmpl(z, i):
-    dzdx = _GRADX(z, i) * _ZFACTOR.get(0)
-    dzdy = _GRADY(z, i) * _ZFACTOR.get(0)
-
-    slope_rad = _BK.atan2(_BK.sqrt(dzdx * dzdx + dzdy * dzdy), 1.0)
-    azimuth_rad = _AZIMUTH.get(0) * _DEG2RAD
-    zenith_rad = _HALF_PI - _ALTITUDE.get(0) * _DEG2RAD
+    slope_rad = ctx.bk.atan2(ctx.bk.sqrt(dzdx * dzdx + dzdy * dzdy), 1.0)
+    azimuth_rad = ctx.AZIMUTH.get(0) * _DEG2RAD
+    zenith_rad = _HALF_PI - ctx.ALTITUDE.get(0) * _DEG2RAD
 
     aspect_rad = 0.0
     if dzdx != 0.0 or dzdy != 0.0:
-        aspect_rad = _HALF_PI - _BK.atan2(dzdy, dzdx)
+        aspect_rad = _HALF_PI - ctx.bk.atan2(dzdy, dzdx)
         if aspect_rad < 0.0:
             aspect_rad += _TWO_PI
 
-    hillshade_value = _BK.cos(zenith_rad) * _BK.cos(slope_rad) + _BK.sin(zenith_rad) * _BK.sin(
+    hillshade_value = ctx.bk.cos(zenith_rad) * ctx.bk.cos(slope_rad) + ctx.bk.sin(zenith_rad) * ctx.bk.sin(
         slope_rad
-    ) * _BK.cos(azimuth_rad - aspect_rad)
-    return _BK.max(0.0, _BK.min(1.0, hillshade_value))
+    ) * ctx.bk.cos(azimuth_rad - aspect_rad)
+    return max(0.0, min(1.0, hillshade_value))
 
 
-# ---------------------------------------------------------------------------
-# kernel: write shade for every node
-# ---------------------------------------------------------------------------
-
-
-def _make_hillshade_template(T):
-    def hillshade_template(z: T, out: T):
-        n = _GRID.nx.get(0) * _GRID.ny.get(0)
-        for i in range(n):
-            out[i] = _AT(z, i)
-
-    return hillshade_template
-
-
-def _tensor_annotation(backend_mod, backend: str):
-    return backend_mod.template() if backend == "taichi" else backend_mod.Tensor
-
-
-def build_helpers(HelperCls, KernelCls, *, backend: str, backend_mod, grid: Bag, azimuth_p, altitude_p, z_factor_p):
+def _helper(template, *, params=(), helpers=None):
     """
-    `at` (HelperBuilder, shade value at one node) and `hillshade` (unbuilt
-    KernelBuilder, writes shade for every node) - the k-indices meaning
-    "left"/"right"/"top"/"bottom" are picked once here from
-    `grid.n_neighbours`'s own const value (4 -> D4's own delta table, 8 ->
-    D8's - see ../grid/_closure_blocks.py's _delta_d4_tmpl/_delta_d8_tmpl),
-    since the grid Bag exposes neighbour(i, k) generically but not a
-    "which k is west" query.
+    One private/public HelperBuilder: wire_param() every name in `params`,
+    compose() every (name, frozen) pair in `helpers` under that same name,
+    then ingest(template). Mirrors grid/_closure_blocks.py's own `_helper`.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
-    n_neighbours = grid.n_neighbours.get()
-    if n_neighbours == 4:
-        k_top, k_left, k_right, k_bottom = 0, 1, 2, 3
-    elif n_neighbours == 8:
-        k_top, k_left, k_right, k_bottom = 1, 3, 4, 6
-    else:
-        raise ValueError(f"make_hillshade: unsupported grid.n_neighbours {n_neighbours!r}, expected 4 or 8")
+    b = HelperBuilder()
+    for p in params:
+        b.wire_param(p)
+    if helpers:
+        for name, frozen in helpers.items():
+            b.compose(name, frozen)
+    return b.ingest(template)
 
-    mk = functools.partial(make_helper, HelperCls)
 
-    grad_x = mk(_gradient_x_tmpl, _GRID=grid, _KLEFT=k_left, _KRIGHT=k_right)
-    grad_y = mk(_gradient_y_tmpl, _GRID=grid, _KTOP=k_top, _KBOTTOM=k_bottom)
-    at = mk(
+def build_group(group, *, grid, k_top, k_left, k_right, k_bottom):
+    """
+    Compose `at(z, i)` (and its private `grad_x`/`grad_y`) onto `group` (a
+    GroupBuilder) for a closure backend (Taichi or Quadrants). `grid`
+    (a FrozenGroup) is composed independently under `grad_x` and `grad_y` -
+    see the module docstring.
+
+    Returns nothing - `at` is compose()d onto `group` itself, under its own
+    public name, by this call.
+
+    Author: B.G (08/2026)
+    """
+    grad_x = _helper(_make_gradient_x_tmpl(k_left, k_right), helpers={"GRID": grid})
+    grad_y = _helper(_make_gradient_y_tmpl(k_top, k_bottom), helpers={"GRID": grid})
+    at = _helper(
         _at_tmpl,
-        _BK=backend_mod,
-        _GRADX=grad_x,
-        _GRADY=grad_y,
-        _AZIMUTH=azimuth_p,
-        _ALTITUDE=altitude_p,
-        _ZFACTOR=z_factor_p,
-        _DEG2RAD=_DEG2RAD,
-        _HALF_PI=_HALF_PI,
-        _TWO_PI=_TWO_PI,
+        params=["AZIMUTH", "ALTITUDE", "ZFACTOR"],
+        helpers={"grad_x": grad_x, "grad_y": grad_y},
     )
+    group.wire_helper("at").compose("at", at)
 
-    T = _tensor_annotation(backend_mod, backend)
-    hillshade_kernel = KernelCls().bind("_GRID", grid).bind("_AT", at).ingest(_make_hillshade_template(T))
 
-    return {"at": at, "hillshade": hillshade_kernel}
+def build_kernel(hillshade_group, *, backend: str):
+    """
+    The standalone `hillshade` FrozenKernel for a closure backend - see
+    __init__.py's own `make_hillshade_kernel`. `backend` ("taichi" or
+    "quadrants") picks the real `ti.template()`/`qd.template()` marker the
+    kernel's own `z`/`out` data arguments are annotated with; that marker
+    object cannot be closed over the way `k_left`/... can be baked into
+    source text (a type marker is an object, not a literal), so it is
+    injected into the exec'd template's own globals instead, via
+    `_exec_def`'s own `extra_globals` argument.
+
+    Author: B.G (08/2026)
+    """
+    bmod = importlib.import_module(backend)
+    src = """
+def _hillshade_kernel_tmpl(ctx, z: T, out: T):
+    n = ctx.hillshade.NX.get(0) * ctx.hillshade.NY.get(0)
+    for i in range(n):
+        out[i] = ctx.hillshade.at(z, i)
+"""
+    tmpl = _exec_def("_hillshade_kernel_tmpl", src, extra_globals={"T": bmod.template()})
+    return KernelBuilder().wire_data("z").wire_data("out").compose("hillshade", hillshade_group).ingest(tmpl)

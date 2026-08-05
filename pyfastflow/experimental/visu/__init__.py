@@ -1,81 +1,234 @@
 """
-make_hillshade: the hillshading Bag factory, built on the backend-agnostic
-core (see ../core/context: parameter.py for Parameter, compile.py for
-HelperBuilder, bag.py for Bag) and on a grid Bag from ../grid.
+make_hillshade_group / make_hillshade_parameters / make_hillshade_kernel: the
+hillshading factory set, built on the new builder/frozen/bound stack
+(core/context/builder.py, frozen.py, bound.py; see parameter.py for
+Parameter, unchanged) and on a caller-supplied grid FrozenGroup
+(../grid/make_grid_group).
 
-Like make_grid/make_noise there is no stateful context class - make_hillshade
-builds a Bag once: `at(z, i)` (a device helper, shade value at one node) and
-`hillshade` (an unbuilt KernelBuilder that writes shade for every node - call
-`.compile()` on it before launching). A caller wanting hillshade inline in
-its own kernel binds the bag and reads `visu.at(z, i)`; a caller wanting a
-standalone pass compiles `visu.hillshade` and launches it with (z, out) -
-and, on cupy, the node count as a third argument, since a RawModule kernel
-has no auto-ranging (see ../core/context/cupy_backend.py's module docstring).
+Three functions, not two
+--------------------------
+grid's/noise's own factory shape is two calls, structure vs data
+(make_X_group -> FrozenGroup, make_X_parameters -> dict[str, Parameter] -
+see grid/__init__.py's own docstring). visu needs a third: `at(z, i)` (a
+device HELPER, shade value at one node, for a caller wanting hillshade
+inline in its own kernel) fits `make_hillshade_group`'s FrozenGroup exactly
+like grid's public helpers do, but the standalone `hillshade` pass (writes
+shade for every node) is a KERNEL, a host entry point, and `compose()`
+(builder.py) raises outright on a FrozenKernel - "a kernel is a host entry
+point, not something device code can call". There is structurally nowhere
+inside a FrozenGroup a compiled kernel could ever live, so it cannot be a
+FrozenGroup member the way `at` is. `make_hillshade_kernel` is the third
+function this forces: it takes the already-built `make_hillshade_group`
+result and composes the *whole group* onto a fresh KernelBuilder, returning
+a FrozenKernel a caller `.build()`s, binds data (`z`, `out`) and Parameters
+into, and `.compile()`s independently - exactly the same build->bind->compile
+lifecycle as any other FrozenKernel, just produced by this module instead of
+written by hand.
 
-azimuth/altitude/z_factor are mode-overridable Parameters (default "const"),
-read in device code through `.get(0)` uniformly across modes - the same
-"flexible at build time, dense at runtime" stance make_grid/make_noise take.
-azimuth and altitude are both in degrees, matching the hillshading
-convention (315/45 is the classic NW-lit default); z_factor scales the
-elevation gradient before it enters the slope/aspect computation, letting a
-caller exaggerate relief without rescaling z itself.
+Nested FrozenGroup-in-FrozenGroup: the first real case
+----------------------------------------------------------
+grid has no nested groups (its own composed children are all FrozenHelpers);
+noise never composes the grid FrozenGroup at all (see noise/__init__.py's
+own docstring - it only ever needs nx/ny as plain values). visu's gradient
+blocks (`_gradient_x`/`_gradient_y`, in _closure_blocks.py/_cupy_blocks.py)
+are the first thing in this rewrite that actually calls a grid HELPER
+(`grid.neighbour(i, k)`) from inside a private block of its own - and a
+device template can only call/read what is composed directly onto its own
+scope, never a sibling's or a parent's (builder.py's module docstring), so
+each of `_gradient_x`/`_gradient_y` must independently compose the caller's
+grid FrozenGroup as its own child. That is a FrozenGroup (grid, which
+already carries `.shared` entries for its own NX/NY/DX/... - see grid's own
+docstring) composed as a child two levels down inside another FrozenGroup
+(this module's own hillshade group) - bound.py's `_walk_group`/
+`_walk_group_subtree` describe this as starting "a fresh sharing scope at
+each group boundary" but nothing in the tree so far had exercised it. It
+works, verified end to end (build(), inspect(), and a real hillshade number
+matching a numpy reference on all three backends - see this module's own
+verification run): `_walk_group_subtree`, on reaching a composed child that
+is itself a FrozenGroup with `.shared` entries, correctly recurses via a
+fresh `_walk_group` call rather than treating it as an ordinary FrozenHelper
+child.
 
-The gradient the `at` helper is built on deliberately does not clamp indices
-against a fixed 3x3 stencil the way the legacy standalone kernel
-(pyfastflow/visu/hillshading.py) does - see _closure_blocks.py's module
-docstring for why that is wrong under a periodic grid or at a nodata cell,
-and how going through grid.neighbour(i, k) fixes both for free.
+What is NOT free: composing the same `grid` FrozenGroup independently under
+`_gradient_x` and `_gradient_y` mints TWO independent copies of every one of
+grid's own top-level PARAM names (NX, NY, DX, N_NEIGHBOURS, ...) - `_walk_
+group` mints every name in `group.slots.names(PARAM)` unconditionally,
+regardless of whether the composing template happens to read it, so even
+though `_gradient_x`/`_gradient_y` only ever read `GRID.neighbour(...)` (a
+HELPER, shared by object identity, no address needed) and `GRID.DX.get(0)`,
+composing `grid` still mints `NX`/`NY`/`N_NEIGHBOURS` addresses nobody reads,
+twice over. This is exactly the case `share()` exists for: `make_hillshade_
+group` wires every name in `grid.slots.names(PARAM)` at its own top level as
+a canonical and `_share_leaf`s every occurrence found anywhere in its own
+composed subtree - the identical mechanism grid/__init__.py and
+noise/__init__.py already use, `share()`'s own path-walk resolving through a
+nested FrozenGroup exactly as it would through a FrozenHelper (see
+builder.py's `GroupBuilder.share()` - the walk checks `node.composed`/`node.
+slots.names(PARAM)` generically, indifferent to which kind of node it is
+looking at). The result: a caller binds `hillshade.NX`/`hillshade.NY`/
+`hillshade.DX`/`hillshade.N_NEIGHBOURS` once (to the same Parameter objects
+already bound to `grid.NX`/...), not once per gradient block.
 
-Author: B.G (07/2026)
+Structure needs `topology`, data does not, and the grid FrozenGroup itself
+carries neither
+------------------------------------------------------------------------------
+Deciding which neighbour index `k` means "left"/"right"/"top"/"bottom" (the
+old code's own `k_left`/`k_right`/`k_top`/`k_bottom`) needs the grid's own
+n_neighbours count - the old Bag-based make_hillshade read `grid.n_
+neighbours.get()` directly, because the old Bag held a live Parameter. A
+FrozenGroup carries no Parameter objects (frozen.py: pure structure), so
+there is nothing here to read a concrete n_neighbours value off even in
+principle. `make_hillshade_group` therefore takes an explicit `topology`
+("D4"|"D8") argument instead, exactly mirroring make_grid_group's own - and,
+exactly like the grid_group/grid_parameters pair, it is the caller's job to
+pass the same topology the grid FrozenGroup composed here was itself built
+with; nothing here cross-checks the two.
+
+`k_left`/`k_right`/`k_top`/`k_bottom`, once picked from `topology`, are
+per-call integers, not template-global constants the way e.g. grid's own
+`_SQRT2` is - _closure_blocks.py builds `_gradient_x`/`_gradient_y`'s python
+source dynamically (an f-string with the two k values substituted in
+literally, exec()'d with its source registered in `linecache` so contract.py
+can still `inspect.getsource` it and compile_closure.py can still rebuild
+it) rather than trying to smuggle them in as closure variables, which does
+not survive compile_closure.py's ast-unparse-and-reexec rebuild (see that
+module's own docstring: only a template's `__globals__` survives the
+rebuild, never an enclosing function's local cells) - confirmed by hitting
+exactly this failure once, while building this module's own verification
+kernel (a `NameError` on a closed-over `T` used as a Taichi/Quadrants type
+annotation), and fixing it the same way: generate real source text with the
+value already baked in, `exec()` it into a fresh, throwaway globals dict,
+register that source in `linecache` under a synthetic filename so
+`inspect.getsource` (contract.py's own extraction, and Taichi/Quadrants' own
+re-inspection when a `ti.func`/`qd.func` is re-traced) can still find it.
+_cupy_blocks.py needs no equivalent trick - its templates are already
+f-strings with values substituted directly into CUDA text, the same
+`new_uid()`-tagging grid/_cupy_blocks.py and noise/_cupy_blocks.py use.
+
+`ctx.bk` (core/context/bk.py) supplies `sqrt`/`atan2`/`cos`/`sin` for the
+hillshade formula itself - `max`/`min` stay plain python builtins, as grid
+already established.
+
+Author: B.G (08/2026)
 """
 
 from ..core.context.backends import backend_classes
-from ..core.context.bag import Bag
+from ..core.context.builder import GroupBuilder, KernelBuilder
+from ..core.context.frozen import FrozenGroup, FrozenKernel, _Frozen
+from ..core.context.slot import SlotKind
+
+_TOPOLOGIES = {"D4": 4, "D8": 8}
+_MODES = ("const", "scalar")
 
 
 def _blocks_for(backend: str):
     """
-    The private block module implementing make_hillshade's device code for
-    one backend name: the closure blocks (shared by Taichi and Quadrants) or
-    the cupy blocks.
+    The private block module implementing make_hillshade_group's device code
+    for one backend name: the closure blocks (shared by Taichi and
+    Quadrants) or the cupy blocks.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     if backend in ("taichi", "quadrants"):
         from . import _closure_blocks as blocks
     elif backend == "cupy":
         from . import _cupy_blocks as blocks
     else:
-        raise ValueError(f"make_hillshade: unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
+        raise ValueError(f"make_hillshade_group: unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
     return blocks
 
 
-def _kernel_cls(backend: str):
+def _k_indices(topology: str):
+    if topology == "D4":
+        return {"k_top": 0, "k_left": 1, "k_right": 2, "k_bottom": 3}
+    if topology == "D8":
+        return {"k_top": 1, "k_left": 3, "k_right": 4, "k_bottom": 6}
+    raise ValueError(f"make_hillshade_group: topology must be one of {sorted(_TOPOLOGIES)}, got {topology!r}")
+
+
+def _find_param_paths(frozen: _Frozen, leaf_name: str, prefix: tuple = ()) -> list:
     """
-    The KernelBuilder class for `backend` - backend_classes() only returns
-    HelperBuilder, so the `hillshade` kernel member looks this up directly.
+    Every relative dotted path, as a `"a.b.NAME"` string, under `frozen`'s
+    own composed subtree whose PARAM slot is literally named `leaf_name` -
+    see grid/__init__.py's own `_find_param_paths` (identical; generic over
+    whether a composed node is itself a FrozenHelper or a nested
+    FrozenGroup - see the module docstring's "Nested FrozenGroup-in-
+    FrozenGroup" section).
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
-    if backend == "taichi":
-        from ..core.context.taichi_backend import TaichiKernelBuilder
-
-        return TaichiKernelBuilder
-    if backend == "quadrants":
-        from ..core.context.quadrants_backend import QuadrantsKernelBuilder
-
-        return QuadrantsKernelBuilder
-    if backend == "cupy":
-        from ..core.context.cupy_backend import CupyKernelBuilder
-
-        return CupyKernelBuilder
-    raise ValueError(f"unknown backend {backend!r}")
+    paths = []
+    if leaf_name in frozen.slots.names(SlotKind.PARAM):
+        paths.append(".".join(prefix + (leaf_name,)))
+    for name, child in frozen.composed.items():
+        paths.extend(_find_param_paths(child, leaf_name, prefix + (name,)))
+    return paths
 
 
-def make_hillshade(
+def _share_leaf(group: GroupBuilder, canonical: str) -> None:
+    """
+    Declare every occurrence of a PARAM slot named `canonical` anywhere in
+    `group`'s already-composed subtree as build-phase-shared with `group`'s
+    own top-level `canonical` slot - see grid/__init__.py's own `_share_leaf`
+    (identical).
+
+    Author: B.G (08/2026)
+    """
+    paths = []
+    for name, child in group.composed.items():
+        paths.extend(_find_param_paths(child, canonical, (name,)))
+    if paths:
+        group.share(canonical, *paths)
+
+
+def make_hillshade_group(backend: str, grid: FrozenGroup, *, topology: str = "D8") -> FrozenGroup:
+    """
+    Build one hillshade's structure: a FrozenGroup wiring `AZIMUTH`/
+    `ALTITUDE`/`ZFACTOR` (its own value params) plus every name in `grid`'s
+    own top-level PARAM slots (NX/NY/DX/N_NEIGHBOURS, and NODATA_MASK/
+    OUTLET_MASK if `grid` carries them) as its own top-level PARAM slots too
+    - the latter purely as build-phase-sharing canonicals, see the module
+    docstring's "Nested FrozenGroup-in-FrozenGroup" section - and composing
+    the public `at(z, i)` device helper, uniform by name regardless of
+    backend. Returns structure only, no Parameter objects -
+    make_hillshade_parameters is the companion that builds AZIMUTH/ALTITUDE/
+    ZFACTOR's own values (NX/NY/DX/N_NEIGHBOURS are the caller's own, from
+    make_grid_parameters - bind the same objects into `hillshade.NX`/... as
+    well as `grid.NX`/...).
+
+    `topology` must match whatever `grid` was itself built with - see the
+    module docstring's "Structure needs topology" section for why this
+    module cannot read that off `grid` itself.
+
+    Author: B.G (08/2026)
+    """
+    if topology not in _TOPOLOGIES:
+        raise ValueError(f"make_hillshade_group: topology must be one of {sorted(_TOPOLOGIES)}, got {topology!r}")
+    blocks = _blocks_for(backend)
+    k = _k_indices(topology)
+
+    group = GroupBuilder()
+    group.wire_param("AZIMUTH")
+    group.wire_param("ALTITUDE")
+    group.wire_param("ZFACTOR")
+    grid_param_names = grid.slots.names(SlotKind.PARAM)
+    for name in grid_param_names:
+        group.wire_param(name)
+
+    blocks.build_group(group, grid=grid, **k)
+
+    _share_leaf(group, "AZIMUTH")
+    _share_leaf(group, "ALTITUDE")
+    _share_leaf(group, "ZFACTOR")
+    for name in grid_param_names:
+        _share_leaf(group, name)
+
+    return group.close()
+
+
+def make_hillshade_parameters(
     backend: str,
     pool,
-    grid: Bag,
     *,
     azimuth: float = 315.0,
     altitude: float = 45.0,
@@ -83,51 +236,56 @@ def make_hillshade(
     azimuth_mode: str = "const",
     altitude_mode: str = "const",
     z_factor_mode: str = "const",
-) -> Bag:
+) -> dict:
     """
-    Build one hillshade Bag: `at(z, i)` and the unbuilt `hillshade` kernel
-    builder, both reading row/column/dx/neighbours off `grid` rather than
-    carrying their own geometry.
+    Build the concrete, caller-owned Parameter objects one hillshade group's
+    own value PARAM slots need bound: {"AZIMUTH": ..., "ALTITUDE": ...,
+    "ZFACTOR": ...}. NX/NY/DX/N_NEIGHBOURS (and NODATA_MASK/OUTLET_MASK, if
+    present) are not among these - see the module docstring: bind the same
+    Parameter objects make_grid_parameters already produced into
+    `hillshade.NX`/... as well as `grid.NX`/....
 
     `azimuth`/`altitude` are light-source angles in degrees (315/45 is the
     classic NW-lit default); `z_factor` scales the gradient before it enters
     the slope/aspect computation. The `*_mode` arguments are "const" or
-    "scalar", deciding whether a value is folded in at compile time or lives
-    in a one-cell device field the host can retune - same convention as
-    make_grid/make_noise.
+    "scalar" - same convention as make_grid_parameters/make_noise_parameters.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     for label, mode in (
         ("azimuth_mode", azimuth_mode),
         ("altitude_mode", altitude_mode),
         ("z_factor_mode", z_factor_mode),
     ):
-        if mode not in ("const", "scalar"):
-            raise ValueError(f"make_hillshade: {label} must be 'const' or 'scalar', got {mode!r}")
+        if mode not in _MODES:
+            raise ValueError(f"make_hillshade_parameters: {label} must be 'const' or 'scalar', got {mode!r}")
 
-    backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
-    KernelCls = _kernel_cls(backend)
-    blocks = _blocks_for(backend)
+    _, ParamCls, _, dtypes = backend_classes(backend)
 
     azimuth_p = ParamCls("HS_AZIMUTH", dtype=dtypes["f32"], mode=azimuth_mode, value=float(azimuth), pool=pool)
     altitude_p = ParamCls("HS_ALTITUDE", dtype=dtypes["f32"], mode=altitude_mode, value=float(altitude), pool=pool)
     z_factor_p = ParamCls("HS_ZFACTOR", dtype=dtypes["f32"], mode=z_factor_mode, value=float(z_factor), pool=pool)
 
-    if backend == "cupy":
-        members = blocks.build_helpers(
-            HelperCls, KernelCls, grid=grid, azimuth_p=azimuth_p, altitude_p=altitude_p, z_factor_p=z_factor_p
-        )
-    else:
-        members = blocks.build_helpers(
-            HelperCls,
-            KernelCls,
-            backend=backend,
-            backend_mod=backend_mod,
-            grid=grid,
-            azimuth_p=azimuth_p,
-            altitude_p=altitude_p,
-            z_factor_p=z_factor_p,
-        )
+    return {"AZIMUTH": azimuth_p, "ALTITUDE": altitude_p, "ZFACTOR": z_factor_p}
 
-    return Bag({"azimuth": azimuth_p, "altitude": altitude_p, "z_factor": z_factor_p, **members})
+
+def make_hillshade_kernel(backend: str, hillshade_group: FrozenGroup) -> FrozenKernel:
+    """
+    The standalone `hillshade` pass: a FrozenKernel composing the *whole*
+    `hillshade_group` under the name `hillshade` and writing `out[i] =
+    hillshade.at(z, i)` for every node - see the module docstring's "Three
+    functions, not two" section for why this cannot be a FrozenGroup member
+    the way `at` is. `z`/`out` are DATA slots (cupy additionally takes `n`,
+    the node count, as a DATA slot too - a `cp.RawModule` kernel has no
+    auto-ranging equivalent to Taichi/Quadrants' `for i in range(n)`).
+
+    A caller `.build()`s the result, binds `z`/`out` (and, on cupy, `n`) plus
+    every PARAM address `hillshade_group` itself carries (`hillshade.NX`,
+    `hillshade.AZIMUTH`, ...), then `.compile()`s.
+
+    Author: B.G (08/2026)
+    """
+    blocks = _blocks_for(backend)
+    if backend == "cupy":
+        return blocks.build_kernel(hillshade_group)
+    return blocks.build_kernel(hillshade_group, backend=backend)

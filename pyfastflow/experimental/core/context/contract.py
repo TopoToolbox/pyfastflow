@@ -35,6 +35,14 @@ extract_cupy_contract(source)       CUDA text already carrying `$...$` spans.
                                      since there is no python callable to lose
                                      sight of in the first place.
 
+`ctx.bk` (RESERVED_BK_NAME, bk.py) is grammar the python surface recognises
+and drops rather than records: a chain rooted at `bk` is the reserved
+backend-intrinsics namespace (`ctx.bk.sqrt(x)`, ...), never a slot
+requirement, so extract_python_contract never adds one to the returned
+Contract - see bk.py's module docstring for the full mechanism, including why
+this namespace exists at all and why cupy's own extractor is deliberately
+left untouched (`ctx.bk` is not part of the cupy template surface).
+
 Contract.check_root(root, provided) is the candidate-check compose() (builder.
 py) runs once a template's contract is known: for every chain this contract
 requires under `root` (e.g. `grid.neighbour`), the composed candidate must
@@ -50,6 +58,7 @@ import re
 import textwrap
 from typing import Callable
 
+from .bk import RESERVED_BK_NAME
 from .ctx import CTX_PARAM_NAME
 
 Chain = tuple[str, ...]
@@ -169,6 +178,12 @@ class _ChainVisitor(ast.NodeVisitor):
     difference here - both shapes are recorded identically (see the module
     docstring).
 
+    A chain rooted at RESERVED_BK_NAME (`ctx.bk.sqrt(x)`, ...) is dropped
+    instead of recorded - see the module docstring and bk.py. Nothing further
+    down such a chain needs a visit of its own (it resolves entirely to
+    Attribute/Name nodes already fully consumed by `_ctx_chain`), so this is
+    a plain early return, not a call into generic_visit.
+
     Author: B.G (08/2026)
     """
 
@@ -178,6 +193,8 @@ class _ChainVisitor(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> None:
         chain = _ctx_chain(node)
         if chain is not None:
+            if chain[0] == RESERVED_BK_NAME:
+                return
             self.chains.add(chain)
             return
         self.generic_visit(node)

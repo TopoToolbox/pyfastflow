@@ -1,75 +1,61 @@
 """
-cupy (CUDA source) block templates behind make_noise.
+cupy (CUDA source) block templates behind make_noise_group.
 
 Mirrors _closure_blocks.py block for block - same private/public split, same
 `kind` selector deciding which chain `at(i)` is wired to - written as CUDA
-text instead of python defs, since that is what CupyHelperBuilder compiles
-(see cupy_backend.py's module docstring for the `$...$` span mechanism).
+text instead of python defs. Every span reaching a PARAM is spelled
+`$ctx.NAME.get(...)$` in full, exactly like grid/_cupy_blocks.py; every span
+reaching a composed HELPER is spelled `$ctx.name(args)$`.
 
-The arithmetic is the same port of pyfastflow/noise/white_noise.py and
-perlin_noise.py the closure blocks carry, so the two backends agree bit for
-bit on the white-noise hash and octave for octave on Perlin.
+No `ctx.bk` here - cupy stays plain C, as grid/_cupy_blocks.py's own module
+docstring already establishes for this backend: `floorf`, `(int)`/`(float)`
+casts and a plain `0x846CA68Bu` literal are the native spelling, and the
+python/cupy template surfaces are already a different grammar by design (see
+core/context/bk.py's own module docstring for why `ctx.bk` is deliberately
+excluded from cupy).
 
-Every device function name is prefixed with this noise bag's own tag (a fresh
-new_uid()), so two make_noise() calls in one process never collide inside a
-single compiled cupy module even if both are bound into the same kernel.
+Every device function name is prefixed with this noise group's own tag (a
+fresh new_uid()), so two make_noise_group() calls in one process never
+collide inside a single compiled cupy module even if both are bound into the
+same kernel - see grid/_cupy_blocks.py.
 
-Perlin's permutation lookups go through a named local (`int ia = A & 255;`)
-before the span rather than inlining the expression into `$PERM.get(...)$` -
-spans are resolved as text, and keeping their argument a bare identifier
-keeps that resolution unambiguous.
-
-Author: B.G (07/2026)
+Author: B.G (08/2026)
 """
 
-import functools
-
-from ..core.context.backends import bag_need, helper_need, make_helper, param_need
-from ..core.context.need import Kind, Need
+from ..core.context.builder import HelperBuilder
+from ..core.context.contract import extract_cupy_contract
 from ..core.pool.base import new_uid
 
 
-def _grid_nx_need(name: str, grid) -> Need:
+def _helper(template, *, helpers=None):
     """
-    A `Need(name, kind=Kind.BAG)` bound to `grid`, requiring only the `nx`
-    member row/col actually read. See _closure_blocks.py's own
-    _grid_nx_need for the closure-backend twin.
+    One private/public HelperBuilder: PARAM slots are declared implicitly by
+    every `$ctx.NAME.get(...)$`/`$ctx.NAME.set_node(...)$` span contract.py
+    derives from `template`'s own text - mirrors grid/_cupy_blocks.py's own
+    `_helper`.
 
     Author: B.G (08/2026)
     """
-    return bag_need(name, grid, contains=[Need("nx", kind=Kind.PARAM, dtype=grid.nx.dtype, modes={grid.nx.mode})])
+    b = HelperBuilder()
+    for chain in extract_cupy_contract(template).chains:
+        if (not helpers) or chain[0] not in helpers:
+            b.wire_param(chain[0])
+    if helpers:
+        for name, frozen in helpers.items():
+            b.compose(name, frozen)
+    return b.ingest(template)
 
 
-def _grid_nx_ny_need(name: str, grid) -> Need:
+def build_hash_u32():
     """
-    A `Need(name, kind=Kind.BAG)` bound to `grid`, requiring the `nx`/`ny`
-    members Perlin's `at` actually reads. See _closure_blocks.py's own
-    _grid_nx_ny_need for the closure-backend twin.
+    The standalone hash_u32(x) FrozenHelper - no bound Parameters, so it can
+    be built with nothing else in hand. See _closure_blocks.py's
+    build_hash_u32 for why this exists.
 
     Author: B.G (08/2026)
-    """
-    return bag_need(
-        name,
-        grid,
-        contains=[
-            Need("nx", kind=Kind.PARAM, dtype=grid.nx.dtype, modes={grid.nx.mode}),
-            Need("ny", kind=Kind.PARAM, dtype=grid.ny.dtype, modes={grid.ny.mode}),
-        ],
-    )
-
-
-def build_hash_u32(HelperCls):
-    """
-    The standalone hash_u32(x) HelperBuilder - no bound Parameters, so it
-    can be built without a grid, a pool, or any of make_noise's other
-    config. See _closure_blocks.py's build_hash_u32 for why this exists.
-    `strict_needs=True` - see build_helpers below.
-
-    Author: B.G (07/2026)
     """
     t = f"pn{new_uid()}"
-    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
-    return mk(
+    return _helper(
         f"""
 __device__ unsigned int {t}_hash_u32(unsigned int x) {{
     unsigned int h = x;
@@ -84,81 +70,55 @@ __device__ unsigned int {t}_hash_u32(unsigned int x) {{
     )
 
 
-def build_helpers(
-    HelperCls,
-    *,
-    grid,
-    kind,
-    amplitude_p,
-    seed_p,
-    perm_p,
-    frequency_x_p,
-    frequency_y_p,
-    octaves_p,
-    persistence_p,
-):
+def build_group(group, *, kind):
     """
-    Wire one noise bag's private blocks and its public `at` for the cupy
-    backend, picking the white or Perlin chain from `kind` and binding
-    private blocks into public ones by name (a bound name resolves to the
-    real emitted C symbol at span-expansion time - see cupy_backend.py's
-    _SpanParser).
+    Compose every private block and public helper for the cupy backend onto
+    `group` (a GroupBuilder), picking the white or Perlin chain from `kind`.
 
-    Every bind below goes through a Need (param_need/helper_need/bag_need,
-    see backends.py) and every HelperBuilder is constructed with
-    `strict_needs=True` (via `mk`) - mirrors _closure_blocks.py's own
-    conversion; see its build_helpers docstring for `GRID`'s Kind.BAG use.
+    Returns nothing - every public helper (`at`, `hash_u32`, and
+    `white_unit`/`perlin_at`) is compose()d onto `group` itself, under its
+    own public name, by this call.
 
-    Returns {public_name: HelperBuilder}, meant to be merged straight into
-    the Bag make_noise() returns.
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     t = f"pn{new_uid()}"
 
-    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
-
-    row = mk(f"__device__ int {t}_row(int i) {{ return i / $GRID.nx.get(0)$; }}", GRID=_grid_nx_need("GRID", grid))
-    col = mk(f"__device__ int {t}_col(int i) {{ return i % $GRID.nx.get(0)$; }}", GRID=_grid_nx_need("GRID", grid))
-    # Built unconditionally (not just for kind="white") - hash_u32 is also a
-    # public bag member, reused by callers outside make_noise (e.g. flow's
-    # rand_unit) that want the same integer hash without pulling in the rest
-    # of the white-noise chain.
-    hash_u32 = build_hash_u32(HelperCls)
+    row = _helper(f"__device__ int {t}_row(int i) {{ return i / $ctx.NX.get(0)$; }}")
+    col = _helper(f"__device__ int {t}_col(int i) {{ return i % $ctx.NX.get(0)$; }}")
+    hash_u32 = build_hash_u32()
+    group.wire_helper("hash_u32").compose("hash_u32", hash_u32)
 
     if kind == "white":
-        white_unit = mk(
+        white_unit = _helper(
             f"""
 __device__ float {t}_white_unit(int i) {{
     // column first, row second - the argument order white_noise.py hashes in
-    int c = $col(i)$;
-    int r = $row(i)$;
-    unsigned int key = (unsigned int)$SEED.get(0)$;
+    int c = $ctx.col(i)$;
+    int r = $ctx.row(i)$;
+    unsigned int key = (unsigned int)$ctx.SEED.get(0)$;
     key ^= (unsigned int)c * 374761393u;
     key ^= (unsigned int)r * 668265263u;
-    unsigned int hashed = $hash_u32(key)$;
+    unsigned int hashed = $ctx.hash_u32(key)$;
     return (float)hashed / 4294967296.0f;
 }}
 """,
-            row=helper_need("row", row),
-            col=helper_need("col", col),
-            hash_u32=helper_need("hash_u32", hash_u32),
-            SEED=param_need("SEED", seed_p),
+            helpers={"row": row, "col": col, "hash_u32": hash_u32},
         )
-        at = mk(
+        at = _helper(
             f"""
 __device__ float {t}_at(int i) {{
-    return ($white_unit(i)$ - 0.5f) * 2.0f * $AMP.get(0)$;
+    return ($ctx.white_unit(i)$ - 0.5f) * 2.0f * $ctx.AMPLITUDE.get(0)$;
 }}
 """,
-            white_unit=helper_need("white_unit", white_unit),
-            AMP=param_need("AMP", amplitude_p),
+            helpers={"white_unit": white_unit},
         )
-        return {"at": at, "white_unit": white_unit, "hash_u32": hash_u32}
+        group.wire_helper("at").compose("at", at)
+        group.wire_helper("white_unit").compose("white_unit", white_unit)
+        return
 
-    fade = mk(f"__device__ float {t}_fade(float t) {{ return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f); }}")
-    lerp = mk(f"__device__ float {t}_lerp(float t, float a, float b) {{ return a + t * (b - a); }}")
-    grad = mk(
+    fade = _helper(f"__device__ float {t}_fade(float t) {{ return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f); }}")
+    lerp = _helper(f"__device__ float {t}_lerp(float t, float a, float b) {{ return a + t * (b - a); }}")
+    grad = _helper(
         f"""
 __device__ float {t}_grad(int hash_val, float dx, float dy) {{
     int idx = hash_val & 7;
@@ -176,7 +136,7 @@ __device__ float {t}_grad(int hash_val, float dx, float dy) {{
 }}
 """
     )
-    perlin_at = mk(
+    perlin_at = _helper(
         f"""
 __device__ float {t}_perlin_at(float x, float y) {{
     float x_floor = floorf(x);
@@ -188,72 +148,62 @@ __device__ float {t}_perlin_at(float x, float y) {{
     float x_local = x - x_floor;
     float y_local = y - y_floor;
 
-    float u = $fade(x_local)$;
-    float v = $fade(y_local)$;
+    float u = $ctx.fade(x_local)$;
+    float v = $ctx.fade(y_local)$;
 
     int iX1 = (X + 1) & 255;
-    int A = $PERM.get(X)$ + Y;
-    int B = $PERM.get(iX1)$ + Y;
+    int A = $ctx.PERM.get(X)$ + Y;
+    int B = $ctx.PERM.get(iX1)$ + Y;
 
     int iAA = A & 255;
     int iAB = (A + 1) & 255;
     int iBA = B & 255;
     int iBB = (B + 1) & 255;
 
-    int AA = $PERM.get(iAA)$;
-    int AB = $PERM.get(iAB)$;
-    int BA = $PERM.get(iBA)$;
-    int BB = $PERM.get(iBB)$;
+    int AA = $ctx.PERM.get(iAA)$;
+    int AB = $ctx.PERM.get(iAB)$;
+    int BA = $ctx.PERM.get(iBA)$;
+    int BB = $ctx.PERM.get(iBB)$;
 
-    float gaa = $grad(AA, x_local, y_local)$;
-    float gba = $grad(BA, x_local - 1.0f, y_local)$;
-    float gab = $grad(AB, x_local, y_local - 1.0f)$;
-    float gbb = $grad(BB, x_local - 1.0f, y_local - 1.0f)$;
+    float gaa = $ctx.grad(AA, x_local, y_local)$;
+    float gba = $ctx.grad(BA, x_local - 1.0f, y_local)$;
+    float gab = $ctx.grad(AB, x_local, y_local - 1.0f)$;
+    float gbb = $ctx.grad(BB, x_local - 1.0f, y_local - 1.0f)$;
 
-    float lo = $lerp(u, gaa, gba)$;
-    float hi = $lerp(u, gab, gbb)$;
-    return $lerp(v, lo, hi)$;
+    float lo = $ctx.lerp(u, gaa, gba)$;
+    float hi = $ctx.lerp(u, gab, gbb)$;
+    return $ctx.lerp(v, lo, hi)$;
 }}
 """,
-        fade=helper_need("fade", fade),
-        lerp=helper_need("lerp", lerp),
-        grad=helper_need("grad", grad),
-        PERM=param_need("PERM", perm_p),
+        helpers={"fade": fade, "lerp": lerp, "grad": grad},
     )
-    at = mk(
+    at = _helper(
         f"""
 __device__ float {t}_at(int i) {{
-    float nx_f = (float)$GRID.nx.get(0)$;
-    float ny_f = (float)$GRID.ny.get(0)$;
+    float nx_f = (float)$ctx.NX.get(0)$;
+    float ny_f = (float)$ctx.NY.get(0)$;
 
-    float x = (float)$col(i)$ * $FX.get(0)$ / nx_f;
-    float y = (float)$row(i)$ * $FY.get(0)$ / ny_f;
+    float x = (float)$ctx.col(i)$ * $ctx.FX.get(0)$ / nx_f;
+    float y = (float)$ctx.row(i)$ * $ctx.FY.get(0)$ / ny_f;
 
     float total = 0.0f;
     float max_value = 0.0f;
     float current_amplitude = 1.0f;
     float current_frequency = 1.0f;
 
-    int octaves = $OCTAVES.get(0)$;
+    int octaves = $ctx.OCTAVES.get(0)$;
     for (int o = 0; o < octaves; ++o) {{
-        total += $perlin_at(x * current_frequency, y * current_frequency)$ * current_amplitude;
+        total += $ctx.perlin_at(x * current_frequency, y * current_frequency)$ * current_amplitude;
         max_value += current_amplitude;
-        current_amplitude *= $PERSISTENCE.get(0)$;
+        current_amplitude *= $ctx.PERSISTENCE.get(0)$;
         current_frequency *= 2.0f;
     }}
 
-    if (max_value > 0.0f) return (total / max_value) * $AMP.get(0)$;
+    if (max_value > 0.0f) return (total / max_value) * $ctx.AMPLITUDE.get(0)$;
     return 0.0f;
 }}
 """,
-        row=helper_need("row", row),
-        col=helper_need("col", col),
-        perlin_at=helper_need("perlin_at", perlin_at),
-        GRID=_grid_nx_ny_need("GRID", grid),
-        FX=param_need("FX", frequency_x_p),
-        FY=param_need("FY", frequency_y_p),
-        OCTAVES=param_need("OCTAVES", octaves_p),
-        PERSISTENCE=param_need("PERSISTENCE", persistence_p),
-        AMP=param_need("AMP", amplitude_p),
+        helpers={"row": row, "col": col, "perlin_at": perlin_at},
     )
-    return {"at": at, "perlin_at": perlin_at, "hash_u32": hash_u32}
+    group.wire_helper("at").compose("at", at)
+    group.wire_helper("perlin_at").compose("perlin_at", perlin_at)

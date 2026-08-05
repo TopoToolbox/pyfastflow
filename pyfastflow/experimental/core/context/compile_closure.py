@@ -64,6 +64,15 @@ ever called directly, and helper call signatures are fully trusted (no
 attempt is made here to prune what nothing in this particular tree happens to
 call).
 
+`ctx.bk`, the reserved backend-intrinsics namespace (bk.py) - `ctx.bk.sqrt`,
+`ctx.bk.atan2`, `ctx.bk.cast_u32`, ... - is attached to every node this
+module builds, at every level of the ctx tree, not just the root: `bk` is
+built once per compile() (`make_closure_bk(backend)`) and threaded through
+`_build_ctx_node`'s own recursion, so it is reachable from a deeply composed
+private block exactly as it is from the kernel's own template. See bk.py's
+module docstring for why this namespace exists and contract.py for why it
+never appears as a slot requirement.
+
 Author: B.G (08/2026)
 """
 
@@ -74,6 +83,7 @@ from types import FunctionType
 from typing import Any
 
 from ..pool.base import new_uid
+from .bk import make_closure_bk
 from .bound import Address, BoundKernel, format_address
 from .compile import capture_template_meta
 from .compile_shared import CompiledKernel, CompileError, check_data_signature, check_legal_accessors, check_unmet
@@ -142,7 +152,7 @@ class _CtxNode:
     """
 
 
-def _build_ctx_node(prefix: Address, frozen: _Frozen, bound: BoundKernel, backend: Any) -> _CtxNode:
+def _build_ctx_node(prefix: Address, frozen: _Frozen, bound: BoundKernel, backend: Any, bk: Any) -> _CtxNode:
     """
     Recursively build the ctx tree rooted at `frozen` (found at `prefix` in
     `bound`'s address tree), compiling every composed HELPER child - bottom
@@ -151,9 +161,17 @@ def _build_ctx_node(prefix: Address, frozen: _Frozen, bound: BoundKernel, backen
     and a further-navigable node on the returned object. See the module
     docstring.
 
+    `bk` (bk.py's `make_closure_bk(backend)`, built once per compile() and
+    threaded through every recursive call) is attached to every node at
+    every level - the reserved `ctx.bk` namespace is reachable from the
+    kernel's own root template and from any composed helper's, however deep,
+    since a private block many levels down is exactly where noise's/visu's
+    own use of it lives. See bk.py's module docstring.
+
     Author: B.G (08/2026)
     """
     node = _CtxNode()
+    node.bk = bk
     for name in frozen.slots.names(SlotKind.PARAM):
         addr = prefix + (name,)
         param = bound.value_at(addr)
@@ -162,7 +180,7 @@ def _build_ctx_node(prefix: Address, frozen: _Frozen, bound: BoundKernel, backen
     for name in frozen.slots.names(SlotKind.HELPER) | set(frozen.composed):
         child_addr = prefix + (name,)
         child_frozen = frozen.composed[name]
-        child_node = _build_ctx_node(child_addr, child_frozen, bound, backend)
+        child_node = _build_ctx_node(child_addr, child_frozen, bound, backend, bk)
         if isinstance(child_frozen, FrozenGroup):
             # A FrozenGroup has no template of its own to compile - it is a
             # passive, non-callable composite (frozen.py). `ctx.<name>` is
@@ -199,7 +217,8 @@ def compile_kernel(bound: BoundKernel, backend: Any) -> CompiledKernel:
 
     frozen = bound.frozen
     data_names = check_data_signature(frozen.template, frozen.slots.names(SlotKind.DATA))
-    root_node = _build_ctx_node((), frozen, bound, backend)
+    bk = make_closure_bk(backend)
+    root_node = _build_ctx_node((), frozen, bound, backend, bk)
     raw = _compile_dropping_ctx(frozen.template, root_node, "root")
     compiled = backend.kernel(raw)
 

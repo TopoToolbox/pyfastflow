@@ -34,6 +34,12 @@ carry - see contract.py's `extract_python_contract`, which enforces this.
 There is no cupy equivalent to enforce: a `$ctx....$` span already says which
 name it means in its own text.
 
+`ctx.bk` (RESERVED_BK_NAME, bk.py) is a second piece of reserved grammar, on
+the closure (Taichi/Quadrants) python surface only: the backend-intrinsics
+namespace (`ctx.bk.sqrt(x)`, ...), recognised structurally by contract.py and
+never a slot a template's Contract requires satisfied - see bk.py's module
+docstring for the full mechanism and why it exists.
+
 Author: B.G (08/2026)
 """
 

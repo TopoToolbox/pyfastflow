@@ -45,6 +45,15 @@ ingest(). It becomes a hard requirement one phase later, at build() (see
 frozen.py, bound.py): the address tree build() walks has no way to
 represent "reachable, but nothing composed here yet".
 
+`RESERVED_BK_NAME` ("bk", bk.py) may never be wired (wire_param/wire_helper/
+wire_data, via `_wire`) or composed (`compose`) - `ctx.bk` is reserved,
+backend-recognised grammar (the backend-intrinsics namespace: `ctx.bk.sqrt`,
+`ctx.bk.atan2`, ...), not a name any factory's own template surface may
+repurpose. See bk.py's module docstring for the full mechanism and
+contract.py for the matching rule on the derivation side (a `ctx.bk.*` chain
+is dropped before it ever becomes a contract requirement, so ingest() never
+asks for a "bk" slot to be wired in the first place).
+
 ingest() returns a frozen, immutable FrozenKernel/FrozenHelper and freezes
 the builder itself in the same call - every wire_*/compose/ingest afterwards
 raises FrozenBuilderError. A builder is therefore used once, start to finish;
@@ -63,6 +72,7 @@ Author: B.G (08/2026)
 from typing import Any
 
 from ..pool.base import new_uid
+from .bk import RESERVED_BK_NAME
 from .contract import Contract, ContractError, extract_cupy_contract, extract_python_contract
 from .frozen import FrozenBuilderError, FrozenGroup, FrozenHelper, FrozenKernel, _Frozen
 from .slot import DataSlot, HelperSlot, ParamSlot, Slot, SlotGroup, SlotGroupError, SlotKind
@@ -107,6 +117,11 @@ class _Builder:
 
     def _wire(self, slot: Slot) -> "_Builder":
         self._check_mutable()
+        if slot.name == RESERVED_BK_NAME:
+            raise SlotGroupError(
+                f"'{RESERVED_BK_NAME}' is reserved - ctx.{RESERVED_BK_NAME} is the "
+                f"backend-intrinsics namespace (bk.py) and can never be wired as a slot"
+            )
         if slot.name in self._composed:
             raise SlotGroupError(f"'{slot.name}' is already composed on this builder")
         self._slots.add(slot)
@@ -192,6 +207,11 @@ class _Builder:
         Author: B.G (08/2026)
         """
         self._check_mutable()
+        if name == RESERVED_BK_NAME:
+            raise SlotGroupError(
+                f"'{RESERVED_BK_NAME}' is reserved - ctx.{RESERVED_BK_NAME} is the "
+                f"backend-intrinsics namespace (bk.py) and can never be composed as a root"
+            )
         if not isinstance(frozen, _Frozen):
             raise TypeError(f"compose({name!r}, ...): expected a FrozenKernel/FrozenHelper, got {type(frozen).__name__}")
         if isinstance(frozen, FrozenKernel):
