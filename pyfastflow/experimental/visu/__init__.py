@@ -86,22 +86,18 @@ with; nothing here cross-checks the two.
 
 `k_left`/`k_right`/`k_top`/`k_bottom`, once picked from `topology`, are
 per-call integers, not template-global constants the way e.g. grid's own
-`_SQRT2` is - _closure_blocks.py builds `_gradient_x`/`_gradient_y`'s python
-source dynamically (an f-string with the two k values substituted in
-literally, exec()'d with its source registered in `linecache` so contract.py
-can still `inspect.getsource` it and compile_closure.py can still rebuild
-it) rather than trying to smuggle them in as closure variables, which does
-not survive compile_closure.py's ast-unparse-and-reexec rebuild (see that
-module's own docstring: only a template's `__globals__` survives the
-rebuild, never an enclosing function's local cells) - confirmed by hitting
-exactly this failure once, while building this module's own verification
-kernel (a `NameError` on a closed-over `T` used as a Taichi/Quadrants type
-annotation), and fixing it the same way: generate real source text with the
-value already baked in, `exec()` it into a fresh, throwaway globals dict,
-register that source in `linecache` under a synthetic filename so
-`inspect.getsource` (contract.py's own extraction, and Taichi/Quadrants' own
-re-inspection when a `ti.func`/`qd.func` is re-traced) can still find it.
-_cupy_blocks.py needs no equivalent trick - its templates are already
+`_SQRT2` is - `_closure_blocks.py`'s `_make_gradient_x_tmpl`/`_make_gradient_
+y_tmpl` close over them as ordinary python closure variables from a nested
+def; `compile_closure.py`'s `_compile_dropping_ctx` carries a template's own
+closure cells forward into its rebuilt globals (see that module's own
+docstring). `_make_hillshade_kernel_tmpl`'s `z`/`out` annotations use the
+`ti.template()`/`qd.template()` type marker the same nested-def way, though
+that is a distinct case under the hood - an annotation-only name is not a
+closure cell at all (evaluated eagerly by the enclosing frame at `def` time,
+never read by the annotated function's own bytecode), so `_compile_dropping_
+ctx` carries it forward via the original template's own `__annotations__`
+instead - see that module's own docstring for why the two need separate
+handling. `_cupy_blocks.py` needs no equivalent - its templates are already
 f-strings with values substituted directly into CUDA text, the same
 `new_uid()`-tagging grid/_cupy_blocks.py and noise/_cupy_blocks.py use.
 

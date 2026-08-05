@@ -1,54 +1,64 @@
 """
-cupy (CUDA source) block templates behind ops's make_* factories.
+cupy (CUDA source) block templates behind ops's make_bitpack_group/make_scan/
+make_reduce, on the new builder/frozen/bound stack (core/context/builder.py,
+frozen.py, bound.py). Mirrors _closure_blocks.py's split and
+../grid/_cupy_blocks.py's own conventions: every span reaching a PARAM is
+spelled `$ctx.NAME.get(...)$`/`$ctx.NAME.set_node(...)$` in full, every span
+reaching a composed HELPER is spelled `$ctx.name(args)$` - the old bare-span
+shorthand (`$flip(f)$`) is gone. Every device/global function name is
+prefixed with this build's own tag (a fresh new_uid()), matching grid/noise/
+visu's own belt-and-braces convention (compile_cupy.py already mangles by
+address - see its own module docstring - this is redundant safety, not load
+bearing).
 
-Mirrors ../grid/_cupy_blocks.py block for block: same private/public split as
-_closure_blocks.py, written as CUDA text instead of python defs. Every
-`__device__`/`__global__` symbol is prefixed with this build's own tag (a
-fresh new_uid()) so two calls into this module in one process never collide
-inside a single compiled cupy module even if both end up bound into the same
-kernel - see ../core/context/cupy_backend.py's module docstring.
+`.inclusive()` on cupy stays `cp.cumsum` (ops/__init__.py's own module
+docstring: CUB's DeviceScan is already the accelerator cupy dispatches to by
+default) - no RoutineBuilder involved for that half. Compaction's count-read
+and scatter, previously a bare host-side numpy slice-copy plus one directly-
+launched kernel, are ported as a two-step FrozenRoutine (routine_v2.py)
+instead: "read_count" (a 1-thread kernel writing scan_out[n-1] into the COUNT
+PARAM) and "scatter", each composed with its own `launch=` override
+(routine_v2.py's `RoutineBuilder.compose(name, frozen, launch=...)`) - a
+genuinely different, meaningfully-sized grid/block per step, which is what
+actually exercises the per-step launch mechanism on a backend where launch
+dims mean anything (see ops/__init__.py's module docstring for the fuller
+design-fork note this resolves).
 
-make_scan and make_reduce need no CUDA text of their own beyond a small
-scatter kernel (scan) - `cp.cumsum`/`cp.sum`/`cp.min`/`cp.max`/`cp.argmin`
-already do the rest, and CUB's own DeviceScan/reduction accelerators are the
-default on this build (see ops/__init__.py's module docstring).
-
-Every bind goes through a Need (helper_need/bag_need, see backends.py) and
-every HelperBuilder/KernelBuilder is constructed strict_needs=True - mirrors
-_closure_blocks.py's own conversion.
-
-Author: B.G (07/2026)
+Author: B.G (08/2026)
 """
 
-import functools
-
-from ..core.context.backends import bag_need, helper_need, make_helper, make_kernel
-from ..core.context.bag import Bag
-from ..core.context.need import Kind, Need
+from ..core.context.builder import GroupBuilder, HelperBuilder, KernelBuilder
+from ..core.context.contract import extract_cupy_contract
 from ..core.pool.base import new_uid
 
 # ---------------------------------------------------------------------------
-# bitpack
+# bitpack: pack(f, i) -> i64, unpack_value(p) -> f32, unpack_index(p) -> i32
 # ---------------------------------------------------------------------------
 
 
-def build_bitpack(HelperCls) -> Bag:
+def _helper(template, *, helpers=None):
+    """PARAM slots auto-derived from the template's own contract, exactly like grid/_cupy_blocks.py's `_helper`."""
+    b = HelperBuilder()
+    for chain in extract_cupy_contract(template).chains:
+        if (not helpers) or chain[0] not in helpers:
+            b.wire_param(chain[0])
+    if helpers:
+        for name, frozen in helpers.items():
+            b.compose(name, frozen)
+    return b.ingest(template)
+
+
+def build_bitpack_group() -> "FrozenGroup":
     """
     pack(f, i) -> i64, unpack_value(p) -> f32, unpack_index(p) -> i32, same
-    IEEE-754 bit-flip trick as _closure_blocks.build_bitpack, using CUDA's
-    __float_as_uint/__uint_as_float instead of Taichi's bit_cast.
+    IEEE-754 bit-flip trick as _closure_blocks.build_bitpack_group, using
+    CUDA's __float_as_uint/__uint_as_float. No PARAM slots anywhere in this
+    tree.
 
-    Every bind goes through a Need (helper_need, see backends.py) and every
-    HelperBuilder is constructed strict_needs=True - mirrors
-    _closure_blocks.build_bitpack's own conversion, including returning a
-    Bag rather than a plain dict (see its docstring for why).
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     t = f"pf{new_uid()}"
-    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
-
-    flip = mk(
+    flip = _helper(
         f"""
 __device__ unsigned int {t}_flip(float f) {{
     unsigned int u = __float_as_uint(f);
@@ -56,7 +66,7 @@ __device__ unsigned int {t}_flip(float f) {{
 }}
 """
     )
-    unflip = mk(
+    unflip = _helper(
         f"""
 __device__ float {t}_unflip(unsigned int u) {{
     unsigned int restored = (u & 0x80000000u) ? (~u) : (u ^ 0x80000000u);
@@ -64,10 +74,10 @@ __device__ float {t}_unflip(unsigned int u) {{
 }}
 """
     )
-    pack = mk(
+    pack = _helper(
         f"""
 __device__ long long {t}_pack(float f, int i) {{
-    unsigned int f_enc = $flip(f)$;
+    unsigned int f_enc = $ctx.flip(f)$;
     unsigned int i_enc = (unsigned int)i;
     long long packed = ((long long)f_enc << 32) | (long long)i_enc;
     long long flipped_upper = (~packed) & (0xFFFFFFFFLL << 32);
@@ -75,9 +85,9 @@ __device__ long long {t}_pack(float f, int i) {{
     return flipped_upper | unchanged_lower;
 }}
 """,
-        flip=helper_need("flip", flip),
+        helpers={"flip": flip},
     )
-    unpack_raw = mk(
+    unpack_raw = _helper(
         f"""
 __device__ long long {t}_unpack_raw(long long packed) {{
     long long flipped_upper = (~packed) & (0xFFFFFFFFLL << 32);
@@ -86,266 +96,93 @@ __device__ long long {t}_unpack_raw(long long packed) {{
 }}
 """
     )
-    unpack_value = mk(
+    unpack_value = _helper(
         f"""
 __device__ float {t}_unpack_value(long long packed) {{
-    long long u = $unpack_raw(packed)$;
+    long long u = $ctx.unpack_raw(packed)$;
     unsigned int f_enc = (unsigned int)(u >> 32);
-    return $unflip(f_enc)$;
+    return $ctx.unflip(f_enc)$;
 }}
 """,
-        unpack_raw=helper_need("unpack_raw", unpack_raw),
-        unflip=helper_need("unflip", unflip),
+        helpers={"unpack_raw": unpack_raw, "unflip": unflip},
     )
-    unpack_index = mk(
+    unpack_index = _helper(
         f"""
 __device__ int {t}_unpack_index(long long packed) {{
-    long long u = $unpack_raw(packed)$;
+    long long u = $ctx.unpack_raw(packed)$;
     unsigned int i_enc = (unsigned int)(u & 0xFFFFFFFFLL);
     return (int)i_enc;
 }}
 """,
-        unpack_raw=helper_need("unpack_raw", unpack_raw),
+        helpers={"unpack_raw": unpack_raw},
     )
-    return Bag({"pack": pack, "unpack_value": unpack_value, "unpack_index": unpack_index})
+
+    group = GroupBuilder()
+    group.wire_helper("pack").compose("pack", pack)
+    group.wire_helper("unpack_value").compose("unpack_value", unpack_value)
+    group.wire_helper("unpack_index").compose("unpack_index", unpack_index)
+    return group.close()
 
 
 # ---------------------------------------------------------------------------
-# math
+# scan compaction: read_count + scatter, as a 2-step FrozenRoutine
 # ---------------------------------------------------------------------------
 
 
-def build_math(HelperCls):
-    """
-    atan(x) via atan2f(x, 1); nextafter(x, y), one ULP of f32 towards y via
-    the same bit-twiddling as _closure_blocks.build_math.
+def _kernel(template, *, data=(), helpers=None):
+    b = KernelBuilder()
+    for d in data:
+        b.wire_data(d)
+    for chain in extract_cupy_contract(template).chains:
+        if (not helpers) or chain[0] not in helpers:
+            b.wire_param(chain[0])
+    if helpers:
+        for name, frozen in helpers.items():
+            b.compose(name, frozen)
+    return b.ingest(template)
 
-    `strict_needs=True` for consistency (see build_bitpack); neither
-    template binds anything.
 
-    Author: B.G (07/2026)
+def build_count_and_scatter_routine(n: int, *, block: int = 256) -> "FrozenRoutine":
     """
+    A 2-step FrozenRoutine (routine_v2.py): "read_count" (one thread, writes
+    scan_out[n-1] into the wired PARAM slot "COUNT") then "scatter" (one
+    thread per node, `ids[scan_out[i]-1] = i` wherever `flags[i] != 0`) - the
+    compaction half of scan-based stream compaction. Each step is composed
+    with its own `launch=` override (routine_v2.py's `RoutineBuilder.compose(
+    ..., launch=...)`) sized to that step's own real thread count - "
+    read_count" is one thread regardless of `n`, "scatter" needs
+    ceil(n/block) blocks of `block` threads - see the module docstring for
+    why this, not the inclusive scan itself, is what exercises per-step
+    launch on cupy.
+
+    Author: B.G (08/2026)
+    """
+    from ..core.context.routine_v2 import RoutineBuilder
+
     t = f"pf{new_uid()}"
-    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
-
-    atan = mk(f"__device__ float {t}_atan(float x) {{ return atan2f(x, 1.0f); }}")
-    nextafter = mk(
+    read_count = _kernel(
         f"""
-__device__ float {t}_nextafter(float x, float y) {{
-    float result = y;
-    if (x != y) {{
-        unsigned int sign_mask = 0x80000000u;
-        unsigned int ix = __float_as_uint(x);
-        if (x == 0.0f) {{
-            ix = (__float_as_uint(y) & sign_mask) | 1u;
-        }} else if ((x > 0.0f) == (y > x)) {{
-            ix += 1u;
-        }} else {{
-            ix -= 1u;
-        }}
-        result = __uint_as_float(ix);
-    }}
-    return result;
-}}
-"""
-    )
-    return {"atan": atan, "nextafter": nextafter}
-
-
-# ---------------------------------------------------------------------------
-# elementwise (kernel builders, returned unbuilt) - `n` is an explicit data
-# argument here since a RawModule kernel has no auto-ranging (see
-# cupy_backend.py's module docstring)
-# ---------------------------------------------------------------------------
-
-
-def build_elementwise(KernelCls):
-    """
-    swap/add_B_to_A/add_B_to_weighted_A/weighted_mean_B_in_A/arange/
-    multiply_by_scalar over a flat f32 buffer, as unbuilt KernelBuilders.
-    Every kernel takes the buffer length `n` as its own last argument.
-
-    Every KernelBuilder is constructed strict_needs=True for consistency
-    (see _closure_blocks.build_elementwise); none binds anything - every
-    argument here is CUDA source text, not a python-level bind().
-
-    Author: B.G (07/2026)
-    """
-    t = f"pf{new_uid()}"
-    return {
-        "swap": KernelCls(strict_needs=True).ingest(
-            f"""
-extern "C" __global__ void {t}_swap(float* array1, float* array2, int n) {{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    float temp = array1[i];
-    array1[i] = array2[i];
-    array2[i] = temp;
-}}
-"""
-        ),
-        "add_B_to_A": KernelCls(strict_needs=True).ingest(
-            f"""
-extern "C" __global__ void {t}_add_B_to_A(float* array1, const float* array2, int n) {{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    array1[i] += array2[i];
-}}
-"""
-        ),
-        "add_B_to_weighted_A": KernelCls(strict_needs=True).ingest(
-            f"""
-extern "C" __global__ void {t}_add_B_to_weighted_A(float* array1, const float* array2, float weight, int n) {{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    array1[i] += array2[i] * weight;
-}}
-"""
-        ),
-        "weighted_mean_B_in_A": KernelCls(strict_needs=True).ingest(
-            f"""
-extern "C" __global__ void {t}_weighted_mean_B_in_A(float* array1, const float* array2, float weight, int n) {{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    array1[i] = array2[i] * weight + array1[i] * (1.0f - weight);
-}}
-"""
-        ),
-        "arange": KernelCls(strict_needs=True).ingest(
-            f"""
-extern "C" __global__ void {t}_arange(float* array, int n) {{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    array[i] = (float)i;
-}}
-"""
-        ),
-        "multiply_by_scalar": KernelCls(strict_needs=True).ingest(
-            f"""
-extern "C" __global__ void {t}_multiply_by_scalar(float* A, float scalar, int n) {{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    A[i] *= scalar;
-}}
-"""
-        ),
-    }
-
-
-# ---------------------------------------------------------------------------
-# slope
-# ---------------------------------------------------------------------------
-
-
-def build_slope(HelperCls, grid):
-    """
-    sumslope_downstream(z, i) / slope_dir(z, i, k), same arithmetic as
-    _closure_blocks.build_slope, walking `grid`'s neighbour/dx/n_neighbours
-    surface through $...$ spans.
-
-    `grid=grid` - a whole Bag bound under one name - goes through a
-    Kind.BAG Need (bag_need, see backends.py), mirroring
-    _closure_blocks.build_slope's own conversion; same shared `contains`
-    list reused across both bag_need() calls.
-
-    Author: B.G (07/2026)
-    """
-    t = f"pf{new_uid()}"
-    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
-    grid_contains = [
-        Need("n_neighbours", kind=Kind.PARAM, dtype=grid.n_neighbours.dtype, modes={grid.n_neighbours.mode}),
-        Need("neighbour", kind=Kind.HELPER),
-        Need("dx", kind=Kind.PARAM, dtype=grid.dx.dtype, modes={grid.dx.mode}),
-    ]
-
-    sumslope_downstream = mk(
-        f"""
-__device__ float {t}_sumslope_downstream(const float* z, int i) {{
-    float sumslope = 0.0f;
-    int nk = $grid.n_neighbours.get(0)$;
-    for (int k = 0; k < nk; k++) {{
-        int j = $grid.neighbour(i, k)$;
-        if (j > -1) {{
-            if (z[j] < z[i]) {{
-                sumslope += (z[i] - z[j]) / $grid.dx.get(0)$;
-            }}
-        }}
-    }}
-    return sumslope;
+extern "C" __global__ void {t}_read_count(const int* scan_out) {{
+    $ctx.COUNT.set_node(0, scan_out[{int(n)} - 1])$;
 }}
 """,
-        grid=bag_need("grid", grid, contains=grid_contains),
+        data=["scan_out"],
     )
-    slope_dir = mk(
+    scatter = _kernel(
         f"""
-__device__ float {t}_slope_dir(const float* z, int i, int k) {{
-    int j = $grid.neighbour(i, k)$;
-    float slope = 0.0f;
-    if (j > -1) {{
-        slope = (z[i] - z[j]) / $grid.dx.get(0)$;
-    }}
-    return slope;
-}}
-""",
-        grid=bag_need("grid", grid, contains=grid_contains),
-    )
-    return {"sumslope_downstream": sumslope_downstream, "slope_dir": slope_dir}
-
-
-# ---------------------------------------------------------------------------
-# scan compaction scatter kernel (inclusive scan itself is cp.cumsum - see
-# ops/__init__.py)
-# ---------------------------------------------------------------------------
-
-
-def build_scatter_kernel(KernelCls):
-    """
-    ids[scan_out[i]-1] = i for every i where flags[i]!=0 - the scatter half
-    of scan-based stream compaction.
-
-    Author: B.G (07/2026)
-    """
-    t = f"pf{new_uid()}"
-    return KernelCls(strict_needs=True).ingest(
-        f"""
-extern "C" __global__ void {t}_scatter(const int* flags, const int* scan_out, int* ids, int n) {{
+extern "C" __global__ void {t}_scatter(const int* flags, const int* scan_out, int* ids) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
+    if (i >= {int(n)}) return;
     if (flags[i] != 0) {{
         ids[scan_out[i] - 1] = i;
     }}
 }}
-"""
+""",
+        data=["flags", "scan_out", "ids"],
     )
 
-
-# ---------------------------------------------------------------------------
-# block_reduce (cub::BlockReduce wrapper)
-# ---------------------------------------------------------------------------
-
-
-def build_block_reduce(HelperCls, block_size: int = 128):
-    """
-    sum(val): one cub::BlockReduce<float, block_size>::Sum() per calling
-    block, returning the block-wide total to thread 0 (undefined on other
-    threads - cub's own contract). The first compile that reaches this
-    warms up jitify's header cache for <cub/block/block_reduce.cuh> - budget
-    roughly two minutes for that one-time cost.
-
-    `strict_needs=True` for consistency; nothing here binds anything.
-
-    Author: B.G (07/2026)
-    """
-    t = f"pf{new_uid()}"
-    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
-    sum_helper = mk(
-        f"""
-#include <cub/block/block_reduce.cuh>
-__device__ float {t}_block_reduce_sum(float val) {{
-    typedef cub::BlockReduce<float, {int(block_size)}> BlockReduceT;
-    __shared__ typename BlockReduceT::TempStorage temp_storage;
-    return BlockReduceT(temp_storage).Sum(val);
-}}
-"""
-    )
-    return {"sum": sum_helper}
+    grid_dim = (n + block - 1) // block
+    rb = RoutineBuilder()
+    rb.compose("read_count", read_count, launch={"grid": 1, "block": 1})
+    rb.compose("scatter", scatter, launch={"grid": grid_dim, "block": block})
+    return rb.freeze()

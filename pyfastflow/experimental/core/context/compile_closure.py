@@ -117,6 +117,39 @@ def _compile_dropping_ctx(template, ctx_obj: Any, label: str) -> FunctionType:
     not yet decorated with `backend.func`/`backend.kernel`, see the callers
     below.
 
+    `exec()` gives the rebuilt function only the globals dict it is handed -
+    `template`'s own closure cells (a value captured lexically from an
+    enclosing factory function: a baked constant, a composed helper
+    reference, ...) are not carried forward by `__globals__` alone and would
+    otherwise raise `NameError` the first time the rebuilt body reads that
+    name. Fixed here by seeding the exec globals with `template.__code__.
+    co_freevars` zipped against `template.__closure__`'s own cell contents,
+    laid on top of `template.__globals__` so a free variable wins over a
+    same-named module global - the lexical binding is what the template's
+    author actually wrote. A captured value becomes an ordinary global in the
+    rebuilt function; that is semantically fine here since tracing reads it
+    once and a device template never writes back into an enclosing scope, but
+    it does mean two templates built from the same closure with different
+    captured values are never the same rebuilt function object - each
+    compile() call mints its own.
+
+    A data argument's own type annotation (a `ti.template()`/`qd.template()`
+    marker, typically) is a second, distinct case closure cells do not cover:
+    `def f(x: T): ...` evaluates the name `T` eagerly, in the enclosing
+    frame, the moment the original `def` statement runs - confirmed
+    empirically - so `T` is never a `LOAD_DEREF` inside `f`'s own code object
+    and never appears in `co_freevars`/`__closure__` even when `T` is a local
+    of an enclosing factory function, unlike a name the body itself reads.
+    What survives instead is `template.__annotations__` (arg name -> already-
+    evaluated value), captured by the ORIGINAL `def` statement before this
+    function ever ran. Re-executing the unparsed source re-evaluates each
+    annotation expression fresh, in the new exec namespace, so it needs the
+    same values resolvable under the same names again: for every remaining
+    (post ctx-drop) parameter whose annotation unparses to a bare name,
+    that name is seeded into the exec globals from `template.__annotations__
+    [that parameter's name]` - the value the original template's own
+    annotation evaluated to, not a guess.
+
     Author: B.G (08/2026)
     """
     _, tree = capture_template_meta(template)
@@ -134,6 +167,19 @@ def _compile_dropping_ctx(template, ctx_obj: Any, label: str) -> FunctionType:
     linecache.cache[filename] = (len(source), None, source.splitlines(keepends=True), filename)
 
     exec_globals: dict[str, Any] = dict(getattr(template, "__globals__", {}))
+    code_obj = getattr(template, "__code__", None)
+    closure = getattr(template, "__closure__", None)
+    if code_obj is not None and closure:
+        exec_globals.update(zip(code_obj.co_freevars, (cell.cell_contents for cell in closure)))
+
+    orig_annotations = getattr(template, "__annotations__", {})
+    all_args = (
+        list(func_def.args.posonlyargs) + list(func_def.args.args) + list(func_def.args.kwonlyargs)
+    )
+    for arg in all_args:
+        if isinstance(arg.annotation, ast.Name) and arg.arg in orig_annotations:
+            exec_globals[arg.annotation.id] = orig_annotations[arg.arg]
+
     exec_globals["ctx"] = ctx_obj
     code = compile(source, filename, "exec")
     exec(code, exec_globals)

@@ -85,6 +85,59 @@ ONE address (the canonical) for the whole equivalence class, by default - not
 independently listed (see wire(), above) - this is coarser and happens
 before a caller ever sees the address tree at all.
 
+Nested groups: `_ShareScope` and outermost-wins
+--------------------------------------------------
+A composed FrozenGroup may itself compose another FrozenGroup that also
+carries `.shared` entries (visu's hillshade group composing grid, itself
+composed independently under each of two private gradient blocks - see
+visu/__init__.py's own module docstring for the concrete case this was
+designed against). Both layers' sharing must apply at once: grid's own
+internal declarations still collapse its own private duplicates to its own
+top-level canonical (`...GRID.dist_from_k.DX` -> `...GRID.DX`), and the
+enclosing group's declarations may additionally redirect a path that reaches
+INTO that nested group (`share("DX", "at.grad_x.GRID.DX", ...)`) to the
+enclosing group's own canonical (`...GRID.DX` -> `hillshade.DX`).
+
+`_ShareScope` is one enclosing group's own sharing declarations, tagged with
+the full address (`start`) its own paths are expressed relative to. Walking
+into a shared FrozenGroup pushes a new scope onto an ordered list threaded
+through the recursion - outermost first, most-recently-entered last -
+rather than resetting to a fresh scope per boundary the way the old,
+single-scope implementation did (which is exactly what dropped an
+enclosing group's own declarations the moment a nested group's own boundary
+was crossed). `_resolve_shared` is the one place every PARAM leaf - a
+group's own top-level name (`_walk_group`) or one reached descending its
+composed subtree (`_walk_group_subtree`) - is checked against every active
+scope at once.
+
+Overlapping scopes: checked OUTERMOST first, and the first match wins
+outright - an inner group's own declaration for the same leaf is never even
+consulted once an outer one has already claimed it. This is deliberate, not
+an artifact of iteration order, and there is exactly one reason for it:
+an outer scope's own canonical is always a genuinely, unconditionally minted
+address (a group's own top-level PARAM loop never itself redirects, by
+construction - see `_walk_group` below), so resolving outer-first can never
+produce a redirect that points at another redirect. Resolving inner-first
+could: `...GRID.dist_from_k.DX` might be collapsed by grid's own inner scope
+to `...GRID.DX`, which is *itself* one of the outer scope's declared paths -
+inner-first would leave a `redirect` entry pointing at `...GRID.DX`, which is
+not itself in `table` (having been redirected further, to `hillshade.DX`),
+and `value_at()`'s single-hop lookup does not chase a redirect chain. Outer-
+first sidesteps this rather than requiring one: `...GRID.dist_from_k.DX` is
+checked against the outer scope first, matches directly (its own full
+address, translated relative to the outer scope's `start`, is one of the
+outer scope's own declared paths too - grid/noise/visu's own `_find_param_
+paths` helpers do not stop at the shallowest match, so both the nested
+canonical and its own private occurrences typically end up declared at the
+outer scope as well), and redirects straight to `hillshade.DX` in one hop,
+without ever consulting grid's own inner scope for that leaf at all.
+
+`split_paths` stays scope-local: a leaf exempted from one scope's own
+collapse (that scope's own compose-site `split=`) simply falls through to
+the next scope in line (or, if none claim it, mints as its own independent
+address) - splitting a leaf out of the outer scope's collapse does not
+affect whether some inner scope still collapses it, and vice versa.
+
 `redirect` is consulted only by `value_at()` - the read used internally by
 compile_closure.py/compile_cupy.py/compile_shared.py's own structural walks,
 which always compute the FULL address as they descend the frozen tree and
@@ -164,6 +217,46 @@ class _LeafInfo(NamedTuple):
     dtype: Any
 
 
+class _ShareScope(NamedTuple):
+    """
+    One enclosing group's own build-phase-sharing declarations, active while
+    walking anywhere inside that group's own composed subtree - see the
+    module docstring's "Nested groups" section.
+
+    `start` is the full address at which this scope's own group root sits -
+    every path in `shared_paths`/`split_paths` is expressed relative to it,
+    so a leaf's own relative path for this scope is always `full_addr[len(
+    start):]`. `shared_paths` maps a relative PARAM path to this scope's own
+    canonical full address; `split_paths` is the (also relative) set this
+    scope's own compose-site `split=` opted back out of that collapse.
+
+    Author: B.G (08/2026)
+    """
+
+    start: Address
+    shared_paths: "dict[Address, Address]"
+    split_paths: frozenset
+
+
+def _resolve_shared(full_addr: Address, scopes: "list[_ShareScope]") -> "Address | None":
+    """
+    The full address this PARAM leaf should redirect to, per every currently
+    active enclosing group's own sharing declarations, or None if none of
+    them claim it - see the module docstring's "Overlapping scopes" rule for
+    why `scopes` (ordered outermost-first by construction - see
+    `_walk_group`) is checked in that order, with the first match winning
+    outright.
+
+    Author: B.G (08/2026)
+    """
+    for scope in scopes:
+        rel = full_addr[len(scope.start) :]
+        canonical = scope.shared_paths.get(rel)
+        if canonical is not None and rel not in scope.split_paths:
+            return canonical
+    return None
+
+
 def _walk(
     prefix: Address,
     frozen: _Frozen,
@@ -215,28 +308,38 @@ def _walk_group(
     table: dict[Address, _LeafInfo],
     redirect: dict[Address, Address],
     split_paths: frozenset,
+    scopes: "list[_ShareScope]" = (),
 ) -> None:
     """
     `_walk`'s group-aware entry point: mints `group`'s own top-level PARAM/
-    HELPER slots exactly as `_walk` always has, then descends into its
-    composed subtree via `_walk_group_subtree`, which - for every relative
-    path some canonical in `group.shared` names, unless that exact path is
-    in `split_paths` (this compose site's own `split=`) - records a
-    `redirect` entry instead of minting an independent table entry. See the
-    module docstring's "Build-phase sharing" section.
+    HELPER slots exactly as `_walk` always has - except each PARAM name is
+    first checked against `scopes`, the ENCLOSING scopes already active when
+    this group was reached (empty at the outermost group in a tree), since
+    an enclosing group's own sharing may claim this group's own top-level
+    name for further redirection (see the module docstring's "Nested
+    groups" section) - then descends into its composed subtree via
+    `_walk_group_subtree`, pushing this group's own scope (built from
+    `group.shared`/`split_paths`) onto `scopes` for that descent.
 
     Author: B.G (08/2026)
     """
-    for name in group.slots.names(SlotKind.PARAM):
-        table[prefix + (name,)] = _LeafInfo(SlotKind.PARAM, None)
-    # group.slots carries no DATA (GroupBuilder.wire_data always raises), so
-    # nothing else to mint at this level.
-
-    shared_paths: dict[Address, Address] = {}
+    own_shared_paths: dict[Address, Address] = {}
     for canonical, paths in group.shared.items():
         canonical_addr = prefix + (canonical,)
         for p in paths:
-            shared_paths[p] = canonical_addr
+            own_shared_paths[p] = canonical_addr
+    own_scope = _ShareScope(prefix, own_shared_paths, frozenset(split_paths))
+    nested_scopes = list(scopes) + [own_scope]
+
+    for name in group.slots.names(SlotKind.PARAM):
+        full = prefix + (name,)
+        canonical = _resolve_shared(full, scopes)
+        if canonical is not None:
+            redirect[full] = canonical
+        else:
+            table[full] = _LeafInfo(SlotKind.PARAM, None)
+    # group.slots carries no DATA (GroupBuilder.wire_data always raises), so
+    # nothing else to mint at this level.
 
     helper_roots = group.slots.names(SlotKind.HELPER) | set(group.composed)
     for name in helper_roots:
@@ -246,7 +349,7 @@ def _walk_group(
                 f"'{format_address(addr)}' is a wired HELPER slot with nothing composed into "
                 f"it - compose() a frozen helper under that name before build()"
             )
-        _walk_group_subtree(addr, group.composed[name], table, redirect, (name,), shared_paths, split_paths)
+        _walk_group_subtree(addr, group.composed[name], table, redirect, nested_scopes)
 
 
 def _walk_group_subtree(
@@ -254,30 +357,29 @@ def _walk_group_subtree(
     frozen: _Frozen,
     table: dict[Address, _LeafInfo],
     redirect: dict[Address, Address],
-    rel_prefix: Address,
-    shared_paths: dict[Address, Address],
-    split_paths: frozenset,
+    scopes: "list[_ShareScope]",
 ) -> None:
     """
     One level of `_walk_group`'s own descent into a group's composed
-    subtree - `rel_prefix` is the path relative to the enclosing group's own
-    root (what `group.shared`'s declared paths and `split_paths` are
-    expressed in), `prefix` the full address from the whole build()'s own
-    root (what `table`/`redirect` are keyed by). A PARAM leaf whose relative
-    path is in `shared_paths` and not in `split_paths` is collapsed - a
-    `redirect` entry, no independent `table` entry; every other PARAM/DATA
-    leaf mints normally, exactly as plain `_walk` would. A nested composed
-    FrozenGroup (with its own `.shared`) starts a fresh `_walk_group` scope
-    of its own - sharing is declared per group, one boundary at a time, and
-    does not reach through a group-within-a-group.
+    subtree. `scopes` carries every enclosing group's own sharing
+    declarations, outermost first (see the module docstring's "Nested
+    groups" section) - a PARAM leaf whose full address resolves against any
+    of them (`_resolve_shared`) is collapsed, a `redirect` entry rather than
+    an independent `table` entry; every other PARAM/DATA leaf mints
+    normally, exactly as plain `_walk` would. A nested composed FrozenGroup
+    (with its own `.shared`) pushes its own scope onto `scopes` for its own
+    descent (`_walk_group`) rather than starting a fresh, disconnected one -
+    sharing is declared per group, but an enclosing group's own declarations
+    stay active reaching through a group-within-a-group, which is exactly
+    what this fixes relative to the single-scope implementation this module
+    used to have.
 
     Author: B.G (08/2026)
     """
     for name in frozen.slots.names(SlotKind.PARAM):
-        rel = rel_prefix + (name,)
         full = prefix + (name,)
-        canonical = shared_paths.get(rel)
-        if canonical is not None and rel not in split_paths:
+        canonical = _resolve_shared(full, scopes)
+        if canonical is not None:
             redirect[full] = canonical
         else:
             table[full] = _LeafInfo(SlotKind.PARAM, None)
@@ -295,9 +397,9 @@ def _walk_group_subtree(
         child = frozen.composed[name]
         child_split = frozen.split.get(name, frozenset())
         if isinstance(child, FrozenGroup) and child.shared:
-            _walk_group(addr, child, table, redirect, child_split)
+            _walk_group(addr, child, table, redirect, child_split, scopes=scopes)
         else:
-            _walk_group_subtree(addr, child, table, redirect, rel_prefix + (name,), shared_paths, split_paths)
+            _walk_group_subtree(addr, child, table, redirect, scopes)
 
 
 def build(frozen: _Frozen) -> "BoundKernel | BoundHelper":

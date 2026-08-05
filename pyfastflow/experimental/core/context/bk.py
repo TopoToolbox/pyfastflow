@@ -59,10 +59,17 @@ cupy compile, and cupy blocks are not expected to reference it.
 
 Surface
 -------
-Deliberately narrow - exactly what noise/ and visu/ need, not a speculative
-maths library: `sqrt`, `atan2`, `cos`, `sin`, `floor` (visu's hillshade
-formula, noise's Perlin lattice math) and `u32` (noise's hash - an oversized
-u32 literal has nowhere else to become a correctly-typed value, see below).
+Started narrow - exactly what noise/ and visu/ needed: `sqrt`, `atan2`, `cos`,
+`sin`, `floor` (visu's hillshade formula, noise's Perlin lattice math) and
+`u32` (noise's hash - an oversized u32 literal has nowhere else to become a
+correctly-typed value, see below). Extended for ops/'s bitpack/reduce port
+(08/2026) with `bit_cast`, `select`, `cast` (the IEEE-754 bit-flip trick
+bitpack needs - reinterpreting a float's bits as u32 and back, and a
+ternary-style branchless select over that) and `atomic_min`/`atomic_max`
+(reduce's per-thread accumulation into a 0-d field) plus the `i32`/`i64`/`f32`
+dtype tokens alongside the existing `u32`, needed as `ctx.bk.cast(x, ctx.bk.
+i64)`'s second argument and, for `i64`, the same oversized-literal exemption
+`u32` already gets (`ctx.bk.i64(0xFFFFFFFF)` - see below).
 
 `abs`/`min`/`max` stay plain python builtins, as grid already established;
 `int()`/`float()` join them here rather than becoming `ctx.bk` members -
@@ -79,11 +86,12 @@ plain `float()`/`int()` are both simpler and strictly more capable (they
 work uniformly whether the operand is a bare literal or an already-traced
 Expr, which `ti.f32`/`ti.i32` do not).
 
-`u32` is exposed as the backend's own dtype object itself (`ti.u32`, not a
-`lambda x: ti.cast(x, ti.u32)` wrapper around it) - `ctx.bk.u32(0x846CA68B)`,
-called exactly as `ti.u32(0x846CA68B)` would be. This is load-bearing, not a
-style choice: confirmed empirically before settling on it, wrapping the cast
-in an ordinary python callable breaks Taichi's own oversized-literal
+`u32`/`i64` are exposed as the backend's own dtype objects themselves (`ti.
+u32`, `ti.i64`, never a `lambda x: ti.cast(x, ti.u32)` wrapper around either)
+- `ctx.bk.u32(0x846CA68B)`, `ctx.bk.i64(0xFFFFFFFF)`, called exactly as
+`ti.u32(0x846CA68B)`/`ti.i64(0xFFFFFFFF)` would be. This is load-bearing, not
+a style choice: confirmed empirically before settling on it, wrapping the
+cast in an ordinary python callable breaks Taichi's own oversized-literal
 handling - `ti.u32(2221713035)` compiles (Taichi's frontend recognises a
 call whose callee resolves, by identity, to one of its own dtype objects,
 and special-cases the literal argument's own type inference accordingly,
@@ -92,9 +100,14 @@ ti.u32))(2221713035)` raises `Integer literal 2221713035 exceeded the range
 of default_ip: i32` - the literal is type-inferred as a bare argument to a
 generic python callable *before* the lambda body ever runs `ti.cast`, and
 the generic path defaults every bare int literal to i32 regardless of what
-the callable eventually does with it. So `ctx.bk.u32(...)` must resolve to
-the real `ti.u32`/`qd.u32` object one attribute hop away, not to a function
-that happens to produce the same value.
+the callable eventually does with it. So `ctx.bk.u32(...)`/`ctx.bk.i64(...)`
+must resolve to the real `ti.u32`/`ti.i64` (or `qd.` equivalent) object one
+attribute hop away, not to a function that happens to produce the same
+value. `i32`/`f32` are exposed the same uniform way for symmetry (`ctx.bk.
+cast(x, ctx.bk.i32)`, ...) even though no template so far needs their own
+oversized-literal exemption - `ctx.bk.cast`'s second argument is always a
+dtype token regardless, and there is no reason for `i32`/`f32` to be the odd
+ones out of the four.
 
 Author: B.G (08/2026)
 """
@@ -116,7 +129,10 @@ class BkError(Exception):
     """
 
 
-_BK_METHOD_NAMES = ("sqrt", "atan2", "cos", "sin", "floor", "u32")
+_BK_METHOD_NAMES = (
+    "sqrt", "atan2", "cos", "sin", "floor", "u32",
+    "bit_cast", "select", "cast", "atomic_min", "atomic_max", "i32", "i64", "f32",
+)
 """Every name `ctx.bk` resolves - see the module docstring's "Surface" section."""
 
 
@@ -145,6 +161,14 @@ class ClosureBkNode:
             "sin": backend.sin,
             "floor": backend.floor,
             "u32": backend.u32,
+            "bit_cast": backend.bit_cast,
+            "select": backend.select,
+            "cast": backend.cast,
+            "atomic_min": backend.atomic_min,
+            "atomic_max": backend.atomic_max,
+            "i32": backend.i32,
+            "i64": backend.i64,
+            "f32": backend.f32,
         }
 
     def __getattr__(self, name: str) -> Any:

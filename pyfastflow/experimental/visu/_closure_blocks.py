@@ -6,16 +6,15 @@ make_hillshade_kernel, on the new builder/frozen/bound stack
 `_gradient_x`/`_gradient_y` each independently compose the caller's grid
 FrozenGroup (under name `GRID`) and call `ctx.GRID.neighbour(i, k)` /
 `ctx.GRID.DX.get(0)` - see __init__.py's own module docstring for why this
-is the first nested-FrozenGroup-in-FrozenGroup case in this rewrite, and why
+is the first nested-FrozenGroup-in-FrozenGroup case in this rewrite.
 `k_left`/`k_right`/`k_top`/`k_bottom` (which axis of D4/D8's own delta table
 means which direction - picked once in __init__.py from `topology`) are
-baked into freshly generated source text via `_exec_def` rather than closed
-over as ordinary python closure variables: compile_closure.py's own rebuild
-(`_compile_dropping_ctx`) only carries a template's `__globals__` forward,
-never an enclosing function's local cells, so a per-call int smuggled in as
-a closure variable would resolve to a `NameError` the moment the template is
-actually compiled - baked directly into the generated source text, it needs
-no name lookup at all.
+per-call integers, not template-global constants, so `_make_gradient_x_tmpl`/
+`_make_gradient_y_tmpl` build and return a nested def that closes over them
+as ordinary python closure variables - compile_closure.py's own rebuild
+(`_compile_dropping_ctx`) carries a template's closure cells forward into
+its rebuilt globals alongside `__globals__`, so this needs no special
+handling here.
 
 The gradient here is deliberately not the legacy fixed-stencil,
 clamped-index version (pyfastflow/visu/hillshading.py's gradient_x_flat /
@@ -37,67 +36,41 @@ Author: B.G (08/2026)
 """
 
 import importlib
-import linecache
 import math
 
 from ..core.context.builder import HelperBuilder, KernelBuilder
-from ..core.pool.base import new_uid
 
 _DEG2RAD = math.pi / 180.0
 _HALF_PI = math.pi / 2.0
 _TWO_PI = 2.0 * math.pi
 
 
-def _exec_def(name: str, src: str, extra_globals: dict | None = None):
-    """
-    Compile and exec `src` (expected to define exactly one function called
-    `name`) into a fresh, throwaway globals dict, registering the source in
-    `linecache` under a synthetic filename first so `inspect.getsource` -
-    contract.py's own extraction, and Taichi/Quadrants' own re-inspection
-    when a `ti.func`/`qd.func` is re-traced - can still find it. See the
-    module docstring for why this, not a python closure, is what carries a
-    per-call constant into a template's own source text.
-
-    Author: B.G (08/2026)
-    """
-    ns = dict(extra_globals) if extra_globals else {}
-    filename = f"<pf-visu:{name}:{new_uid()}>"
-    linecache.cache[filename] = (len(src), None, src.splitlines(keepends=True), filename)
-    code = compile(src, filename, "exec")
-    exec(code, ns)
-    return ns[name]
-
-
 def _make_gradient_x_tmpl(k_left: int, k_right: int):
-    src = f"""
-def _gradient_x_tmpl(ctx, z, i):
-    zl = ctx.GRID.neighbour(i, {k_left})
-    zr = ctx.GRID.neighbour(i, {k_right})
-    left_val = z[i]
-    if zl != -1:
-        left_val = z[zl]
-    right_val = z[i]
-    if zr != -1:
-        right_val = z[zr]
-    return (right_val - left_val) / (2.0 * ctx.GRID.DX.get(0))
-"""
-    return _exec_def("_gradient_x_tmpl", src)
+    def _gradient_x_tmpl(ctx, z, i):
+        zl = ctx.GRID.neighbour(i, k_left)
+        zr = ctx.GRID.neighbour(i, k_right)
+        left_val = z[i]
+        if zl != -1:
+            left_val = z[zl]
+        right_val = z[i]
+        if zr != -1:
+            right_val = z[zr]
+        return (right_val - left_val) / (2.0 * ctx.GRID.DX.get(0))
+    return _gradient_x_tmpl
 
 
 def _make_gradient_y_tmpl(k_top: int, k_bottom: int):
-    src = f"""
-def _gradient_y_tmpl(ctx, z, i):
-    zt = ctx.GRID.neighbour(i, {k_top})
-    zb = ctx.GRID.neighbour(i, {k_bottom})
-    top_val = z[i]
-    if zt != -1:
-        top_val = z[zt]
-    bottom_val = z[i]
-    if zb != -1:
-        bottom_val = z[zb]
-    return (bottom_val - top_val) / (2.0 * ctx.GRID.DX.get(0))
-"""
-    return _exec_def("_gradient_y_tmpl", src)
+    def _gradient_y_tmpl(ctx, z, i):
+        zt = ctx.GRID.neighbour(i, k_top)
+        zb = ctx.GRID.neighbour(i, k_bottom)
+        top_val = z[i]
+        if zt != -1:
+            top_val = z[zt]
+        bottom_val = z[i]
+        if zb != -1:
+            bottom_val = z[zb]
+        return (bottom_val - top_val) / (2.0 * ctx.GRID.DX.get(0))
+    return _gradient_y_tmpl
 
 
 def _at_tmpl(ctx, z, i):
@@ -159,25 +132,26 @@ def build_group(group, *, grid, k_top, k_left, k_right, k_bottom):
     group.wire_helper("at").compose("at", at)
 
 
+def _make_hillshade_kernel_tmpl(backend: str):
+    bmod = importlib.import_module(backend)
+    T = bmod.template()
+
+    def _hillshade_kernel_tmpl(ctx, z: T, out: T):
+        n = ctx.hillshade.NX.get(0) * ctx.hillshade.NY.get(0)
+        for i in range(n):
+            out[i] = ctx.hillshade.at(z, i)
+    return _hillshade_kernel_tmpl
+
+
 def build_kernel(hillshade_group, *, backend: str):
     """
     The standalone `hillshade` FrozenKernel for a closure backend - see
     __init__.py's own `make_hillshade_kernel`. `backend` ("taichi" or
     "quadrants") picks the real `ti.template()`/`qd.template()` marker the
-    kernel's own `z`/`out` data arguments are annotated with; that marker
-    object cannot be closed over the way `k_left`/... can be baked into
-    source text (a type marker is an object, not a literal), so it is
-    injected into the exec'd template's own globals instead, via
-    `_exec_def`'s own `extra_globals` argument.
+    kernel's own `z`/`out` data arguments are annotated with, closed over by
+    `_make_hillshade_kernel_tmpl` exactly like `k_left`/... above.
 
     Author: B.G (08/2026)
     """
-    bmod = importlib.import_module(backend)
-    src = """
-def _hillshade_kernel_tmpl(ctx, z: T, out: T):
-    n = ctx.hillshade.NX.get(0) * ctx.hillshade.NY.get(0)
-    for i in range(n):
-        out[i] = ctx.hillshade.at(z, i)
-"""
-    tmpl = _exec_def("_hillshade_kernel_tmpl", src, extra_globals={"T": bmod.template()})
+    tmpl = _make_hillshade_kernel_tmpl(backend)
     return KernelBuilder().wire_data("z").wire_data("out").compose("hillshade", hillshade_group).ingest(tmpl)
