@@ -14,6 +14,16 @@ Both are produced only by KernelBuilder.ingest() / HelperBuilder.ingest()
              object handed to compose() is what sits here, never a copy.
   contract   the Contract (contract.py) derived from `template` at ingest
              time.
+  split      {composed_name: frozenset(relative Address)} - which of a
+             composed FrozenGroup's own shared() paths (see FrozenGroup,
+             below) this object's own compose(name, frozen, split=[...])
+             call opted back out of that group's default collapse, keyed by
+             the composed slot name they were declared under. Empty for a
+             composed child that either is not a FrozenGroup or was composed
+             with no `split=`. See bound.py's `_walk_group`/`_walk_group_
+             subtree` for where this is actually consulted - build() time,
+             the only point split is decided (see GroupBuilder.share()'s own
+             docstring, builder.py).
 
 Nothing here is a recipe any more - a frozen object is done being built.
 Mutability alternates through the scheme this module is one step of: builder
@@ -76,11 +86,19 @@ class _Frozen:
     Author: B.G (08/2026)
     """
 
-    def __init__(self, template: Any, slots: SlotGroup, composed: dict[str, "_Frozen"], contract: Contract):
+    def __init__(
+        self,
+        template: Any,
+        slots: SlotGroup,
+        composed: dict[str, "_Frozen"],
+        contract: Contract,
+        split: "dict[str, frozenset] | None" = None,
+    ):
         object.__setattr__(self, "template", template)
         object.__setattr__(self, "slots", slots)
         object.__setattr__(self, "composed", dict(composed))
         object.__setattr__(self, "contract", contract)
+        object.__setattr__(self, "split", {k: frozenset(v) for k, v in (split or {}).items()})
         object.__setattr__(self, "_uid", new_uid())
 
     @property
@@ -155,3 +173,58 @@ class FrozenHelper(_Frozen):
 
     Author: B.G (08/2026)
     """
+
+
+class FrozenGroup(_Frozen):
+    """
+    The frozen result of a GroupBuilder's close() (builder.py): a
+    non-callable, navigable composite - PARAM/HELPER slots and composed
+    sub-structures only, `template` always None, never itself the target of
+    a device call. `ctx.grid.NX.get(0)` (a PARAM leaf reached through it) and
+    `ctx.grid.neighbour(i, k)` (a composed HELPER child called through it)
+    both resolve by ordinary chain recursion through `.slots`/`.composed`
+    exactly as they would through a FrozenHelper one level in - a
+    FrozenGroup differs only in having no template of its own to compile,
+    so `ctx.grid(...)` (calling it bare) is illegal: compile_closure.py's
+    `_build_ctx_node` attaches its built ctx node directly, uncompiled and
+    non-callable, instead of wrapping it in `backend.func`; compile_cupy.py's
+    `_resolve_chain` raises CompileError if a chain ever tries to call it
+    with no further segment.
+
+    `.contract` is always empty (a group's own build phase derives nothing -
+    see GroupBuilder.close()), which is exactly right for
+    compile_shared.check_legal_accessors' walk: it recurses into a
+    FrozenGroup's own composed children (where real contracts live) but
+    finds no PARAM chain of the group's own to check.
+
+    `.shared` is build-phase sharing (GroupBuilder.share()): {canonical PARAM
+    slot name (wired directly on this group): frozenset(relative Address)},
+    each Address a dotted path into this group's own composed subtree that
+    reads the "same" quantity as `canonical` - the private per-axis blocks a
+    public helper composes for its own use (e.g. `neighbour_raw`'s own `row`)
+    read `NX` again independently of the group's own top-level `NX` slot,
+    otherwise. bound.py's build() (`_walk_group`/`_walk_group_subtree`) is
+    what actually acts on this: by default, every Address in `.shared`'s
+    values is never independently minted at all - only `canonical` is - so
+    `grid.NX` is the one PARAM address a caller sees and binds, not
+    `grid.NX` plus every private occurrence. A composer may opt specific
+    paths back out at compose() time (`split=` - builder.py's `_Builder.
+    compose()`, recorded as the composing object's own `.split`), re-minting
+    them as independent addresses again - see bound.py's module docstring
+    for the full mechanism and why it needs no separate machinery beyond a
+    build-time redirect table alongside the usual address table.
+
+    Author: B.G (08/2026)
+    """
+
+    def __init__(
+        self,
+        template: Any,
+        slots: SlotGroup,
+        composed: dict[str, "_Frozen"],
+        contract: Contract,
+        split: "dict[str, frozenset] | None" = None,
+        shared: "dict[str, list] | None" = None,
+    ):
+        super().__init__(template, slots, composed, contract, split=split)
+        object.__setattr__(self, "shared", {k: frozenset(v) for k, v in (shared or {}).items()})

@@ -1,40 +1,81 @@
 """
-make_grid: the GridContext-equivalent Bag factory, built on the
-backend-agnostic core (see ..core.context: parameter.py for Parameter, compile.py for HelperBuilder, bag.py for Bag).
+make_grid_group / make_grid_parameters: the GridContext-equivalent factory
+pair, built on the new builder/frozen/bound stack (core/context/builder.py,
+frozen.py, bound.py; see parameter.py for Parameter, unchanged).
 
-There is no stateful Context class here - by design, the core has none (see
-core/context/parameter.py's module docstring). make_grid just builds a Bag once: a
-uniform public surface (grid.nx, grid.neighbour(i, k), ...) whatever the
-backend and whatever the grid's own topology/boundary/nodata/outlet config.
+There is no stateful Context class here, and no Bag: `make_grid_group`
+returns a FrozenGroup (frozen.py) - a navigable, non-callable composite a
+caller compose()s under a name (`kb.compose("grid", group)`) and reaches in a
+template as `ctx.grid.neighbour(i, k)` (a composed HELPER call) or
+`ctx.grid.NX.get(0)` (a PARAM leaf reached straight through the group, one
+level in) - uniform by name whatever the backend and whatever the grid's own
+topology/boundary/nodata/outlet config.
 
-Two kinds of knobs:
-  - value params (nx, ny, dx) - mode-overridable (const/scalar, dx also
-    field), always read in device code through `.get(...)`. Default mode is
-    "const" for all three.
-  - structural selectors (topology, boundary, nodata, outlet) - each one
-    picks which variant of a private block gets bound into the public
-    composite helpers; see _closure_blocks.py / _cupy_blocks.py.
+Two separate calls, structure vs. data
+-----------------------------------------
+`make_grid_group` returns structure: `topology`/`boundary`/`nodata`/`outlet`
+pick which variant of each private block gets composed (see
+_closure_blocks.py / _cupy_blocks.py), and every value a device template
+reads (nx, ny, dx, n_neighbours, the two masks) is left as an unbound PARAM
+slot - a FrozenGroup carries no Parameter objects of its own (frozen.py: a
+frozen object is pure structure, nothing here is bind-phase data).
+`make_grid_parameters` returns data: the concrete owned Parameters
+(pool-backed scalar/field storage or const values) a caller then binds into
+every kernel that composes this grid. The two calls must agree on
+`topology`/`nodata`/`outlet` (boundary does not affect any Parameter's value,
+only which block variant a device call resolves to) - passing a mismatched
+pair silently produces a working-but-wrong grid, nothing here cross-checks
+the two.
 
-Masks are independent, optional bag members: nodata_mask (u8, 1 == inactive)
-when nodata=True, outlet_mask (u8, 1 == outlet) when outlet=="mask". Neither
-exists in the bag when its feature is off, so a caller that never asked for
-nodata/mask-outlet never sees them.
+This two-call split is forced by the architecture, not a style choice: a
+Parameter is always supplied by a caller at bind time (1b), for every
+address it fills, on every kernel that reaches it - there is no longer a
+Bag-shaped object that is simultaneously a compose()-able recipe and a live
+data binding the way the pre-rewrite Bag was. Every later factory
+(noise/ops/flow) that owns Parameters internally the way this one owns
+nx/ny/dx is expected to split the same way: one function returning the
+build-phase composable (whatever shape that factory's own device surface
+needs - a FrozenGroup here, possibly something else elsewhere), one
+returning the caller-owned Parameters that composable's PARAM slots need
+bound.
 
-_closure_blocks.py/_cupy_blocks.py's own internal wiring - every private
-block bound into a public composite helper - goes through a Need (need.py)
-now, with every HelperBuilder built `strict_needs=True` (compile.py): the
-first factory converted, per the Need-restructuring plan. This is internal
-only - make_grid's own signature and the returned Bag's member names/types
-are unchanged, and nothing outside grid/ (noise/ops/flow, all still
-permissive) needs to change to keep calling make_grid.
+Build-phase sharing collapses the duplicate addresses
+---------------------------------------------------------
+A device template can only call what is composed directly onto its own
+scope (builder.py's module docstring) - never a sibling's. Grid's `row`/
+`col` private blocks are each needed by several public helpers
+(neighbour_raw, is_on_edge, which_edge, dist_between_nodes, ...), so each of
+those composes its own copy of the same FrozenHelper object (shared by
+identity, per frozen.py) under its own local name - which, left alone, would
+mint one independent PARAM address per occurrence at build() time (bound.py)
+for what is conceptually one nx/ny/dx/mask value. `_share_leaf` below is
+this module's own use of GroupBuilder.share() (builder.py): after
+`blocks.build_group()` composes every public helper onto the group, it walks
+the group's own already-composed subtree, finds every PARAM slot literally
+named "NX"/"NY"/"DX"/"NODATA_MASK"/"OUTLET_MASK" wherever it occurs, and
+declares each occurrence shared with the group's own top-level slot of the
+same name - one `share()` call per canonical, an explicit, itemized list
+computed once here rather than hand-typed (grid's own private-block count
+makes hand-typing them impractical, not a hint that a name-based mechanism
+belongs in the framework itself - see bound.py's own module docstring for
+why this stays declared-by-the-author, never inferred by matching name
+strings across independently-authored composites). The result: a caller
+composing a D8 grid sees one `grid.NX`, one `grid.NY`, one `grid.DX`, not one
+per private occurrence - `bind()` once, and every reader inside the group's
+own device code sees it, via bound.py's build-time redirect. A caller who
+genuinely needs one occurrence to read a *different* value opts it back out
+with compose()'s own `split=` (builder.py), independently of every other
+occurrence.
 
-Author: B.G (07/2026)
+Author: B.G (08/2026)
 """
 
 import numpy as np
 
 from ..core.context.backends import backend_classes
-from ..core.context.bag import Bag
+from ..core.context.builder import GroupBuilder
+from ..core.context.frozen import FrozenGroup, _Frozen
+from ..core.context.slot import SlotKind
 
 _TOPOLOGIES = {"D4": 4, "D8": 8}
 _BOUNDARIES = frozenset({"normal", "periodic_EW", "periodic_NS"})
@@ -43,22 +84,122 @@ _OUTLETS = frozenset({"edge", "mask"})
 
 def _blocks_for(backend: str):
     """
-    The private block module implementing make_grid's device code for one
-    backend name: the closure blocks (shared by Taichi and Quadrants) or the
-    cupy blocks.
+    The private block module implementing make_grid_group's device code for
+    one backend name: the closure blocks (shared by Taichi and Quadrants) or
+    the cupy blocks.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     if backend in ("taichi", "quadrants"):
         from . import _closure_blocks as blocks
     elif backend == "cupy":
         from . import _cupy_blocks as blocks
     else:
-        raise ValueError(f"make_grid: unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
+        raise ValueError(f"make_grid_group: unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
     return blocks
 
 
-def make_grid(
+def _check_config(topology: str, boundary: str, outlet: str) -> None:
+    if topology not in _TOPOLOGIES:
+        raise ValueError(f"make_grid_group: topology must be one of {sorted(_TOPOLOGIES)}, got {topology!r}")
+    if boundary not in _BOUNDARIES:
+        raise ValueError(f"make_grid_group: boundary must be one of {sorted(_BOUNDARIES)}, got {boundary!r}")
+    if outlet not in _OUTLETS:
+        raise ValueError(f"make_grid_group: outlet must be one of {sorted(_OUTLETS)}, got {outlet!r}")
+
+
+def _find_param_paths(frozen: _Frozen, leaf_name: str, prefix: tuple = ()) -> list:
+    """
+    Every relative dotted path, as a `"a.b.NAME"` string, under `frozen`'s
+    own composed subtree whose PARAM slot is literally named `leaf_name` -
+    the itemized list `_share_leaf` hands to GroupBuilder.share(). Recurses
+    through `.composed` only (a HELPER slot with nothing composed raises
+    earlier, at that structure's own ingest()/build(), never reached here).
+
+    Author: B.G (08/2026)
+    """
+    paths = []
+    if leaf_name in frozen.slots.names(SlotKind.PARAM):
+        paths.append(".".join(prefix + (leaf_name,)))
+    for name, child in frozen.composed.items():
+        paths.extend(_find_param_paths(child, leaf_name, prefix + (name,)))
+    return paths
+
+
+def _share_leaf(group: GroupBuilder, canonical: str) -> None:
+    """
+    Declare every occurrence of a PARAM slot named `canonical` anywhere in
+    `group`'s already-composed subtree as build-phase-shared with `group`'s
+    own top-level `canonical` slot - see the module docstring. A no-op if
+    `canonical` occurs nowhere in the subtree (e.g. OUTLET_MASK when no
+    block happens to reference it under the current config) - share()
+    itself requires at least one path, so this only calls it when there is
+    something to share.
+
+    Author: B.G (08/2026)
+    """
+    paths = []
+    for name, child in group.composed.items():
+        paths.extend(_find_param_paths(child, canonical, (name,)))
+    if paths:
+        group.share(canonical, *paths)
+
+
+def make_grid_group(
+    backend: str,
+    *,
+    topology: str = "D8",
+    boundary: str = "normal",
+    nodata: bool = False,
+    outlet: str = "edge",
+) -> FrozenGroup:
+    """
+    Build one grid's structure: a FrozenGroup wiring NX/NY/DX/N_NEIGHBOURS
+    (plus NODATA_MASK if `nodata`, OUTLET_MASK if `outlet == "mask"`) as its
+    own top-level PARAM slots, composing the neighbour/distance/edge public
+    helper surface - uniform by name regardless of backend or config - and
+    then declaring every private occurrence of each of those PARAM names
+    build-phase-shared with the group's own top-level slot (`_share_leaf`,
+    see the module docstring), so a caller composing this group into a
+    kernel binds one `grid.NX` rather than one per private block that reads
+    it. Returns structure only, no Parameter objects - make_grid_parameters
+    is the companion that builds those (see the module docstring for why
+    the two are separate calls).
+
+    `topology` "D4"|"D8", `boundary` "normal"|"periodic_EW"|"periodic_NS",
+    `outlet` "edge"|"mask" pick block variants at build time (see
+    _closure_blocks.py / _cupy_blocks.py). `nodata` wires NODATA_MASK
+    wherever a block needs it.
+
+    Author: B.G (08/2026)
+    """
+    _check_config(topology, boundary, outlet)
+    blocks = _blocks_for(backend)
+
+    group = GroupBuilder()
+    group.wire_param("NX")
+    group.wire_param("NY")
+    group.wire_param("DX")
+    group.wire_param("N_NEIGHBOURS")
+    if nodata:
+        group.wire_param("NODATA_MASK")
+    if outlet == "mask":
+        group.wire_param("OUTLET_MASK")
+
+    blocks.build_group(group, topology=topology, boundary=boundary, nodata=nodata, outlet=outlet)
+
+    _share_leaf(group, "NX")
+    _share_leaf(group, "NY")
+    _share_leaf(group, "DX")
+    if nodata:
+        _share_leaf(group, "NODATA_MASK")
+    if outlet == "mask":
+        _share_leaf(group, "OUTLET_MASK")
+
+    return group.close()
+
+
+def make_grid_parameters(
     backend: str,
     pool,
     nx: int,
@@ -66,22 +207,27 @@ def make_grid(
     dx: float,
     *,
     topology: str = "D8",
-    boundary: str = "normal",
     nodata: bool = False,
     outlet: str = "edge",
     nx_mode: str = "const",
     ny_mode: str = "const",
     dx_mode: str = "const",
-) -> Bag:
+) -> dict:
     """
-    Build one grid's Bag: nx/ny/dx/n_neighbours params, the optional
-    nodata_mask/outlet_mask fields, and the neighbour/distance/edge helper
-    surface - all uniform by name regardless of backend or config.
+    Build the concrete, caller-owned Parameter objects one grid's structural
+    PARAM slots need bound: {"NX": ..., "NY": ..., "DX": ...,
+    "N_NEIGHBOURS": ...}, plus "NODATA_MASK"/"OUTLET_MASK" when
+    `nodata`/`outlet == "mask"`. Keys match exactly the top-level PARAM slot
+    names make_grid_group()'s FrozenGroup wires - and, since that group
+    declares every private occurrence of each of those names build-phase-
+    shared with its own top-level slot (see make_grid_group's own
+    docstring), binding `"grid." + key` once is now everything a caller
+    needs to do; there is no separate deep address left to also bind unless
+    a caller explicitly `split`s one out (builder.py's `compose(...,
+    split=...)`).
 
-    `topology` "D4"|"D8", `boundary` "normal"|"periodic_EW"|"periodic_NS",
-    `outlet` "edge"|"mask" pick block variants at build time (see
-    _closure_blocks.py / _cupy_blocks.py). `nodata` allocates and folds in
-    nodata_mask (u8, 1 == inactive) wherever a block needs it.
+    `topology`/`nodata`/`outlet` must match whatever was passed to
+    make_grid_group() for the grid this backs - see the module docstring.
 
     `nx_mode`/`ny_mode` default "const", may be overridden to "scalar".
     `dx_mode` defaults "const", may be overridden to "scalar" or "field" - a
@@ -89,26 +235,20 @@ def make_grid(
     public helpers that read dx (dist_from_k, dist_between_nodes) only ever
     read index 0: neither's signature carries a node to key a per-node value
     off, so a genuinely spatially-varying dx is not wired through those two
-    helpers as things stand - only reachable by reading grid.dx.get(i)
+    helpers as things stand - only reachable by reading grid.DX.get(i)
     directly in a caller's own template.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
-    if topology not in _TOPOLOGIES:
-        raise ValueError(f"make_grid: topology must be one of {sorted(_TOPOLOGIES)}, got {topology!r}")
-    if boundary not in _BOUNDARIES:
-        raise ValueError(f"make_grid: boundary must be one of {sorted(_BOUNDARIES)}, got {boundary!r}")
-    if outlet not in _OUTLETS:
-        raise ValueError(f"make_grid: outlet must be one of {sorted(_OUTLETS)}, got {outlet!r}")
+    _check_config(topology, "normal", outlet)
     if nx_mode not in ("const", "scalar"):
-        raise ValueError(f"make_grid: nx_mode must be 'const' or 'scalar', got {nx_mode!r}")
+        raise ValueError(f"make_grid_parameters: nx_mode must be 'const' or 'scalar', got {nx_mode!r}")
     if ny_mode not in ("const", "scalar"):
-        raise ValueError(f"make_grid: ny_mode must be 'const' or 'scalar', got {ny_mode!r}")
+        raise ValueError(f"make_grid_parameters: ny_mode must be 'const' or 'scalar', got {ny_mode!r}")
     if dx_mode not in ("const", "scalar", "field"):
-        raise ValueError(f"make_grid: dx_mode must be 'const', 'scalar' or 'field', got {dx_mode!r}")
+        raise ValueError(f"make_grid_parameters: dx_mode must be 'const', 'scalar' or 'field', got {dx_mode!r}")
 
-    backend_mod, ParamCls, HelperCls, dtypes = backend_classes(backend)
-    blocks = _blocks_for(backend)
+    _, ParamCls, _, dtypes = backend_classes(backend)
     n_flat = int(nx) * int(ny)
 
     nx_p = ParamCls("GRID_NX", dtype=dtypes["i32"], mode=nx_mode, value=int(nx), pool=pool)
@@ -130,9 +270,10 @@ def make_grid(
         "GRID_NNEIGHBOURS", dtype=dtypes["i32"], mode="const", value=_TOPOLOGIES[topology], pool=pool
     )
 
-    nodata_mask_p = None
+    params = {"NX": nx_p, "NY": ny_p, "DX": dx_p, "N_NEIGHBOURS": n_neighbours_p}
+
     if nodata:
-        nodata_mask_p = ParamCls(
+        params["NODATA_MASK"] = ParamCls(
             "GRID_NODATA_MASK",
             dtype=dtypes["u8"],
             mode="field",
@@ -141,9 +282,8 @@ def make_grid(
             n_flat=n_flat,
         )
 
-    outlet_mask_p = None
     if outlet == "mask":
-        outlet_mask_p = ParamCls(
+        params["OUTLET_MASK"] = ParamCls(
             "GRID_OUTLET_MASK",
             dtype=dtypes["u8"],
             mode="field",
@@ -152,23 +292,4 @@ def make_grid(
             n_flat=n_flat,
         )
 
-    helpers = blocks.build_helpers(
-        HelperCls,
-        nx_p=nx_p,
-        ny_p=ny_p,
-        dx_p=dx_p,
-        nodata_mask_p=nodata_mask_p,
-        outlet_mask_p=outlet_mask_p,
-        topology=topology,
-        boundary=boundary,
-        nodata=nodata,
-        outlet=outlet,
-    )
-
-    items = {"nx": nx_p, "ny": ny_p, "dx": dx_p, "n_neighbours": n_neighbours_p}
-    if nodata_mask_p is not None:
-        items["nodata_mask"] = nodata_mask_p
-    if outlet_mask_p is not None:
-        items["outlet_mask"] = outlet_mask_p
-    items.update(helpers)
-    return Bag(items)
+    return params

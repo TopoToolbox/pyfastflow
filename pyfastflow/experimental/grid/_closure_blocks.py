@@ -1,59 +1,71 @@
 """
-Taichi/Quadrants (closure) block templates behind make_grid.
+Taichi/Quadrants (closure) block templates behind make_grid, on the new
+builder/frozen/bound stack (core/context/builder.py, frozen.py, bound.py).
 
-Every private block below is one plain python def, PICKED - never branched on
-inside a single function body - by build_helpers() according to the grid's
-config: topology (D4/D8), boundary (normal/periodic_EW/periodic_NS), nodata
-(on/off), outlet (edge/mask). Composability is per axis: a periodic boundary
-swaps in the "periodic" variant of a row or column block, never both, and the
-untouched axis keeps its "identity"/"bounded" variant - there is no
-ti.static/#if choosing between them inside one function. The one runtime
-if-ladder is _delta(k): k is genuine per-call device data, not a structural
-choice, so it cannot be resolved by picking a python function ahead of time.
-A dynamically-indexed local array for that ladder would spill to local memory
-on GPU, hence the explicit if/elif chain instead.
+Every private block below is one plain python def, first parameter `ctx`,
+PICKED - never branched on inside a single function body - by build_group()
+according to the grid's config: topology (D4/D8), boundary (normal/
+periodic_EW/periodic_NS), nodata (on/off), outlet (edge/mask). Composability
+is per axis: a periodic boundary swaps in the "periodic" variant of a row or
+column block, never both, and the untouched axis keeps its "identity"/
+"bounded" variant - there is no ti.static/#if choosing between them inside
+one function. The one runtime if-ladder is _delta(k): k is genuine per-call
+device data, not a structural choice, so it cannot be resolved by picking a
+python function ahead of time. A dynamically-indexed local array for that
+ladder would spill to local memory on GPU, hence the explicit if/elif chain
+instead.
 
-Every public helper below is a HelperBuilder that binds the private blocks it
-needs BY NAME - helper binds helper - so a block reached from two composites
-(e.g. _row reached from both neighbour_raw and dist_between_nodes) is
-specialized once per compile and shared at both call sites (see compile.py,
-_SpecializeCtx).
+Every public helper below is a HelperBuilder whose template calls the private
+blocks it needs through `ctx` - composed under an explicit name via
+`.compose(name, frozen)` (builder.py), so a block reached from two composites
+(e.g. `row` reached from both `neighbour_raw` and `dist_between_nodes`) is
+composed separately, once per composite that calls it directly - see
+builder.py's module docstring: a template can only reach what is composed
+onto its own scope, never a sibling's. The same FrozenHelper object is shared
+by identity at every such composition (frozen.py), but each occurrence mints
+its own independently-bindable PARAM address once the whole tree is build()-
+ed one level up (bound.py) - a caller composing the returned group into a
+kernel must bind or wire() every one of those addresses to the grid's own
+nx/ny/dx (see make_grid's own module docstring for the exact set, and the
+Phase 2a report for why this is flagged rather than papered over here).
 
-nx/ny/dx are read exclusively through `.get(...)`, uniformly across whatever
-mode they end up in (const, scalar, field) - see parameter.py, "Reading a
-Parameter in device code is uniform across modes." This is what lets any of
-them be overridden to a runtime-modifiable mode without touching a single
-block template.
+nx/ny/dx are read exclusively through `ctx.NX.get(0)` / `ctx.NY.get(0)` /
+`ctx.DX.get(0)`, uniformly across whatever mode they end up bound to (const,
+scalar, field) - see parameter.py, "Reading a Parameter in device code is
+uniform across modes." This is what lets any of them be overridden to a
+runtime-modifiable mode without touching a single block template.
 
-Author: B.G (07/2026)
+`abs`/`min` (row_dist_periodic/col_dist_periodic) are plain python builtins,
+not a bound backend module - the old closure stack auto-injected the bound
+ti/qd module under a reserved `_BK` name for exactly this call
+(_closure_backend.py's `specialize_closure`); the new stack's
+compile_closure.py has no equivalent auto-injection (`ctx` is a template's
+literal first parameter, and nothing besides `ctx.*` chains is part of the
+grammar contract.py derives). Both Taichi and Quadrants trace plain
+`abs()`/`min()` directly inside a `ti.func`/`qd.func` body without a `ti.`/
+`qd.` prefix, so this is exercised, not merely assumed - see the Phase 2a
+verification run.
+
+Author: B.G (08/2026)
 """
 
-import functools
-
-from ..core.context.backends import helper_need, make_helper, param_need
+from ..core.context.builder import HelperBuilder
 
 # ---------------------------------------------------------------------------
 # geometry
 # ---------------------------------------------------------------------------
 
 
-def _row_tmpl(i):
-    return i // NX.get(0)
+def _row_tmpl(ctx, i):
+    return i // ctx.NX.get(0)
 
 
-def _col_tmpl(i):
-    return i % NX.get(0)
+def _col_tmpl(ctx, i):
+    return i % ctx.NX.get(0)
 
 
-def _index_tmpl(row, col):
-    return row * NX.get(0) + col
-
-
-def _in_bounds_tmpl(row, col):
-    ok = 0
-    if row >= 0 and row < NY.get(0) and col >= 0 and col < NX.get(0):
-        ok = 1
-    return ok
+def _index_tmpl(ctx, row, col):
+    return row * ctx.NX.get(0) + col
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +73,7 @@ def _in_bounds_tmpl(row, col):
 # ---------------------------------------------------------------------------
 
 
-def _delta_d4_tmpl(k):
+def _delta_d4_tmpl(ctx, k):
     dr = 0
     dc = 0
     if k == 0:
@@ -75,7 +87,7 @@ def _delta_d4_tmpl(k):
     return dr, dc
 
 
-def _delta_d8_tmpl(k):
+def _delta_d8_tmpl(ctx, k):
     dr = 0
     dc = 0
     if k == 0:
@@ -102,34 +114,34 @@ def _delta_d8_tmpl(k):
 # ---------------------------------------------------------------------------
 
 
-def _row_wrap_identity_tmpl(row):
+def _row_wrap_identity_tmpl(ctx, row):
     return row
 
 
-def _row_wrap_periodic_tmpl(row):
+def _row_wrap_periodic_tmpl(ctx, row):
     r = row
     if r < 0:
-        r += NY.get(0)
-    elif r >= NY.get(0):
-        r -= NY.get(0)
+        r += ctx.NY.get(0)
+    elif r >= ctx.NY.get(0):
+        r -= ctx.NY.get(0)
     return r
 
 
-def _col_wrap_identity_tmpl(col):
+def _col_wrap_identity_tmpl(ctx, col):
     return col
 
 
-def _col_wrap_periodic_tmpl(col):
+def _col_wrap_periodic_tmpl(ctx, col):
     c = col
     if c < 0:
-        c += NX.get(0)
-    elif c >= NX.get(0):
-        c -= NX.get(0)
+        c += ctx.NX.get(0)
+    elif c >= ctx.NX.get(0):
+        c -= ctx.NX.get(0)
     return c
 
 
-def _wrap_tmpl(row, col):
-    return _ROWWRAP(row), _COLWRAP(col)
+def _wrap_tmpl(ctx, row, col):
+    return ctx._ROWWRAP(row), ctx._COLWRAP(col)
 
 
 # ---------------------------------------------------------------------------
@@ -138,25 +150,25 @@ def _wrap_tmpl(row, col):
 # ---------------------------------------------------------------------------
 
 
-def _row_edge_ok_bounded_tmpl(row):
+def _row_edge_ok_bounded_tmpl(ctx, row):
     ok = 0
-    if row >= 0 and row < NY.get(0):
+    if row >= 0 and row < ctx.NY.get(0):
         ok = 1
     return ok
 
 
-def _row_edge_ok_periodic_tmpl(row):
+def _row_edge_ok_periodic_tmpl(ctx, row):
     return 1
 
 
-def _col_edge_ok_bounded_tmpl(col):
+def _col_edge_ok_bounded_tmpl(ctx, col):
     ok = 0
-    if col >= 0 and col < NX.get(0):
+    if col >= 0 and col < ctx.NX.get(0):
         ok = 1
     return ok
 
 
-def _col_edge_ok_periodic_tmpl(col):
+def _col_edge_ok_periodic_tmpl(ctx, col):
     return 1
 
 
@@ -165,13 +177,13 @@ def _col_edge_ok_periodic_tmpl(col):
 # ---------------------------------------------------------------------------
 
 
-def _source_ok_always_tmpl(i):
+def _source_ok_always_tmpl(ctx, i):
     return 1
 
 
-def _source_ok_nodata_tmpl(i):
+def _source_ok_nodata_tmpl(ctx, i):
     ok = 1
-    if NODATA_MASK.get(i) == 1:
+    if ctx.NODATA_MASK.get(i) == 1:
         ok = 0
     return ok
 
@@ -181,11 +193,11 @@ def _source_ok_nodata_tmpl(i):
 # ---------------------------------------------------------------------------
 
 
-def _move_allowed_tmpl(i, k):
-    row = _ROW(i)
-    col = _COL(i)
-    dr, dc = _DELTA(k)
-    return _ROWEDGEOK(row + dr) * _COLEDGEOK(col + dc) * _SOURCEOK(i)
+def _move_allowed_tmpl(ctx, i, k):
+    row = ctx._ROW(i)
+    col = ctx._COL(i)
+    dr, dc = ctx._DELTA(k)
+    return ctx._ROWEDGEOK(row + dr) * ctx._COLEDGEOK(col + dc) * ctx._SOURCEOK(i)
 
 
 # ---------------------------------------------------------------------------
@@ -193,18 +205,18 @@ def _move_allowed_tmpl(i, k):
 # ---------------------------------------------------------------------------
 
 
-def _valid_no_nodata_tmpl(j):
+def _valid_no_nodata_tmpl(ctx, j):
     ok = 0
-    if j >= 0 and j < NX.get(0) * NY.get(0):
+    if j >= 0 and j < ctx.NX.get(0) * ctx.NY.get(0):
         ok = 1
     return ok
 
 
-def _valid_nodata_tmpl(j):
+def _valid_nodata_tmpl(ctx, j):
     ok = 0
-    if j >= 0 and j < NX.get(0) * NY.get(0):
+    if j >= 0 and j < ctx.NX.get(0) * ctx.NY.get(0):
         ok = 1
-        if NODATA_MASK.get(j) == 1:
+        if ctx.NODATA_MASK.get(j) == 1:
             ok = 0
     return ok
 
@@ -214,19 +226,19 @@ def _valid_nodata_tmpl(j):
 # ---------------------------------------------------------------------------
 
 
-def _neighbour_raw_tmpl(i, k):
-    row = _ROW(i)
-    col = _COL(i)
-    dr, dc = _DELTA(k)
-    wrow, wcol = _WRAP(row + dr, col + dc)
-    return _INDEX(wrow, wcol)
+def _neighbour_raw_tmpl(ctx, i, k):
+    row = ctx._ROW(i)
+    col = ctx._COL(i)
+    dr, dc = ctx._DELTA(k)
+    wrow, wcol = ctx._WRAP(row + dr, col + dc)
+    return ctx._INDEX(wrow, wcol)
 
 
-def _neighbour_tmpl(i, k):
+def _neighbour_tmpl(ctx, i, k):
     j = -1
-    if _MOVEALLOWED(i, k) == 1:
-        cand = _NEIGHBOURRAW(i, k)
-        if _VALID(cand) == 1:
+    if ctx._MOVEALLOWED(i, k) == 1:
+        cand = ctx._NEIGHBOURRAW(i, k)
+        if ctx._VALID(cand) == 1:
             j = cand
     return j
 
@@ -236,19 +248,19 @@ def _neighbour_tmpl(i, k):
 # ---------------------------------------------------------------------------
 
 
-def _is_active_always_tmpl(i):
+def _is_active_always_tmpl(ctx, i):
     return 1
 
 
-def _is_active_mask_tmpl(i):
+def _is_active_mask_tmpl(ctx, i):
     ok = 1
-    if NODATA_MASK.get(i) == 1:
+    if ctx.NODATA_MASK.get(i) == 1:
         ok = 0
     return ok
 
 
-def _nodata_tmpl(i):
-    return 1 - _ISACTIVE(i)
+def _nodata_tmpl(ctx, i):
+    return 1 - ctx._ISACTIVE(i)
 
 
 # ---------------------------------------------------------------------------
@@ -256,69 +268,69 @@ def _nodata_tmpl(i):
 # ---------------------------------------------------------------------------
 
 
-def _row_is_edge_active_tmpl(row):
+def _row_is_edge_active_tmpl(ctx, row):
     e = 0
-    if row == 0 or row == NY.get(0) - 1:
+    if row == 0 or row == ctx.NY.get(0) - 1:
         e = 1
     return e
 
 
-def _row_is_edge_periodic_tmpl(row):
+def _row_is_edge_periodic_tmpl(ctx, row):
     return 0
 
 
-def _col_is_edge_active_tmpl(col):
+def _col_is_edge_active_tmpl(ctx, col):
     e = 0
-    if col == 0 or col == NX.get(0) - 1:
+    if col == 0 or col == ctx.NX.get(0) - 1:
         e = 1
     return e
 
 
-def _col_is_edge_periodic_tmpl(col):
+def _col_is_edge_periodic_tmpl(ctx, col):
     return 0
 
 
-def _is_on_edge_tmpl(i):
-    row = _ROW(i)
-    col = _COL(i)
+def _is_on_edge_tmpl(ctx, i):
+    row = ctx._ROW(i)
+    col = ctx._COL(i)
     e = 0
-    if _ROWISEDGE(row) == 1 or _COLISEDGE(col) == 1:
+    if ctx._ROWISEDGE(row) == 1 or ctx._COLISEDGE(col) == 1:
         e = 1
     return e
 
 
-def _row_edge_code_active_tmpl(row):
+def _row_edge_code_active_tmpl(ctx, row):
     code = -1
     if row == 0:
         code = 0
-    elif row == NY.get(0) - 1:
+    elif row == ctx.NY.get(0) - 1:
         code = 3
     return code
 
 
-def _row_edge_code_periodic_tmpl(row):
+def _row_edge_code_periodic_tmpl(ctx, row):
     return -1
 
 
-def _col_edge_code_active_tmpl(col):
+def _col_edge_code_active_tmpl(ctx, col):
     code = -1
     if col == 0:
         code = 1
-    elif col == NX.get(0) - 1:
+    elif col == ctx.NX.get(0) - 1:
         code = 2
     return code
 
 
-def _col_edge_code_periodic_tmpl(col):
+def _col_edge_code_periodic_tmpl(ctx, col):
     return -1
 
 
-def _which_edge_tmpl(i):
-    row = _ROW(i)
-    col = _COL(i)
-    code = _ROWEDGECODE(row)
+def _which_edge_tmpl(ctx, i):
+    row = ctx._ROW(i)
+    col = ctx._COL(i)
+    code = ctx._ROWEDGECODE(row)
     if code == -1:
-        code = _COLEDGECODE(col)
+        code = ctx._COLEDGECODE(col)
     return code
 
 
@@ -327,15 +339,15 @@ def _which_edge_tmpl(i):
 # ---------------------------------------------------------------------------
 
 
-def _can_out_mask_tmpl(i):
+def _can_out_mask_tmpl(ctx, i):
     out = 0
-    if OUTLET_MASK.get(i) == 1:
+    if ctx.OUTLET_MASK.get(i) == 1:
         out = 1
     return out
 
 
-def _can_out_edge_tmpl(i):
-    return _ISONEDGE(i)
+def _can_out_edge_tmpl(ctx, i):
+    return ctx._ISONEDGE(i)
 
 
 # ---------------------------------------------------------------------------
@@ -343,58 +355,61 @@ def _can_out_edge_tmpl(i):
 # ---------------------------------------------------------------------------
 
 
-def _dist_from_k_d4_tmpl(k):
-    return DX.get(0)
+def _dist_from_k_d4_tmpl(ctx, k):
+    return ctx.DX.get(0)
 
 
-def _dist_from_k_d8_tmpl(k):
-    d = DX.get(0)
+_SQRT2 = 1.4142135623730951
+
+
+def _dist_from_k_d8_tmpl(ctx, k):
+    d = ctx.DX.get(0)
     if k == 0 or k == 2 or k == 5 or k == 7:
-        d = DX.get(0) * SQRT2
+        d = ctx.DX.get(0) * _SQRT2
     return d
 
 
-def _row_dist_normal_tmpl(raw):
-    return _BK.abs(raw)
+def _row_dist_normal_tmpl(ctx, raw):
+    return abs(raw)
 
 
-def _row_dist_periodic_tmpl(raw):
-    d = _BK.abs(raw)
-    return _BK.min(d, NY.get(0) - d)
+def _row_dist_periodic_tmpl(ctx, raw):
+    d = abs(raw)
+    return min(d, ctx.NY.get(0) - d)
 
 
-def _col_dist_normal_tmpl(raw):
-    return _BK.abs(raw)
+def _col_dist_normal_tmpl(ctx, raw):
+    return abs(raw)
 
 
-def _col_dist_periodic_tmpl(raw):
-    d = _BK.abs(raw)
-    return _BK.min(d, NX.get(0) - d)
+def _col_dist_periodic_tmpl(ctx, raw):
+    d = abs(raw)
+    return min(d, ctx.NX.get(0) - d)
 
 
-def _dist_between_d4_tmpl(i, j):
+def _dist_between_d4_tmpl(ctx, i, j):
     out = -1.0
     if j >= 0:
-        dr = _ROWDIST(_ROW(j) - _ROW(i))
-        dc = _COLDIST(_COL(j) - _COL(i))
+        dr = ctx._ROWDIST(ctx._ROW(j) - ctx._ROW(i))
+        dc = ctx._COLDIST(ctx._COL(j) - ctx._COL(i))
         if dr == 0 and dc == 1:
-            out = DX.get(0)
+            out = ctx.DX.get(0)
         elif dr == 1 and dc == 0:
-            out = DX.get(0)
+            out = ctx.DX.get(0)
     return out
 
 
-def _dist_between_d8_tmpl(i, j):
+def _dist_between_d8_tmpl(ctx, i, j):
     out = -1.0
     if j >= 0:
-        dr = _ROWDIST(_ROW(j) - _ROW(i))
-        dc = _COLDIST(_COL(j) - _COL(i))
+        dr = ctx._ROWDIST(ctx._ROW(j) - ctx._ROW(i))
+        dc = ctx._COLDIST(ctx._COL(j) - ctx._COL(i))
         if dr == 0 and dc == 1:
-            out = DX.get(0)
+            out = ctx.DX.get(0)
         elif dr == 1 and dc == 0:
-            out = DX.get(0)
+            out = ctx.DX.get(0)
         elif dr == 1 and dc == 1:
-            out = DX.get(0) * SQRT2
+            out = ctx.DX.get(0) * _SQRT2
     return out
 
 
@@ -403,197 +418,160 @@ def _dist_between_d8_tmpl(i, j):
 # ---------------------------------------------------------------------------
 
 
-def _neighbour_and_distance_tmpl(i, k):
-    j = _NEIGHBOUR(i, k)
+def _neighbour_and_distance_tmpl(ctx, i, k):
+    j = ctx._NEIGHBOUR(i, k)
     d = -1.0
     if j != -1:
-        d = _DISTFROMK(k)
+        d = ctx._DISTFROMK(k)
     return j, d
 
 
-def build_helpers(
-    HelperCls,
-    *,
-    nx_p,
-    ny_p,
-    dx_p,
-    nodata_mask_p,
-    outlet_mask_p,
-    topology,
-    boundary,
-    nodata,
-    outlet,
-):
+def _helper(template, *, params=(), helpers=None):
     """
-    Wire one grid's private blocks and public composites for a closure
-    backend (Taichi or Quadrants), picking each block's variant from
-    `topology`/`boundary`/`nodata`/`outlet` and binding private blocks into
-    public ones by name.
+    One private/public HelperBuilder: wire_param() every name in `params`,
+    compose() every (name, frozen) pair in `helpers` under that same name,
+    then ingest(template). The one assembly every block below goes through,
+    so a new block does not repeat the wire/compose/ingest boilerplate.
 
-    Every bind below goes through a Need (param_need/helper_need, see
-    backends.py) and every HelperBuilder is constructed with
-    `strict_needs=True` (via `mk`) - the reference conversion the
-    Need-restructuring plan calls for; see need.py/compile.py's module
-    docstrings. `SQRT2` stays a plain, un-Needed bind - a python float has no
-    dtype/mode/identity for a Need to check (see compile.py's `_bind_raw`,
-    "a plain value ... is bound directly even under strict_needs=True").
-    `backend_mod` no longer appears here at all: `_BK`, the one thing this
-    file used it for (row_dist/col_dist's `_BK.abs`/`_BK.min`), is now
-    auto-injected into every closure template - see _closure_backend.py's
-    module docstring.
-
-    Returns {public_name: HelperBuilder}, meant to be merged straight into
-    the Bag make_grid() returns.
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
-    import math
+    b = HelperBuilder()
+    for p in params:
+        b.wire_param(p)
+    if helpers:
+        for name, frozen in helpers.items():
+            b.compose(name, frozen)
+    return b.ingest(template)
 
-    sqrt2 = math.sqrt(2.0)
+
+def build_group(group, *, topology, boundary, nodata, outlet):
+    """
+    Compose every private block and public helper for a closure backend
+    (Taichi or Quadrants) onto `group` (a GroupBuilder), picking each
+    block's variant from `topology`/`boundary`/`nodata`/`outlet`.
+
+    Returns nothing - every public helper is compose()d onto `group` itself,
+    under its own public name, by this call.
+
+    Author: B.G (08/2026)
+    """
     d8 = topology == "D8"
 
-    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
+    row = _helper(_row_tmpl, params=["NX"])
+    col = _helper(_col_tmpl, params=["NX"])
+    index = _helper(_index_tmpl, params=["NX"])
 
-    row = mk(_row_tmpl, NX=param_need("NX", nx_p))
-    col = mk(_col_tmpl, NX=param_need("NX", nx_p))
-    index = mk(_index_tmpl, NX=param_need("NX", nx_p))
+    delta = _helper(_delta_d8_tmpl if d8 else _delta_d4_tmpl)
 
-    delta = mk(_delta_d8_tmpl if d8 else _delta_d4_tmpl)
-
-    row_wrap = mk(
+    row_wrap = _helper(
         _row_wrap_periodic_tmpl if boundary == "periodic_NS" else _row_wrap_identity_tmpl,
-        NY=param_need("NY", ny_p),
+        params=["NY"] if boundary == "periodic_NS" else [],
     )
-    col_wrap = mk(
+    col_wrap = _helper(
         _col_wrap_periodic_tmpl if boundary == "periodic_EW" else _col_wrap_identity_tmpl,
-        NX=param_need("NX", nx_p),
+        params=["NX"] if boundary == "periodic_EW" else [],
     )
-    wrap = mk(_wrap_tmpl, _ROWWRAP=helper_need("_ROWWRAP", row_wrap), _COLWRAP=helper_need("_COLWRAP", col_wrap))
+    wrap = _helper(_wrap_tmpl, helpers={"_ROWWRAP": row_wrap, "_COLWRAP": col_wrap})
 
-    row_edge_ok = mk(
+    row_edge_ok = _helper(
         _row_edge_ok_periodic_tmpl if boundary == "periodic_NS" else _row_edge_ok_bounded_tmpl,
-        NY=param_need("NY", ny_p),
+        params=[] if boundary == "periodic_NS" else ["NY"],
     )
-    col_edge_ok = mk(
+    col_edge_ok = _helper(
         _col_edge_ok_periodic_tmpl if boundary == "periodic_EW" else _col_edge_ok_bounded_tmpl,
-        NX=param_need("NX", nx_p),
+        params=[] if boundary == "periodic_EW" else ["NX"],
     )
 
     source_ok = (
-        mk(_source_ok_nodata_tmpl, NODATA_MASK=param_need("NODATA_MASK", nodata_mask_p))
-        if nodata
-        else mk(_source_ok_always_tmpl)
+        _helper(_source_ok_nodata_tmpl, params=["NODATA_MASK"]) if nodata else _helper(_source_ok_always_tmpl)
     )
 
-    move_allowed = mk(
+    move_allowed = _helper(
         _move_allowed_tmpl,
-        _ROW=helper_need("_ROW", row),
-        _COL=helper_need("_COL", col),
-        _DELTA=helper_need("_DELTA", delta),
-        _ROWEDGEOK=helper_need("_ROWEDGEOK", row_edge_ok),
-        _COLEDGEOK=helper_need("_COLEDGEOK", col_edge_ok),
-        _SOURCEOK=helper_need("_SOURCEOK", source_ok),
+        helpers={
+            "_ROW": row,
+            "_COL": col,
+            "_DELTA": delta,
+            "_ROWEDGEOK": row_edge_ok,
+            "_COLEDGEOK": col_edge_ok,
+            "_SOURCEOK": source_ok,
+        },
     )
 
-    valid_binds = {"NX": param_need("NX", nx_p), "NY": param_need("NY", ny_p)}
-    if nodata:
-        valid_binds["NODATA_MASK"] = param_need("NODATA_MASK", nodata_mask_p)
-    valid = mk(_valid_nodata_tmpl if nodata else _valid_no_nodata_tmpl, **valid_binds)
+    valid_params = ["NX", "NY"] + (["NODATA_MASK"] if nodata else [])
+    valid = _helper(_valid_nodata_tmpl if nodata else _valid_no_nodata_tmpl, params=valid_params)
 
-    neighbour_raw = mk(
+    neighbour_raw = _helper(
         _neighbour_raw_tmpl,
-        _ROW=helper_need("_ROW", row),
-        _COL=helper_need("_COL", col),
-        _DELTA=helper_need("_DELTA", delta),
-        _WRAP=helper_need("_WRAP", wrap),
-        _INDEX=helper_need("_INDEX", index),
+        helpers={"_ROW": row, "_COL": col, "_DELTA": delta, "_WRAP": wrap, "_INDEX": index},
     )
-    neighbour = mk(
+    neighbour = _helper(
         _neighbour_tmpl,
-        _MOVEALLOWED=helper_need("_MOVEALLOWED", move_allowed),
-        _NEIGHBOURRAW=helper_need("_NEIGHBOURRAW", neighbour_raw),
-        _VALID=helper_need("_VALID", valid),
+        helpers={"_MOVEALLOWED": move_allowed, "_NEIGHBOURRAW": neighbour_raw, "_VALID": valid},
     )
 
-    is_active = (
-        mk(_is_active_mask_tmpl, NODATA_MASK=param_need("NODATA_MASK", nodata_mask_p))
-        if nodata
-        else mk(_is_active_always_tmpl)
-    )
-    nodata_fn = mk(_nodata_tmpl, _ISACTIVE=helper_need("_ISACTIVE", is_active))
+    is_active = _helper(_is_active_mask_tmpl, params=["NODATA_MASK"]) if nodata else _helper(_is_active_always_tmpl)
+    nodata_fn = _helper(_nodata_tmpl, helpers={"_ISACTIVE": is_active})
 
-    row_is_edge = mk(
+    row_is_edge = _helper(
         _row_is_edge_periodic_tmpl if boundary == "periodic_NS" else _row_is_edge_active_tmpl,
-        NY=param_need("NY", ny_p),
+        params=[] if boundary == "periodic_NS" else ["NY"],
     )
-    col_is_edge = mk(
+    col_is_edge = _helper(
         _col_is_edge_periodic_tmpl if boundary == "periodic_EW" else _col_is_edge_active_tmpl,
-        NX=param_need("NX", nx_p),
+        params=[] if boundary == "periodic_EW" else ["NX"],
     )
-    is_on_edge = mk(
+    is_on_edge = _helper(
         _is_on_edge_tmpl,
-        _ROW=helper_need("_ROW", row),
-        _COL=helper_need("_COL", col),
-        _ROWISEDGE=helper_need("_ROWISEDGE", row_is_edge),
-        _COLISEDGE=helper_need("_COLISEDGE", col_is_edge),
+        helpers={"_ROW": row, "_COL": col, "_ROWISEDGE": row_is_edge, "_COLISEDGE": col_is_edge},
     )
 
-    row_edge_code = mk(
+    row_edge_code = _helper(
         _row_edge_code_periodic_tmpl if boundary == "periodic_NS" else _row_edge_code_active_tmpl,
-        NY=param_need("NY", ny_p),
+        params=[] if boundary == "periodic_NS" else ["NY"],
     )
-    col_edge_code = mk(
+    col_edge_code = _helper(
         _col_edge_code_periodic_tmpl if boundary == "periodic_EW" else _col_edge_code_active_tmpl,
-        NX=param_need("NX", nx_p),
+        params=[] if boundary == "periodic_EW" else ["NX"],
     )
-    which_edge = mk(
+    which_edge = _helper(
         _which_edge_tmpl,
-        _ROW=helper_need("_ROW", row),
-        _COL=helper_need("_COL", col),
-        _ROWEDGECODE=helper_need("_ROWEDGECODE", row_edge_code),
-        _COLEDGECODE=helper_need("_COLEDGECODE", col_edge_code),
+        helpers={"_ROW": row, "_COL": col, "_ROWEDGECODE": row_edge_code, "_COLEDGECODE": col_edge_code},
     )
 
     if outlet == "mask":
-        can_out = mk(_can_out_mask_tmpl, OUTLET_MASK=param_need("OUTLET_MASK", outlet_mask_p))
+        can_out = _helper(_can_out_mask_tmpl, params=["OUTLET_MASK"])
     else:
-        can_out = mk(_can_out_edge_tmpl, _ISONEDGE=helper_need("_ISONEDGE", is_on_edge))
+        can_out = _helper(_can_out_edge_tmpl, helpers={"_ISONEDGE": is_on_edge})
 
-    dist_from_k = mk(_dist_from_k_d8_tmpl if d8 else _dist_from_k_d4_tmpl, DX=param_need("DX", dx_p), SQRT2=sqrt2)
+    dist_from_k = _helper(_dist_from_k_d8_tmpl if d8 else _dist_from_k_d4_tmpl, params=["DX"])
 
-    row_dist = mk(
+    row_dist = _helper(
         _row_dist_periodic_tmpl if boundary == "periodic_NS" else _row_dist_normal_tmpl,
-        NY=param_need("NY", ny_p),
+        params=["NY"] if boundary == "periodic_NS" else [],
     )
-    col_dist = mk(
+    col_dist = _helper(
         _col_dist_periodic_tmpl if boundary == "periodic_EW" else _col_dist_normal_tmpl,
-        NX=param_need("NX", nx_p),
+        params=["NX"] if boundary == "periodic_EW" else [],
     )
-    dist_between = mk(
+    dist_between = _helper(
         _dist_between_d8_tmpl if d8 else _dist_between_d4_tmpl,
-        _ROW=helper_need("_ROW", row),
-        _COL=helper_need("_COL", col),
-        _ROWDIST=helper_need("_ROWDIST", row_dist),
-        _COLDIST=helper_need("_COLDIST", col_dist),
-        DX=param_need("DX", dx_p),
-        SQRT2=sqrt2,
+        params=["DX"],
+        helpers={"_ROW": row, "_COL": col, "_ROWDIST": row_dist, "_COLDIST": col_dist},
     )
 
-    neighbour_and_distance = mk(
+    neighbour_and_distance = _helper(
         _neighbour_and_distance_tmpl,
-        _NEIGHBOUR=helper_need("_NEIGHBOUR", neighbour),
-        _DISTFROMK=helper_need("_DISTFROMK", dist_from_k),
+        helpers={"_NEIGHBOUR": neighbour, "_DISTFROMK": dist_from_k},
     )
 
-    return {
-        "neighbour": neighbour,
-        "neighbour_raw": neighbour_raw,
-        "nodata": nodata_fn,
-        "is_active": is_active,
-        "can_out": can_out,
-        "dist_from_k": dist_from_k,
-        "dist_between_nodes": dist_between,
-        "is_on_edge": is_on_edge,
-        "which_edge": which_edge,
-        "neighbour_and_distance": neighbour_and_distance,
-    }
+    group.wire_helper("neighbour").compose("neighbour", neighbour)
+    group.wire_helper("neighbour_raw").compose("neighbour_raw", neighbour_raw)
+    group.wire_helper("nodata").compose("nodata", nodata_fn)
+    group.wire_helper("is_active").compose("is_active", is_active)
+    group.wire_helper("can_out").compose("can_out", can_out)
+    group.wire_helper("dist_from_k").compose("dist_from_k", dist_from_k)
+    group.wire_helper("dist_between_nodes").compose("dist_between_nodes", dist_between)
+    group.wire_helper("is_on_edge").compose("is_on_edge", is_on_edge)
+    group.wire_helper("which_edge").compose("which_edge", which_edge)
+    group.wire_helper("neighbour_and_distance").compose("neighbour_and_distance", neighbour_and_distance)

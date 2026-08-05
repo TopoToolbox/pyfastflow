@@ -59,13 +59,69 @@ informational text, never as an error - two unrelated slots happening to
 share a last segment (two different `z`s at two different addresses) is
 completely ordinary and not a caller's mistake to fix.
 
+Build-phase sharing (FrozenGroup.shared)
+-------------------------------------------
+A composed FrozenGroup (frozen.py) may declare, via GroupBuilder.share()
+(builder.py), that several of its own composed children's PARAM slots read
+the "same" quantity as one of the group's own top-level PARAM slots - grid's
+`neighbour_raw.row.NX` and `is_on_edge.row.NX` (among many others) both mean
+the grid's own `NX`, structurally, because a device template can only call
+what is composed directly onto its own scope (builder.py's module docstring)
+and so grid's own public helpers each end up re-composing the same private
+`row`/`col` blocks under their own local names. Left alone, build() would
+mint one independent address per occurrence - correct, but a caller then has
+to bind (or wire-then-bind) every one of them by hand for what is
+conceptually one value.
+
+`_walk_group`/`_walk_group_subtree` are `_walk`'s own group-aware variant:
+walking into a composed FrozenGroup with any `.shared` entries switches to
+these, which mint the group's own top-level PARAM/HELPER slots exactly as
+`_walk` always has, but - for every relative path any canonical's `.shared`
+set names - do NOT mint an independent table entry at all; instead they
+record `full_address -> canonical_address` in a side `redirect` table
+threaded alongside the usual one. The net effect: `build()` mints exactly
+ONE address (the canonical) for the whole equivalence class, by default - not
+`bind()`-time wire()-together-many, which still leaves every address
+independently listed (see wire(), above) - this is coarser and happens
+before a caller ever sees the address tree at all.
+
+`redirect` is consulted only by `value_at()` - the read used internally by
+compile_closure.py/compile_cupy.py/compile_shared.py's own structural walks,
+which always compute the FULL address as they descend the frozen tree and
+need SOME resolution at every PARAM leaf they reach, collapsed or not. It is
+never consulted by `bind()`/`wire()`/`unmet()`/`addresses()`/`inspect()` - a
+collapsed address is not independently bindable and does not appear in any
+of those, which is the intended, visible consequence of collapsing it: `.
+addresses()` after composing a D8 grid reports one `NX`, not seventeen.
+
+compose(name, frozen, split=[...]) (builder.py) opts specific relative paths
+back OUT of a composed FrozenGroup's collapse, at the point that group is
+composed into some other builder: `_walk`/`_walk_group_subtree` mint those
+paths as ordinary, independent addresses instead of adding them to
+`redirect`, exactly as if they had never been declared shared at that
+compose site. This is a build-time decision, recorded on the composing
+object's own `.split` (frozen.py) and read back only while `build()` walks
+that one composed occurrence - never something bind() or a caller after the
+fact can change; splitting the same shared path back out at a second,
+different compose() site of the same group is independent and unaffected.
+
+Sharing across two separately-built composites (`kA.grid.NX` and
+`kB.grid.NX`, two different KernelBuilders each composing their own
+occurrence of the same FrozenGroup) is not this mechanism at all - those are
+already two different address trees by construction (two separate `build()`
+calls, per frozen.py's own instancing guarantee), and reconciling them, if
+ever wanted, is ordinary bind-phase wire() between the two BoundKernels'
+own addresses.
+
 Author: B.G (08/2026)
 """
 
 from typing import Any, NamedTuple
 
+import numpy as np
+
 from ..pool.base import new_uid
-from .frozen import FrozenKernel, _Frozen
+from .frozen import FrozenGroup, FrozenKernel, _Frozen
 from .slot import SlotKind
 
 Address = tuple[str, ...]
@@ -108,7 +164,12 @@ class _LeafInfo(NamedTuple):
     dtype: Any
 
 
-def _walk(prefix: Address, frozen: _Frozen, table: dict[Address, _LeafInfo]) -> None:
+def _walk(
+    prefix: Address,
+    frozen: _Frozen,
+    table: dict[Address, _LeafInfo],
+    redirect: "dict[Address, Address] | None" = None,
+) -> None:
     """
     Populate `table` with one entry per PARAM/DATA leaf reachable from
     `frozen`, at its full dotted path under `prefix`, recursing into every
@@ -116,8 +177,18 @@ def _walk(prefix: Address, frozen: _Frozen, table: dict[Address, _LeafInfo]) -> 
     slot with nothing composed into it - see the module docstring for why
     this is where that gets caught.
 
+    A composed child that is a FrozenGroup with any `.shared` entries is
+    walked by `_walk_group` instead - see the module docstring's "Build-
+    phase sharing" section. `redirect`, optional, collects the
+    collapsed-address -> canonical-address table that mechanism needs;
+    every caller that does not care about it (routine_v2.py/sequence_v2.py/
+    host_block.py's own direct `_walk()` calls, which only ever want a
+    reduced `table`) may simply omit it.
+
     Author: B.G (08/2026)
     """
+    if redirect is None:
+        redirect = {}
     for name in frozen.slots.names(SlotKind.PARAM):
         table[prefix + (name,)] = _LeafInfo(SlotKind.PARAM, None)
     for name in frozen.slots.names(SlotKind.DATA):
@@ -131,22 +202,126 @@ def _walk(prefix: Address, frozen: _Frozen, table: dict[Address, _LeafInfo]) -> 
                 f"'{format_address(addr)}' is a wired HELPER slot with nothing composed into "
                 f"it - compose() a frozen helper under that name before build()"
             )
-        _walk(addr, frozen.composed[name], table)
+        child = frozen.composed[name]
+        if isinstance(child, FrozenGroup) and child.shared:
+            _walk_group(addr, child, table, redirect, frozen.split.get(name, frozenset()))
+        else:
+            _walk(addr, child, table, redirect)
+
+
+def _walk_group(
+    prefix: Address,
+    group: FrozenGroup,
+    table: dict[Address, _LeafInfo],
+    redirect: dict[Address, Address],
+    split_paths: frozenset,
+) -> None:
+    """
+    `_walk`'s group-aware entry point: mints `group`'s own top-level PARAM/
+    HELPER slots exactly as `_walk` always has, then descends into its
+    composed subtree via `_walk_group_subtree`, which - for every relative
+    path some canonical in `group.shared` names, unless that exact path is
+    in `split_paths` (this compose site's own `split=`) - records a
+    `redirect` entry instead of minting an independent table entry. See the
+    module docstring's "Build-phase sharing" section.
+
+    Author: B.G (08/2026)
+    """
+    for name in group.slots.names(SlotKind.PARAM):
+        table[prefix + (name,)] = _LeafInfo(SlotKind.PARAM, None)
+    # group.slots carries no DATA (GroupBuilder.wire_data always raises), so
+    # nothing else to mint at this level.
+
+    shared_paths: dict[Address, Address] = {}
+    for canonical, paths in group.shared.items():
+        canonical_addr = prefix + (canonical,)
+        for p in paths:
+            shared_paths[p] = canonical_addr
+
+    helper_roots = group.slots.names(SlotKind.HELPER) | set(group.composed)
+    for name in helper_roots:
+        addr = prefix + (name,)
+        if name not in group.composed:
+            raise BindError(
+                f"'{format_address(addr)}' is a wired HELPER slot with nothing composed into "
+                f"it - compose() a frozen helper under that name before build()"
+            )
+        _walk_group_subtree(addr, group.composed[name], table, redirect, (name,), shared_paths, split_paths)
+
+
+def _walk_group_subtree(
+    prefix: Address,
+    frozen: _Frozen,
+    table: dict[Address, _LeafInfo],
+    redirect: dict[Address, Address],
+    rel_prefix: Address,
+    shared_paths: dict[Address, Address],
+    split_paths: frozenset,
+) -> None:
+    """
+    One level of `_walk_group`'s own descent into a group's composed
+    subtree - `rel_prefix` is the path relative to the enclosing group's own
+    root (what `group.shared`'s declared paths and `split_paths` are
+    expressed in), `prefix` the full address from the whole build()'s own
+    root (what `table`/`redirect` are keyed by). A PARAM leaf whose relative
+    path is in `shared_paths` and not in `split_paths` is collapsed - a
+    `redirect` entry, no independent `table` entry; every other PARAM/DATA
+    leaf mints normally, exactly as plain `_walk` would. A nested composed
+    FrozenGroup (with its own `.shared`) starts a fresh `_walk_group` scope
+    of its own - sharing is declared per group, one boundary at a time, and
+    does not reach through a group-within-a-group.
+
+    Author: B.G (08/2026)
+    """
+    for name in frozen.slots.names(SlotKind.PARAM):
+        rel = rel_prefix + (name,)
+        full = prefix + (name,)
+        canonical = shared_paths.get(rel)
+        if canonical is not None and rel not in split_paths:
+            redirect[full] = canonical
+        else:
+            table[full] = _LeafInfo(SlotKind.PARAM, None)
+    for name in frozen.slots.names(SlotKind.DATA):
+        table[prefix + (name,)] = _LeafInfo(SlotKind.DATA, frozen.slots[name].dtype)
+
+    helper_roots = frozen.slots.names(SlotKind.HELPER) | set(frozen.composed)
+    for name in helper_roots:
+        addr = prefix + (name,)
+        if name not in frozen.composed:
+            raise BindError(
+                f"'{format_address(addr)}' is a wired HELPER slot with nothing composed into "
+                f"it - compose() a frozen helper under that name before build()"
+            )
+        child = frozen.composed[name]
+        child_split = frozen.split.get(name, frozenset())
+        if isinstance(child, FrozenGroup) and child.shared:
+            _walk_group(addr, child, table, redirect, child_split)
+        else:
+            _walk_group_subtree(addr, child, table, redirect, rel_prefix + (name,), shared_paths, split_paths)
 
 
 def build(frozen: _Frozen) -> "BoundKernel | BoundHelper":
     """
     Walk `frozen`'s composition tree and return a fresh BoundKernel (if
     `frozen` is a FrozenKernel) or BoundHelper (FrozenHelper), with one
-    independently-bindable slot minted per full address found. See the
-    module docstring. Also reachable as `frozen.build()` (frozen.py).
+    independently-bindable slot minted per full address found - collapsed
+    per any build-phase sharing reachable in the tree (module docstring,
+    "Build-phase sharing"). Also reachable as `frozen.build()` (frozen.py).
 
     Author: B.G (08/2026)
     """
     table: dict[Address, _LeafInfo] = {}
-    _walk((), frozen, table)
+    redirect: dict[Address, Address] = {}
+    if isinstance(frozen, FrozenGroup) and frozen.shared:
+        # `frozen` is itself the group being build()-ed directly (e.g. for
+        # standalone inspection) rather than reached as someone else's
+        # composed child - no enclosing object exists to have declared a
+        # `split`, so there is none.
+        _walk_group((), frozen, table, redirect, frozenset())
+    else:
+        _walk((), frozen, table, redirect)
     cls = BoundKernel if isinstance(frozen, FrozenKernel) else BoundHelper
-    return cls(frozen, table)
+    return cls(frozen, table, redirect)
 
 
 def _format_state(info: _LeafInfo, value: Any) -> str:
@@ -166,6 +341,32 @@ def _format_state(info: _LeafInfo, value: Any) -> str:
     return "bound"
 
 
+_DTYPE_SHORT = {
+    "float32": "f32", "float64": "f64",
+    "int32": "i32", "int64": "i64",
+    "uint8": "u8", "uint32": "u32",
+}
+
+
+def _short_dtype(dtype: Any) -> str:
+    """
+    A dtype in the short spelling this package writes everywhere else
+    ("f32", "i64", ...) rather than python's own repr - `<class
+    'numpy.float32'>` is not a pasteable dtype, it is noise. Tries a numpy
+    coercion first (covers numpy dtypes/dtype classes and the cupy backend's
+    own dtype objects, which already are numpy dtypes); falls back to
+    `str(dtype)` for anything numpy cannot make sense of (a Taichi/Quadrants
+    dtype token, which already prints short - `ti.f32` reprs as `f32`).
+
+    Author: B.G (08/2026)
+    """
+    try:
+        name = np.dtype(dtype).name
+    except TypeError:
+        return str(dtype)
+    return _DTYPE_SHORT.get(name, name)
+
+
 class _Bound:
     """
     Shared machinery behind BoundKernel/BoundHelper. Not instantiated
@@ -174,7 +375,12 @@ class _Bound:
     Author: B.G (08/2026)
     """
 
-    def __init__(self, frozen: _Frozen, table: dict[Address, _LeafInfo]):
+    def __init__(
+        self,
+        frozen: _Frozen,
+        table: dict[Address, _LeafInfo],
+        redirect: "dict[Address, Address] | None" = None,
+    ):
         self._uid = new_uid()
         self._frozen = frozen
         self._table = table
@@ -183,6 +389,11 @@ class _Bound:
         # group regardless of which member address it was bound through.
         self._parent: dict[Address, Address] = {addr: addr for addr in table}
         self._values: dict[Address, Any] = {}
+        # build-phase-collapsed addresses (module docstring, "Build-phase
+        # sharing") -> their canonical table address. Consulted by value_at()
+        # only - never by bind()/wire()/unmet()/addresses(), so a collapsed
+        # address stays genuinely absent from every caller-facing listing.
+        self._redirect: dict[Address, Address] = dict(redirect) if redirect else {}
 
     @property
     def uid(self) -> int:
@@ -197,6 +408,65 @@ class _Bound:
     def addresses(self) -> set[Address]:
         """Every address this object has a slot for - the full, fixed address tree build() minted."""
         return set(self._table)
+
+    def value_at(self, addr: "Address | str") -> Any:
+        """
+        The object currently bound at `addr` (following wire()-d equivalence
+        to its group's representative), or None if that group is unbound.
+        Read-only counterpart to bind() - for compile.py's use, and for
+        anything else that wants to read a binding without going through
+        inspect()'s formatted report.
+
+        `addr` may be a build-phase-collapsed address (module docstring,
+        "Build-phase sharing") even though it is not one of `.addresses()`'
+        own members - compile_closure.py/compile_cupy.py/compile_shared.py's
+        structural walks compute the full address at every PARAM leaf they
+        reach regardless of whether build() minted it independently or
+        redirected it, and this is the one read path required to resolve
+        transparently either way. `bind()`/`wire()` do not get this
+        treatment - a collapsed address is not independently bindable.
+
+        Author: B.G (08/2026)
+        """
+        a = self._addr_or_redirect(addr)
+        return self._values.get(self._find(a))
+
+    def _addr_or_redirect(self, addr: "Address | str") -> Address:
+        """
+        `addr`, validated against `.addresses()` as `_addr()` always has, OR
+        - if `addr` is not itself one of this object's minted addresses -
+        its build-phase-collapsed canonical address, if one was recorded.
+        Raises the same "unknown address" `_addr()` always has if neither
+        applies. See value_at()'s own docstring for why only that method
+        uses this instead of `_addr()` directly.
+
+        Author: B.G (08/2026)
+        """
+        a = parse_address(addr) if isinstance(addr, str) else tuple(addr)
+        if a in self._table:
+            return a
+        redirected = self._redirect.get(a)
+        if redirected is not None:
+            return redirected
+        raise BindError(
+            f"unknown address {format_address(a)!r} - not one of this object's slots "
+            f"(see .addresses() for the full set)"
+        )
+
+    def slot_info(self, addr: "Address | str") -> _LeafInfo:
+        """This address's fixed kind/dtype, as minted by build() - never changes after that."""
+        a = self._addr(addr)
+        return self._table[self._find(a)]
+
+    def unmet(self) -> list[Address]:
+        """
+        Every address whose equivalence group has no bound value yet, sorted.
+        Empty means every slot build() minted is filled - the precondition
+        compile() checks first (see compile_shared.py's check_unmet).
+
+        Author: B.G (08/2026)
+        """
+        return sorted(addr for addr in self._table if self._values.get(self._find(addr)) is None)
 
     def _addr(self, addr: "Address | str") -> Address:
         a = parse_address(addr) if isinstance(addr, str) else tuple(addr)
@@ -293,20 +563,31 @@ class _Bound:
     def inspect(self) -> str:
         """
         The full binding contract, one line per address, as exact pasteable
-        addresses:
+        addresses, columns aligned to whatever the actual addresses/types on
+        this object need (never a fixed width - an address only ever gets
+        longer as a composition tree grows deeper):
 
-            flux.grad.z      PARAM  UNBOUND
-            flux.grad.dx     PARAM  bound(const 30.0)
-            flux.acc         DATA   f32  UNBOUND
-            update.dt        PARAM  bound(scalar)
+            flux.grad.dx       PARAM  -    bound(const 30.0)
+            flux.grad.z        PARAM  -    UNBOUND
+            flux.acc           DATA   f32  UNBOUND
+            update.dt          PARAM  -    bound(scalar)
+
+        PARAM and DATA rows share one column layout - address, kind, type,
+        state - rather than DATA carrying an extra field: a PARAM slot's
+        type column reads "-" (the slot itself declares no dtype - see
+        slot.py), a DATA slot's reads its declared dtype in this package's
+        short spelling ("f32", not "<class 'numpy.float32'>" - see
+        _short_dtype) or "any" if wire_data() left it open.
 
         A wire()-d address carries a trailing `[wired: ...]` note listing
-        every other address in its equivalence group. After the per-address
-        lines, any leaf name (an address's own last segment) shared by two
-        or more addresses that are *not* in the same wire()-d group is
-        listed once more, under an "Informational" heading - never as an
-        error; see the module docstring for why this is deliberately not a
-        conflict.
+        every other address in its equivalence group; the state column is
+        only padded when at least one row needs that trailing note, so a
+        report with no wire()-d addresses at all has no dangling whitespace.
+        After the per-address lines, any leaf name (an address's own last
+        segment) shared by two or more addresses that are *not* in the same
+        wire()-d group is listed once more, under an "Informational"
+        heading - never as an error; see the module docstring for why this
+        is deliberately not a conflict.
 
         Author: B.G (08/2026)
         """
@@ -314,19 +595,18 @@ class _Bound:
         for addr in self._table:
             groups.setdefault(self._find(addr), []).append(addr)
 
-        lines: list[str] = []
+        rows: list[tuple[str, str, str, str, str]] = []
         for addr in sorted(self._table):
             info = self._table[addr]
             root = self._find(addr)
             state = _format_state(info, self._values.get(root))
             peers = sorted(a for a in groups[root] if a != addr)
-            suffix = f"   [wired: {', '.join(format_address(p) for p in peers)}]" if peers else ""
-            kind_col = info.kind.value.upper()
+            wired = f"[wired: {', '.join(format_address(p) for p in peers)}]" if peers else ""
             if info.kind is SlotKind.DATA:
-                dtype_col = str(info.dtype) if info.dtype is not None else "any"
-                lines.append(f"{format_address(addr):<18} {kind_col:<7} {dtype_col:<8} {state}{suffix}")
+                type_col = _short_dtype(info.dtype) if info.dtype is not None else "any"
             else:
-                lines.append(f"{format_address(addr):<18} {kind_col:<7} {state}{suffix}")
+                type_col = "-"
+            rows.append((format_address(addr), info.kind.value.upper(), type_col, state, wired))
 
         by_leaf: dict[str, list[Address]] = {}
         for addr in self._table:
@@ -337,7 +617,24 @@ class _Bound:
                 continue
             collisions.append(f"  '{leaf}': {', '.join(format_address(a) for a in sorted(addrs))}")
 
-        report = "\n".join(lines) if lines else "(no slots)"
+        if not rows:
+            report = "(no slots)"
+        else:
+            w_addr = max(len(r[0]) for r in rows)
+            w_kind = max(len(r[1]) for r in rows)
+            w_type = max(len(r[2]) for r in rows)
+            w_state = max(len(r[3]) for r in rows)
+            pad_state = any(r[4] for r in rows)
+            lines = []
+            for addr_s, kind_s, type_s, state_s, wired_s in rows:
+                parts = [addr_s.ljust(w_addr), kind_s.ljust(w_kind), type_s.ljust(w_type)]
+                parts.append(state_s.ljust(w_state) if pad_state else state_s)
+                line = "  ".join(parts)
+                if wired_s:
+                    line += f"  {wired_s}"
+                lines.append(line)
+            report = "\n".join(lines)
+
         if collisions:
             report += "\n\nInformational - same leaf name at multiple, unwired addresses (not an error):\n"
             report += "\n".join(collisions)
@@ -355,6 +652,46 @@ class BoundKernel(_Bound):
     Author: B.G (08/2026)
     """
 
+    def compile(self, backend: str, **kwargs) -> Any:
+        """
+        The compile phase (1c) - produce a frozen, immutable callable from
+        this object's current bindings. A snapshot: this BoundKernel stays
+        live and rebindable afterwards, and a later compile() (with or
+        without edits in between) produces an independent callable - see
+        compile_shared.py's module docstring for the full contract
+        (CompiledKernel, swap(), the legal-PARAM-accessor and unmet-slot
+        checks every backend runs first).
+
+        `backend` is `"taichi"`, `"quadrants"` or `"cupy"` - the same three
+        names `backends.py`'s `backend_classes()` uses elsewhere in this
+        package. `**kwargs` is backend-specific: cupy's `compile_kernel`
+        accepts `grid=`/`block=` launch-dimension defaults (see
+        compile_cupy.py); the closure backends take none.
+
+        Imported locally, per backend, to avoid importing taichi/quadrants/
+        cupy at module load time for a caller that only uses one of them -
+        the same reasoning `backends.py.backend_classes` follows.
+
+        Author: B.G (08/2026)
+        """
+        if backend == "taichi":
+            import taichi as ti
+
+            from . import compile_closure
+
+            return compile_closure.compile_kernel(self, ti, **kwargs)
+        if backend == "quadrants":
+            import quadrants as qd
+
+            from . import compile_closure
+
+            return compile_closure.compile_kernel(self, qd, **kwargs)
+        if backend == "cupy":
+            from . import compile_cupy
+
+            return compile_cupy.compile_kernel(self, **kwargs)
+        raise BindError(f"compile: unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
+
 
 class BoundHelper(_Bound):
     """
@@ -363,3 +700,19 @@ class BoundHelper(_Bound):
 
     Author: B.G (08/2026)
     """
+
+    def compile(self, backend: str, **kwargs) -> Any:
+        """
+        Always raises: a device helper has no standalone compiled form, on
+        any backend - it is compiled as part of the BoundKernel that
+        composes it (see compile_shared.py/compile_closure.py/
+        compile_cupy.py). Mirrors HelperBuilder.compile() (builder.py) at
+        the build phase.
+
+        Author: B.G (08/2026)
+        """
+        raise TypeError(
+            "BoundHelper.compile() is not supported: a device helper is compiled as part of "
+            "the BoundKernel that composes it, not on its own. Compose this helper's "
+            "FrozenHelper into a KernelBuilder and call compile() on the resulting BoundKernel."
+        )
