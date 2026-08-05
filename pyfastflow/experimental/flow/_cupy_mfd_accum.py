@@ -58,6 +58,7 @@ Author: B.G (08/2026)
 import numpy as np
 import cupy as cp
 
+from ..core.context.backends import helper_need
 from ..core.context.need import Kind, Need
 from ..core.pool.base import new_uid
 
@@ -134,6 +135,10 @@ def build_persistent_mfd(
     count as before, and a caller passing correctly-dtyped buffers (as every
     existing caller already does) sees no behavioural difference at all.
 
+    Both KernelBuilders are constructed strict_needs=True; "accum"'s
+    `neighbour_raw=grid.neighbour_raw` bind goes through helper_need,
+    mirroring every other converted flow block module.
+
     Author: B.G (08/2026)
     """
     NN = grid.n_neighbours.get()
@@ -142,7 +147,7 @@ def build_persistent_mfd(
     source_need = Need("source", kind=Kind.PARAM, dtype=source.dtype, modes=source.modes)
     source_need.bind(source.value)
     q_init_accum_need = Need("accum", kind=Kind.DATA, dtype=np.float32)
-    q_init = KernelCls().need(source_need, q_init_accum_need).ingest(
+    q_init = KernelCls(strict_needs=True).need(source_need, q_init_accum_need).ingest(
         f"""
 __global__ void {t}_q_init(float* accum) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -162,7 +167,13 @@ __global__ void {t}_q_init(float* accum) {{
         Need("accum", kind=Kind.DATA, dtype=np.float32),
         Need("indegree", kind=Kind.DATA, dtype=np.int32),
     )
-    accum = KernelCls().bind("neighbour_raw", grid.neighbour_raw).need(*accum_data_needs).ingest(
+    neighbour_raw_need = helper_need("neighbour_raw", grid.neighbour_raw)
+    accum = (
+        KernelCls(strict_needs=True)
+        .need(neighbour_raw_need)
+        .bind("neighbour_raw", neighbour_raw_need.value)
+        .need(*accum_data_needs)
+        .ingest(
         f"""
 __global__ void {t}_persistent_mfd(
     int* __restrict__ frontier0, int* __restrict__ frontier1,
@@ -243,6 +254,7 @@ __global__ void {t}_persistent_mfd(
     }}
 }}
 """
+        )
     )
 
     return {"q_init": q_init, "accum": accum}

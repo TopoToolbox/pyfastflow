@@ -15,15 +15,27 @@ callable that launches every step in order.
 
 A Routine is built from KernelBuilders that are otherwise ordinary - built
 exactly as they would be for a standalone compile, bind()ed against whatever
-Parameters and Helpers the step needs. What is different is that a Routine's
-steps do not each keep their own bindings forever: at compile() time, every
-step is rebound (see compile.py, CompileBuilder.rebind) against the one bag the
-whole Routine shares, so a Parameter reached under a given name means the same
-object in every step that reaches it. check_handles (bag.py) is run across
-every step's own bindings, as authored, before that rebind happens - so a
+Parameters and Helpers the step needs. Optionally, a Routine's steps need not
+each keep their own bindings forever: if bind_bag() is called, every step is
+rebound at compile() time (see compile.py, CompileBuilder.rebind) against the
+one bag the whole Routine shares, so a Parameter reached under a given name
+means the same object in every step that reaches it. A step whose every
+dependency is already wired through Need (need.py) at construction time never
+needs this at all - see bind_bag()'s and _validate's own docstrings.
+check_handles (bag.py) is always run across every step's own bindings, as
+authored, whether or not bind_bag() was called - so a
 step built against one object under a name another step expects to mean
 something else is caught at compile time, even though rebind would otherwise
 silently make both agree with whatever the routine's bag holds.
+
+RoutineBuilder.bind(bag) is a second, additive way to reach a step's own
+bindings, unrelated to bind_bag()/rebind() above: rather than requiring `bag`
+to be a complete superset of every step's current bindings, it fans `bag` out
+to each step's kernel_builder.bind(bag) (compile.py) and lets each one fill
+in whichever of its own *declared* Needs (need.py) match `bag` by member
+name, leaving the rest - and every step whose kernel_builder declares no
+matching Need - untouched. See RoutineBuilder.bind's own docstring for why
+this needs no check_handles-equivalent guard the way bind_bag()/rebind() do.
 
 Bulk data - the buffers each step reads and writes - is handled separately
 from the bag. add_data(name, handle) gives a buffer a routine-local name;
@@ -536,9 +548,52 @@ class RoutineBuilder(ABC):
         """
         Set the one bag every step is rebound against at compile time.
 
+        Optional: a Routine built from steps whose dependencies are already
+        fully wired through Need (need.py) at construction time never needs
+        this call at all - compile() no longer requires a bag to have been
+        set (see _validate). Still the only way to reach for the older,
+        all-or-nothing rebind() contract when that is actually wanted (e.g.
+        SequenceBuilder._validate uses it to propagate its own outer bag
+        into every inner RoutineBuilder it compiles).
+
         Author: B.G (07/2026)
         """
         self._bag = bag
+        return self
+
+    def bind(self, bag: "Bag") -> "RoutineBuilder":
+        """
+        Fan `bag` out to every step added so far, via each step's own
+        kernel_builder.bind(bag) (compile.py) - so any step whose
+        kernel_builder declares a Need matching one of `bag`'s members by
+        name gets it bound, and every other step is left exactly as it was.
+
+        This is the whole-routine counterpart to bind_bag()/rebind(), built
+        on the same Need-matching primitive rather than on that method's
+        require-a-complete-superset contract: a Need already bound (on any
+        step) is simply skipped, a step declaring no matching Need is
+        untouched, and a `bag` member matching no step's Need is ignored -
+        see CompileBuilder.bind()'s docstring for the full reasoning,
+        including why no check_handles (bag.py)-style cross-step guard is
+        needed here. "Every step's declared Needs collectively" is exactly
+        what this fan-out reaches: call it again, with a different bag, to
+        fill in Needs left unmet by an earlier call - two calls accumulate,
+        they do not replace one another.
+
+        Operates on whatever steps add_kernel has appended by the time this
+        is called; a step added afterwards is unaffected by a bind() already
+        made - call bind() again (or before compile(), when call order
+        relative to add_kernel doesn't matter) to reach it too.
+
+        Unrelated to bind_bag(), which sets the separate bag every step is
+        later rebound against wholesale in _validate()/compile() - both may
+        be used on the same builder; bind() only ever touches steps' own
+        Need-declaring kernel_builders, never `self._bag`.
+
+        Author: B.G (08/2026)
+        """
+        for step in self._steps:
+            step.kernel_builder.bind(bag)
         return self
 
     @abstractmethod
@@ -570,9 +625,22 @@ class RoutineBuilder(ABC):
         In order: check_handles (bag.py) runs across every step's own
         bindings, as authored - so two steps disagreeing about what one
         handle means is caught here, before rebind would otherwise silently
-        make both agree with the routine's bag. Each step is then rebound
-        against the bag set by bind_bag(); a step whose current bindings the
-        bag cannot satisfy raises naming that step and everything missing.
+        make both agree with the routine's bag. If a bag was set via
+        bind_bag(), each step is then rebound against it; a step whose
+        current bindings the bag cannot satisfy raises naming that step and
+        everything missing. With no bag set, this rebind step is skipped
+        outright rather than raising - a step built with every dependency
+        wired through Need (need.py) at construction time never needed a
+        bag to begin with, and a step that still has a genuinely unmet
+        dependency is caught below regardless, when its own compile() runs
+        and its own _resolve_needs() reports exactly what is missing by
+        name - a strictly more specific error than a blanket "no bag bound"
+        would have been. This is what replaced the old unconditional "a bag
+        must have been bound via bind_bag() first" gate: that gate predates
+        Need and was guarding against a Routine with no context wiring at
+        all reaching a launch with unresolved names; unmet_needs()-driven
+        per-step compile validation already catches that same case, so the
+        gate no longer has anything left to protect against on its own.
         The swap table's net permutation is then checked: every add_swap in
         this routine must compose to the identity, since a Routine is called
         and re-called without ever returning to Python to swap buffers
@@ -583,8 +651,6 @@ class RoutineBuilder(ABC):
         """
         if self._recording is not None:
             raise ValueError("compile: a begin_repeat() block is still open - call end_repeat() first")
-        if self._bag is None:
-            raise ValueError("compile: no bag bound - call bind_bag() first")
         if not self._steps:
             raise ValueError("compile: routine has no steps")
 
@@ -594,12 +660,13 @@ class RoutineBuilder(ABC):
             units[label] = _flatten_bindings(step.kernel_builder.bindings)
         check_handles(units)
 
-        for i, step in enumerate(self._steps):
-            try:
-                step.kernel_builder.rebind(self._bag)
-            except KeyError as exc:
-                label = _template_label(step.kernel_builder.template)
-                raise KeyError(f"compile: step {i} ({label!r}) cannot be satisfied by the routine's bag: {exc}") from exc
+        if self._bag is not None:
+            for i, step in enumerate(self._steps):
+                try:
+                    step.kernel_builder.rebind(self._bag)
+                except KeyError as exc:
+                    label = _template_label(step.kernel_builder.template)
+                    raise KeyError(f"compile: step {i} ({label!r}) cannot be satisfied by the routine's bag: {exc}") from exc
 
         drift = {name: target for name, target in self._perm.items() if target != name}
         if drift:

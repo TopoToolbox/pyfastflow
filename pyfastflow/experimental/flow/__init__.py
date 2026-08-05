@@ -649,8 +649,7 @@ def make_depressions(
     ndep_need.bind(depression_counter_p.value)
     ndep_param = ndep_need.value
 
-    bitpack_bag = make_bitpack(backend)
-    bitpack = {"pack": bitpack_bag.pack, "unpack_value": bitpack_bag.unpack_value, "unpack_index": bitpack_bag.unpack_index}
+    bitpack = make_bitpack(backend)
 
     out: dict = {"ndep": ndep_param}
 

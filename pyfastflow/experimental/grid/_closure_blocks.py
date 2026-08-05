@@ -30,7 +30,7 @@ Author: B.G (07/2026)
 
 import functools
 
-from ..core.context.backends import make_helper
+from ..core.context.backends import helper_need, make_helper, param_need
 
 # ---------------------------------------------------------------------------
 # geometry
@@ -423,13 +423,24 @@ def build_helpers(
     boundary,
     nodata,
     outlet,
-    backend_mod,
 ):
     """
     Wire one grid's private blocks and public composites for a closure
     backend (Taichi or Quadrants), picking each block's variant from
     `topology`/`boundary`/`nodata`/`outlet` and binding private blocks into
     public ones by name.
+
+    Every bind below goes through a Need (param_need/helper_need, see
+    backends.py) and every HelperBuilder is constructed with
+    `strict_needs=True` (via `mk`) - the reference conversion the
+    Need-restructuring plan calls for; see need.py/compile.py's module
+    docstrings. `SQRT2` stays a plain, un-Needed bind - a python float has no
+    dtype/mode/identity for a Need to check (see compile.py's `_bind_raw`,
+    "a plain value ... is bound directly even under strict_needs=True").
+    `backend_mod` no longer appears here at all: `_BK`, the one thing this
+    file used it for (row_dist/col_dist's `_BK.abs`/`_BK.min`), is now
+    auto-injected into every closure template - see _closure_backend.py's
+    module docstring.
 
     Returns {public_name: HelperBuilder}, meant to be merged straight into
     the Bag make_grid() returns.
@@ -441,90 +452,138 @@ def build_helpers(
     sqrt2 = math.sqrt(2.0)
     d8 = topology == "D8"
 
-    mk = functools.partial(make_helper, HelperCls)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
 
-    row = mk(_row_tmpl, NX=nx_p)
-    col = mk(_col_tmpl, NX=nx_p)
-    index = mk(_index_tmpl, NX=nx_p)
+    row = mk(_row_tmpl, NX=param_need("NX", nx_p))
+    col = mk(_col_tmpl, NX=param_need("NX", nx_p))
+    index = mk(_index_tmpl, NX=param_need("NX", nx_p))
 
     delta = mk(_delta_d8_tmpl if d8 else _delta_d4_tmpl)
 
-    row_wrap = mk(_row_wrap_periodic_tmpl if boundary == "periodic_NS" else _row_wrap_identity_tmpl, NY=ny_p)
-    col_wrap = mk(_col_wrap_periodic_tmpl if boundary == "periodic_EW" else _col_wrap_identity_tmpl, NX=nx_p)
-    wrap = mk(_wrap_tmpl, _ROWWRAP=row_wrap, _COLWRAP=col_wrap)
+    row_wrap = mk(
+        _row_wrap_periodic_tmpl if boundary == "periodic_NS" else _row_wrap_identity_tmpl,
+        NY=param_need("NY", ny_p),
+    )
+    col_wrap = mk(
+        _col_wrap_periodic_tmpl if boundary == "periodic_EW" else _col_wrap_identity_tmpl,
+        NX=param_need("NX", nx_p),
+    )
+    wrap = mk(_wrap_tmpl, _ROWWRAP=helper_need("_ROWWRAP", row_wrap), _COLWRAP=helper_need("_COLWRAP", col_wrap))
 
     row_edge_ok = mk(
-        _row_edge_ok_periodic_tmpl if boundary == "periodic_NS" else _row_edge_ok_bounded_tmpl, NY=ny_p
+        _row_edge_ok_periodic_tmpl if boundary == "periodic_NS" else _row_edge_ok_bounded_tmpl,
+        NY=param_need("NY", ny_p),
     )
     col_edge_ok = mk(
-        _col_edge_ok_periodic_tmpl if boundary == "periodic_EW" else _col_edge_ok_bounded_tmpl, NX=nx_p
+        _col_edge_ok_periodic_tmpl if boundary == "periodic_EW" else _col_edge_ok_bounded_tmpl,
+        NX=param_need("NX", nx_p),
     )
 
-    source_ok = mk(_source_ok_nodata_tmpl, NODATA_MASK=nodata_mask_p) if nodata else mk(_source_ok_always_tmpl)
+    source_ok = (
+        mk(_source_ok_nodata_tmpl, NODATA_MASK=param_need("NODATA_MASK", nodata_mask_p))
+        if nodata
+        else mk(_source_ok_always_tmpl)
+    )
 
     move_allowed = mk(
         _move_allowed_tmpl,
-        _ROW=row,
-        _COL=col,
-        _DELTA=delta,
-        _ROWEDGEOK=row_edge_ok,
-        _COLEDGEOK=col_edge_ok,
-        _SOURCEOK=source_ok,
+        _ROW=helper_need("_ROW", row),
+        _COL=helper_need("_COL", col),
+        _DELTA=helper_need("_DELTA", delta),
+        _ROWEDGEOK=helper_need("_ROWEDGEOK", row_edge_ok),
+        _COLEDGEOK=helper_need("_COLEDGEOK", col_edge_ok),
+        _SOURCEOK=helper_need("_SOURCEOK", source_ok),
     )
 
-    valid_binds = {"NX": nx_p, "NY": ny_p}
+    valid_binds = {"NX": param_need("NX", nx_p), "NY": param_need("NY", ny_p)}
     if nodata:
-        valid_binds["NODATA_MASK"] = nodata_mask_p
+        valid_binds["NODATA_MASK"] = param_need("NODATA_MASK", nodata_mask_p)
     valid = mk(_valid_nodata_tmpl if nodata else _valid_no_nodata_tmpl, **valid_binds)
 
-    neighbour_raw = mk(_neighbour_raw_tmpl, _ROW=row, _COL=col, _DELTA=delta, _WRAP=wrap, _INDEX=index)
-    neighbour = mk(_neighbour_tmpl, _MOVEALLOWED=move_allowed, _NEIGHBOURRAW=neighbour_raw, _VALID=valid)
+    neighbour_raw = mk(
+        _neighbour_raw_tmpl,
+        _ROW=helper_need("_ROW", row),
+        _COL=helper_need("_COL", col),
+        _DELTA=helper_need("_DELTA", delta),
+        _WRAP=helper_need("_WRAP", wrap),
+        _INDEX=helper_need("_INDEX", index),
+    )
+    neighbour = mk(
+        _neighbour_tmpl,
+        _MOVEALLOWED=helper_need("_MOVEALLOWED", move_allowed),
+        _NEIGHBOURRAW=helper_need("_NEIGHBOURRAW", neighbour_raw),
+        _VALID=helper_need("_VALID", valid),
+    )
 
-    is_active = mk(_is_active_mask_tmpl, NODATA_MASK=nodata_mask_p) if nodata else mk(_is_active_always_tmpl)
-    nodata_fn = mk(_nodata_tmpl, _ISACTIVE=is_active)
+    is_active = (
+        mk(_is_active_mask_tmpl, NODATA_MASK=param_need("NODATA_MASK", nodata_mask_p))
+        if nodata
+        else mk(_is_active_always_tmpl)
+    )
+    nodata_fn = mk(_nodata_tmpl, _ISACTIVE=helper_need("_ISACTIVE", is_active))
 
     row_is_edge = mk(
-        _row_is_edge_periodic_tmpl if boundary == "periodic_NS" else _row_is_edge_active_tmpl, NY=ny_p
+        _row_is_edge_periodic_tmpl if boundary == "periodic_NS" else _row_is_edge_active_tmpl,
+        NY=param_need("NY", ny_p),
     )
     col_is_edge = mk(
-        _col_is_edge_periodic_tmpl if boundary == "periodic_EW" else _col_is_edge_active_tmpl, NX=nx_p
+        _col_is_edge_periodic_tmpl if boundary == "periodic_EW" else _col_is_edge_active_tmpl,
+        NX=param_need("NX", nx_p),
     )
-    is_on_edge = mk(_is_on_edge_tmpl, _ROW=row, _COL=col, _ROWISEDGE=row_is_edge, _COLISEDGE=col_is_edge)
+    is_on_edge = mk(
+        _is_on_edge_tmpl,
+        _ROW=helper_need("_ROW", row),
+        _COL=helper_need("_COL", col),
+        _ROWISEDGE=helper_need("_ROWISEDGE", row_is_edge),
+        _COLISEDGE=helper_need("_COLISEDGE", col_is_edge),
+    )
 
     row_edge_code = mk(
-        _row_edge_code_periodic_tmpl if boundary == "periodic_NS" else _row_edge_code_active_tmpl, NY=ny_p
+        _row_edge_code_periodic_tmpl if boundary == "periodic_NS" else _row_edge_code_active_tmpl,
+        NY=param_need("NY", ny_p),
     )
     col_edge_code = mk(
-        _col_edge_code_periodic_tmpl if boundary == "periodic_EW" else _col_edge_code_active_tmpl, NX=nx_p
+        _col_edge_code_periodic_tmpl if boundary == "periodic_EW" else _col_edge_code_active_tmpl,
+        NX=param_need("NX", nx_p),
     )
     which_edge = mk(
-        _which_edge_tmpl, _ROW=row, _COL=col, _ROWEDGECODE=row_edge_code, _COLEDGECODE=col_edge_code
+        _which_edge_tmpl,
+        _ROW=helper_need("_ROW", row),
+        _COL=helper_need("_COL", col),
+        _ROWEDGECODE=helper_need("_ROWEDGECODE", row_edge_code),
+        _COLEDGECODE=helper_need("_COLEDGECODE", col_edge_code),
     )
 
     if outlet == "mask":
-        can_out = mk(_can_out_mask_tmpl, OUTLET_MASK=outlet_mask_p)
+        can_out = mk(_can_out_mask_tmpl, OUTLET_MASK=param_need("OUTLET_MASK", outlet_mask_p))
     else:
-        can_out = mk(_can_out_edge_tmpl, _ISONEDGE=is_on_edge)
+        can_out = mk(_can_out_edge_tmpl, _ISONEDGE=helper_need("_ISONEDGE", is_on_edge))
 
-    dist_from_k = mk(_dist_from_k_d8_tmpl if d8 else _dist_from_k_d4_tmpl, DX=dx_p, SQRT2=sqrt2)
+    dist_from_k = mk(_dist_from_k_d8_tmpl if d8 else _dist_from_k_d4_tmpl, DX=param_need("DX", dx_p), SQRT2=sqrt2)
 
     row_dist = mk(
-        _row_dist_periodic_tmpl if boundary == "periodic_NS" else _row_dist_normal_tmpl, NY=ny_p, _BK=backend_mod
+        _row_dist_periodic_tmpl if boundary == "periodic_NS" else _row_dist_normal_tmpl,
+        NY=param_need("NY", ny_p),
     )
     col_dist = mk(
-        _col_dist_periodic_tmpl if boundary == "periodic_EW" else _col_dist_normal_tmpl, NX=nx_p, _BK=backend_mod
+        _col_dist_periodic_tmpl if boundary == "periodic_EW" else _col_dist_normal_tmpl,
+        NX=param_need("NX", nx_p),
     )
     dist_between = mk(
         _dist_between_d8_tmpl if d8 else _dist_between_d4_tmpl,
-        _ROW=row,
-        _COL=col,
-        _ROWDIST=row_dist,
-        _COLDIST=col_dist,
-        DX=dx_p,
+        _ROW=helper_need("_ROW", row),
+        _COL=helper_need("_COL", col),
+        _ROWDIST=helper_need("_ROWDIST", row_dist),
+        _COLDIST=helper_need("_COLDIST", col_dist),
+        DX=param_need("DX", dx_p),
         SQRT2=sqrt2,
     )
 
-    neighbour_and_distance = mk(_neighbour_and_distance_tmpl, _NEIGHBOUR=neighbour, _DISTFROMK=dist_from_k)
+    neighbour_and_distance = mk(
+        _neighbour_and_distance_tmpl,
+        _NEIGHBOUR=helper_need("_NEIGHBOUR", neighbour),
+        _DISTFROMK=helper_need("_DISTFROMK", dist_from_k),
+    )
 
     return {
         "neighbour": neighbour,

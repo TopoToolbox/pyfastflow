@@ -18,14 +18,17 @@ Row/column come from the bound grid Bag (GRID.nx/GRID.ny read through
 the grid's geometry is in and never carries its own copy of nx/ny.
 
 `_BK` is the backend module (taichi or quadrants) - both expose the same
-cast/u32/i32/f32/floor surface, which is all these blocks need.
+cast/u32/i32/f32/floor surface, which is all these blocks need. It is never
+bound explicitly here - every closure HelperBuilder/KernelBuilder auto-
+injects its own `_BK` (see _closure_backend.py's module docstring).
 
 Author: B.G (07/2026)
 """
 
 import functools
 
-from ..core.context.backends import make_helper
+from ..core.context.backends import bag_need, helper_need, make_helper, param_need
+from ..core.context.need import Kind, Need
 
 # ---------------------------------------------------------------------------
 # shared: flat index -> row / column, off the bound grid bag
@@ -159,7 +162,34 @@ def _at_perlin_tmpl(i):
     return out
 
 
-def build_hash_u32(HelperCls, backend_mod):
+def _grid_nx_need(name: str, grid) -> Need:
+    """
+    A `Need(name, kind=Kind.BAG)` bound to `grid`, requiring only the `nx`
+    member row/col actually read (`GRID.nx.get(0)`).
+
+    Author: B.G (08/2026)
+    """
+    return bag_need(name, grid, contains=[Need("nx", kind=Kind.PARAM, dtype=grid.nx.dtype, modes={grid.nx.mode})])
+
+
+def _grid_nx_ny_need(name: str, grid) -> Need:
+    """
+    A `Need(name, kind=Kind.BAG)` bound to `grid`, requiring the `nx`/`ny`
+    members `_at_perlin_tmpl` actually reads.
+
+    Author: B.G (08/2026)
+    """
+    return bag_need(
+        name,
+        grid,
+        contains=[
+            Need("nx", kind=Kind.PARAM, dtype=grid.nx.dtype, modes={grid.nx.mode}),
+            Need("ny", kind=Kind.PARAM, dtype=grid.ny.dtype, modes={grid.ny.mode}),
+        ],
+    )
+
+
+def build_hash_u32(HelperCls):
     """
     The standalone hash_u32(x) HelperBuilder - no Parameters, so it can be
     built without a grid, a pool, or any of make_noise's other config. Used
@@ -167,10 +197,14 @@ def build_hash_u32(HelperCls, backend_mod):
     which callers outside make_noise (e.g. flow's rand_unit) reach when they
     want the same integer hash without building a whole noise Bag.
 
+    `strict_needs=True`: the reference conversion the Need-restructuring plan
+    calls for (see grid/_closure_blocks.py's build_helpers). `_BK` needs no
+    bind at all here - see the module docstring's note on auto-injection.
+
     Author: B.G (07/2026)
     """
-    mk = functools.partial(make_helper, HelperCls)
-    return mk(_hash_u32_tmpl, _BK=backend_mod)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
+    return mk(_hash_u32_tmpl)
 
 
 def build_helpers(
@@ -185,12 +219,21 @@ def build_helpers(
     frequency_y_p,
     octaves_p,
     persistence_p,
-    backend_mod,
 ):
     """
     Wire one noise bag's private blocks and its public `at` for a closure
     backend (Taichi or Quadrants), picking the white or Perlin chain from
     `kind` and binding private blocks into public ones by name.
+
+    Every bind below goes through a Need (param_need/helper_need/bag_need,
+    see backends.py) and every HelperBuilder is constructed with
+    `strict_needs=True` (via `mk`) - mirrors grid/_closure_blocks.py's own
+    conversion. `GRID=grid` - a whole Bag bound under one name, read by
+    dotted path (`GRID.nx.get(0)`) - is the first real use of `Kind.BAG`
+    (need.py): see _grid_nx_need/_grid_nx_ny_need, one contract per bind site
+    since row/col only ever read `nx` while Perlin's `at` also reads `ny`.
+    `backend_mod`/`_BK` no longer appears here at all - see build_hash_u32's
+    docstring and _closure_backend.py's module docstring on auto-injection.
 
     Returns {public_name: HelperBuilder}, meant to be merged straight into
     the Bag make_noise() returns. The parameters not used by the chosen
@@ -199,36 +242,47 @@ def build_helpers(
     Author: B.G (07/2026)
     """
 
-    mk = functools.partial(make_helper, HelperCls)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
 
-    row = mk(_row_tmpl, GRID=grid)
-    col = mk(_col_tmpl, GRID=grid)
+    row = mk(_row_tmpl, GRID=_grid_nx_need("GRID", grid))
+    col = mk(_col_tmpl, GRID=_grid_nx_need("GRID", grid))
     # Built unconditionally (not just for kind="white") - hash_u32 is also a
     # public bag member, reused by callers outside make_noise (e.g. flow's
     # rand_unit) that want the same integer hash without pulling in the rest
     # of the white-noise chain.
-    hash_u32 = build_hash_u32(HelperCls, backend_mod)
+    hash_u32 = build_hash_u32(HelperCls)
 
     if kind == "white":
-        white_unit = mk(_white_unit_tmpl, _ROW=row, _COL=col, _HASH=hash_u32, SEED=seed_p, _BK=backend_mod)
-        at = mk(_at_white_tmpl, _WHITEUNIT=white_unit, AMP=amplitude_p)
+        white_unit = mk(
+            _white_unit_tmpl,
+            _ROW=helper_need("_ROW", row),
+            _COL=helper_need("_COL", col),
+            _HASH=helper_need("_HASH", hash_u32),
+            SEED=param_need("SEED", seed_p),
+        )
+        at = mk(_at_white_tmpl, _WHITEUNIT=helper_need("_WHITEUNIT", white_unit), AMP=param_need("AMP", amplitude_p))
         return {"at": at, "white_unit": white_unit, "hash_u32": hash_u32}
 
     fade = mk(_fade_tmpl)
     lerp = mk(_lerp_tmpl)
     grad = mk(_grad_tmpl)
-    perlin_at = mk(_perlin_at_tmpl, _FADE=fade, _LERP=lerp, _GRAD=grad, PERM=perm_p, _BK=backend_mod)
+    perlin_at = mk(
+        _perlin_at_tmpl,
+        _FADE=helper_need("_FADE", fade),
+        _LERP=helper_need("_LERP", lerp),
+        _GRAD=helper_need("_GRAD", grad),
+        PERM=param_need("PERM", perm_p),
+    )
     at = mk(
         _at_perlin_tmpl,
-        _ROW=row,
-        _COL=col,
-        _PERLINAT=perlin_at,
-        GRID=grid,
-        FX=frequency_x_p,
-        FY=frequency_y_p,
-        OCTAVES=octaves_p,
-        PERSISTENCE=persistence_p,
-        AMP=amplitude_p,
-        _BK=backend_mod,
+        _ROW=helper_need("_ROW", row),
+        _COL=helper_need("_COL", col),
+        _PERLINAT=helper_need("_PERLINAT", perlin_at),
+        GRID=_grid_nx_ny_need("GRID", grid),
+        FX=param_need("FX", frequency_x_p),
+        FY=param_need("FY", frequency_y_p),
+        OCTAVES=param_need("OCTAVES", octaves_p),
+        PERSISTENCE=param_need("PERSISTENCE", persistence_p),
+        AMP=param_need("AMP", amplitude_p),
     )
     return {"at": at, "perlin_at": perlin_at, "hash_u32": hash_u32}

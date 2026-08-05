@@ -17,24 +17,44 @@ Only the abstract builders live here; the concrete Taichi*, Quadrants* and
 Cupy* ones sit alongside in their own modules. See parameter.py's module docstring
 for what the whole scheme is for.
 
-CompileBuilder._bind_raw()/._bind_bag_raw() are the actual binding
-implementation, for a factory's own internal, same-breath wiring - build a
-Parameter, bind it into a template two lines later, done. `.bind()`/
-`.bind_bag()` are older aliases to the same methods, predating Need (need.py)
-and kept working for the many existing call sites across grid/, noise/, ops/
-and flow/ that already use those names; not the names to prefer in new code.
-Need is the contract for the other shape - a caller in a different module
-builds an object and hands it to a factory that binds it at a distance; see
-need.py's module docstring.
+CompileBuilder._bind_raw() is the actual binding implementation, for a
+factory's own internal, same-breath wiring - build a Parameter, bind it into
+a template two lines later, done. `.bind(name, obj)` is the older alias to
+this same method, predating Need (need.py) and kept working for the many
+existing call sites across grid/, noise/, ops/ and flow/ that already use
+that name; not the name to prefer in new code. Need is the contract for the
+other shape - a caller in a different module builds an object and hands it
+to a factory that binds it at a distance; see need.py's module docstring.
+
+CompileBuilder's own `bind_bag()`/`_bind_bag_raw()` - binding every member of
+a Bag flat, under its own name, in one call - had no real callers left once
+every factory's internal wiring went through Need (see the `bind(bag)`
+paragraph below) and were removed; `rebind()`, below, is the one piece of
+that older all-or-nothing mechanism still in real use, by
+RoutineBuilder/SequenceBuilder (routine.py/sequence.py).
 
 `CompileBuilder(strict_needs=True)` makes that contract mandatory rather than
 optional: `_bind_raw`/`bind` then refuse a name with no `.need()`-declared
 Need and forward to that Need's own `.bind()` instead of writing into
-`_bindings` unchecked - see `_bind_raw`'s docstring. This includes
-`Kind.BAG` (need.py) for a name bound to a whole Bag rather than a single
-Parameter/HelperBuilder. It is opt-in per builder instance, off by default,
-so a builder that has not been converted to declare its Needs keeps today's
-permissive behaviour with zero change.
+`_bindings` unchecked - see `_bind_raw`'s docstring. This applies to a
+Parameter, a HelperBuilder or a Bag (`Kind.BAG`, need.py, for a name bound to
+a whole Bag rather than one object) - the shapes Need has an actual contract
+for - and not to a plain value (a float, the backend module, ...), which
+strict_needs still binds directly since there is nothing there for a Need to
+check. It is opt-in per builder instance, off by default, so a builder that
+has not been converted to declare its Needs keeps today's permissive
+behaviour with zero change.
+
+`bind(bag)` - a lone Bag, no name - is a different thing again, and unrelated
+to strict_needs: it matches `bag`'s members against this builder's own
+*declared* Needs (`.need()`) by name, binding whichever are still unbound
+through each Need's own `.bind()`, and silently ignoring both a `bag` member
+that names no declared Need and a declared Need with no matching member -
+left unbound, reported later by unmet_needs() exactly like any other missing
+Need. This is what replaces rebind()'s old all-or-nothing contract
+(`bindings ⊆ bag, or raise`) with an incremental, Need-driven one; see
+`bind()`'s own docstring for the full reasoning, including why no
+check_handles-style guard is needed here.
 
 Author: B.G (07/2026)
 """
@@ -329,12 +349,12 @@ class CompileBuilder(ABC):
     what each one is (Parameter, Helper, Bag, handle, plain value) is worked
     out when the template is specialized, so binding accepts anything.
 
-    _bind_raw()/_bind_bag_raw() are the real binding implementation and the
-    names to reach for in new code, for a factory's own internal, same-breath
-    wiring. bind()/bind_bag() are older aliases to the same two methods,
-    predating Need (need.py) and kept working unchanged for the many existing
-    call sites that already use them - not the names to prefer first when
-    writing something new. Neither pair is deprecated; both work identically.
+    _bind_raw() is the real binding implementation and the name to reach for
+    in new code, for a factory's own internal, same-breath wiring. bind(name,
+    obj) is the older alias to it, predating Need (need.py) and kept working
+    unchanged for the many existing call sites that already use it - not the
+    name to prefer first when writing something new. Not deprecated; both
+    work identically.
 
     The builder stays authoritative for the recipe throughout its life:
     `template` and `bindings` below are a read-only view onto the same state
@@ -349,9 +369,10 @@ class CompileBuilder(ABC):
     Everything here is backend-independent. A backend supplies compile(), and
     may override ingest() if its templates need different handling.
 
-    `strict_needs=True` (default False) makes every bind()/bind_bag() call on
-    this instance require a pre-declared `.need()` for that name - see
-    _bind_raw's docstring and the module docstring's paragraph on it.
+    `strict_needs=True` (default False) makes every bind() call on this
+    instance binding a Parameter, HelperBuilder or Bag require a
+    pre-declared `.need()` for that name - see _bind_raw's docstring and the
+    module docstring's paragraph on it.
 
     Author: B.G (07/2026)
     """
@@ -359,7 +380,6 @@ class CompileBuilder(ABC):
     def __init__(self, *needs: Need, strict_needs: bool = False):
         self._uid = new_uid()
         self._bindings: dict[str, Any] = {}
-        self._bag_names: set[str] = set()
         self._template = None
         self._needs: dict[str, Need] = {}
         self._strict_needs = strict_needs
@@ -389,7 +409,7 @@ class CompileBuilder(ABC):
     def bindings(self) -> dict[str, Any]:
         """
         The current name -> object bindings, in bind() order. Read-only - go
-        through bind() / bind_bag() to change them. This is a live view onto
+        through bind() to change them. This is a live view onto
         the builder's own dict, not a snapshot - the builder stays
         authoritative for its recipe (see the class docstring).
 
@@ -410,84 +430,119 @@ class CompileBuilder(ABC):
         method - see its own docstring.
 
         Binding a name a second time replaces what it pointed to - handy for
-        editing a builder in place before recompiling. The one case this
-        refuses is rebinding a name that arrived through bind_bag()/
-        _bind_bag_raw(): which bag member is meant is ambiguous once the bag
-        itself may have changed, so this raises instead of guessing.
+        editing a builder in place before recompiling.
 
-        With `strict_needs=True` (see __init__), `name` must already have a
-        Need declared for it via `.need()` - `_bind_raw` then forwards `obj`
-        to that Need's own `.bind()` (its kind/dtype/mode - or, for
-        kind=BAG, its member contract - check runs there) before recording it
-        here exactly as the permissive path does. This is the enforcement
-        the Need-restructuring plan calls for; it is opt-in per builder
-        instance so builders that have not been converted keep today's
-        permissive behaviour unchanged (see the module docstring).
+        With `strict_needs=True` (see __init__), and only when `obj` is a
+        Parameter, a HelperBuilder or a Bag - the three (four, counting
+        nested Bags under kind=BAG) shapes Need actually has a contract for -
+        `name` must already have a Need declared for it via `.need()`. Two
+        shapes of declared Need are both legal here, and are told apart by
+        whether the Need is already bound: an *unbound* Need is bound now,
+        to `obj`, via its own `.bind()` (its kind/dtype/mode - or, for
+        kind=BAG, its member contract - check runs there) - the "declare
+        first, bind through the builder second" sequence. An *already-bound*
+        Need - e.g. one built by backends.py's param_need()/helper_need(),
+        which bind it at construction, meant to be handed straight to
+        `.need()` and then `.bind(name, that_need.value)` in the same couple
+        of lines (see make_helper) - is not bound again (a kind=PARAM/HELPER/
+        BAG Need raises on a second bind, by design - see Need.bind); instead
+        `obj` must be identically the Need's own already-bound `.value`, or
+        this raises naming the mismatch. Either way `obj` is then recorded
+        here exactly as the permissive path does.
+
+        A plain value with no dtype/mode/identity to validate (a python
+        float, the backend module, a dict of strings) is bound directly even
+        under strict_needs=True - Need has no kind for "opaque value" and
+        was never meant to gain one (see need.py's module docstring and the
+        boundary settled for it: device call-time arguments are never Needs
+        or bindings at all, and a bound *value* with no structure to check
+        stays exactly that, a value - only Parameters/HelperBuilders/Bags,
+        which Need can actually say something about, are required to go
+        through one). This is the enforcement the Need-restructuring plan
+        calls for; it is opt-in per builder instance so builders that have
+        not been converted keep today's permissive behaviour unchanged (see
+        the module docstring).
 
         Author: B.G (08/2026)
         """
-        if name in self._bag_names:
-            raise KeyError(f"'{name}' was bound via bind_bag() and cannot be rebound directly")
-        if self._strict_needs:
+        if self._strict_needs and isinstance(obj, (Parameter, HelperBuilder, Bag)):
             need = self._needs.get(name)
             if need is None:
                 raise KeyError(
                     f"'{name}' has no Need declared on this builder (strict_needs=True) - "
                     f"call .need(Need({name!r}, kind=...)) before .bind()"
                 )
-            need.bind(obj)
+            if need.is_bound:
+                if need.value is not obj:
+                    raise ValueError(
+                        f"'{name}': bind() object does not match the already-bound Need's own "
+                        f"value - a pre-bound Need (e.g. from param_need()/helper_need()) must be "
+                        f"bound to exactly what is then passed to .bind(name, ...)"
+                    )
+            else:
+                need.bind(obj)
         self._bindings[name] = obj
         return self
 
-    def bind(self, name: str, obj: Any) -> "CompileBuilder":
+    def bind(self, name, obj: Any = None) -> "CompileBuilder":
         """
-        Alias for _bind_raw() - see its docstring for what this actually
-        does. Predates Need (need.py) and is kept working for the many
-        existing call sites that already use this name across grid/, noise/,
-        ops/ and flow/; still correct for internal, same-breath wiring, but
-        not the name to prefer when writing something new - call
-        _bind_raw()/_bind_bag_raw() directly instead, and reach for a Need
-        when what is being bound was constructed by a caller in a different
-        module and consumed only later.
+        Two forms.
+
+        bind(name, obj) - the original, two-argument form: alias for
+        _bind_raw() - see its docstring for what this actually does. Predates
+        Need (need.py) and is kept working for the many existing call sites
+        that already use this name across grid/, noise/, ops/ and flow/;
+        still correct for internal, same-breath wiring, but not the name to
+        prefer when writing something new - call _bind_raw() directly
+        instead, and reach for a Need when what is being bound was
+        constructed by a caller in a different module and consumed only
+        later.
+
+        bind(bag) - `name` given alone as a Bag, `obj` omitted: matches
+        `bag`'s members against this builder's own *declared* Needs
+        (`.need()`) by name, binding whichever are currently unbound through
+        each Need's own `.bind()` (dtype/mode/contains checked there, same as
+        any other Need bind - see need.py). A declared Need with no matching
+        member in `bag` is simply left unbound - reported later by
+        unmet_needs()/compile() exactly like any other still-missing Need,
+        not an error here. A member of `bag` matching no declared Need is
+        likewise ignored, not an error. kind=DATA needs are never touched by
+        this form: a DATA Need is never a compile-time binding (need.py).
+
+        Call this more than once, with different bags, to fill in a
+        builder's Needs incrementally - a Need already bound (by an earlier
+        bind(bag) call, or by an ordinary bind(name, obj)/`.need()`-then-
+        `.bind()`) is simply skipped on a later call, never rebound. This is
+        also why no check_handles (bag.py)-style cross-check runs here the
+        way rebind() needs one at the RoutineBuilder/Sequence layer:
+        check_handles exists to catch a *name* silently coming to mean two
+        different objects across units once rebind's blind replacement is
+        applied. A Need can never do that - kind=PARAM/HELPER/BAG needs are
+        frozen after their one bind (need.py) and raise immediately on a
+        second, conflicting bind - so the failure mode check_handles guards
+        against cannot arise through this path; two Needs sharing a name are,
+        by construction, either the same slot (one object, bound once) or two
+        independent slots that never interact.
 
         Author: B.G (08/2026)
         """
+        if isinstance(name, Bag) and obj is None:
+            return self._bind_needs_from_bag(name)
         return self._bind_raw(name, obj)
 
-    def _bind_bag_raw(self, bag: "Bag") -> "CompileBuilder":
+    def _bind_needs_from_bag(self, bag: "Bag") -> "CompileBuilder":
         """
-        Bind every member of `bag` at top level under its own name (flat), for
-        when a kernel refers to members directly rather than via a bag path.
-
-        See _bind_raw()'s docstring: same standing as that method, and the
-        name to reach for in new code. `bind_bag()` is the older alias.
-
-        With `strict_needs=True`, no special handling lives here: each member
-        is registered through the very same `_bind_raw(name, item)` call this
-        method already makes, so each one independently requires its own
-        pre-declared Need under that member's name - the same rule as any
-        other strict `_bind_raw` call, applied once per member. This is
-        deliberately different from binding a whole Bag under one name via
-        `_bind_raw("grid", some_bag)`, which wants a single kind=BAG Need
-        declared under `"grid"` instead (see need.py's module docstring) -
-        `_bind_bag_raw` never produces that shape, it only ever produces flat,
-        per-member bindings, so a kind=BAG Need is never what it consults.
+        The bind(bag) primitive - see bind()'s own docstring for the exact
+        semantics. Not an alias of anything; this is the real implementation.
 
         Author: B.G (08/2026)
         """
-        for name, item in bag.items():
-            self._bind_raw(name, item)
-            self._bag_names.add(name)
+        for need in self._needs.values():
+            if need.kind is Kind.DATA or need.is_bound:
+                continue
+            if need.name in bag:
+                need.bind(bag[need.name])
         return self
-
-    def bind_bag(self, bag: "Bag") -> "CompileBuilder":
-        """
-        Alias for _bind_bag_raw() - see its docstring and _bind_raw()'s for
-        what this actually does and why it still exists unchanged.
-
-        Author: B.G (08/2026)
-        """
-        return self._bind_bag_raw(bag)
 
     def need(self, *needs: Need) -> "CompileBuilder":
         """
@@ -604,12 +659,11 @@ class CompileBuilder(ABC):
         template reaching it by dotted path needs the same shape on the
         other end.
 
-        This replaces bindings regardless of how they arrived, including
-        names bound via bind_bag() - superseding those is the point, so it
-        does not go through bind() and does not hit its bag-name raise.
-        Which names came from bind_bag() is unchanged by this call: rebind
-        swaps values, not the origin bookkeeping that governs future bind()
-        calls.
+        This replaces bindings regardless of how they arrived - it does not
+        go through bind() at all, so none of bind()'s own checks (e.g.
+        strict_needs) run here; rebind swaps values, nothing else. Called by
+        RoutineBuilder/SequenceBuilder (routine.py/sequence.py) to fold their
+        own shared bag into each step/block's builder.
 
         Author: B.G (07/2026)
         """

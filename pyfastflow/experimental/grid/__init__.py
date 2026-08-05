@@ -20,6 +20,14 @@ when nodata=True, outlet_mask (u8, 1 == outlet) when outlet=="mask". Neither
 exists in the bag when its feature is off, so a caller that never asked for
 nodata/mask-outlet never sees them.
 
+_closure_blocks.py/_cupy_blocks.py's own internal wiring - every private
+block bound into a public composite helper - goes through a Need (need.py)
+now, with every HelperBuilder built `strict_needs=True` (compile.py): the
+first factory converted, per the Need-restructuring plan. This is internal
+only - make_grid's own signature and the returned Bag's member names/types
+are unchanged, and nothing outside grid/ (noise/ops/flow, all still
+permissive) needs to change to keep calling make_grid.
+
 Author: B.G (07/2026)
 """
 
@@ -155,7 +163,6 @@ def make_grid(
         boundary=boundary,
         nodata=nodata,
         outlet=outlet,
-        backend_mod=backend_mod,
     )
 
     items = {"nx": nx_p, "ny": ny_p, "dx": dx_p, "n_neighbours": n_neighbours_p}

@@ -25,7 +25,7 @@ Author: B.G (07/2026)
 import functools
 import math
 
-from ..core.context.backends import make_helper
+from ..core.context.backends import helper_need, make_helper, param_need
 from ..core.pool.base import new_uid
 
 
@@ -41,7 +41,6 @@ def build_helpers(
     boundary,
     nodata,
     outlet,
-    backend_mod=None,
 ):
     """
     Wire one grid's private blocks and public composites for the cupy
@@ -50,11 +49,15 @@ def build_helpers(
     public ones by name (a bound name resolves to the real emitted C symbol
     at span-expansion time - see cupy_backend.py's _SpanParser).
 
+    Every bind below goes through a Need (param_need/helper_need, see
+    backends.py) and every HelperBuilder is constructed with
+    `strict_needs=True` (via `mk`) - mirrors _closure_blocks.py's own
+    conversion; see its build_helpers docstring. `SQRT2`-equivalent values
+    here are baked straight into the CUDA source text (`{sqrt2}f`) rather
+    than bound at all, so there is nothing to convert for them.
+
     Returns {public_name: HelperBuilder}, meant to be merged straight into
-    the Bag make_grid() returns. `backend_mod` is accepted for signature
-    parity with the closure backend's build_helpers and unused here - cupy
-    templates call plain C (abs, ternaries) rather than a bound backend
-    module.
+    the Bag make_grid() returns.
 
     Author: B.G (07/2026)
     """
@@ -62,19 +65,19 @@ def build_helpers(
     d8 = topology == "D8"
     sqrt2 = math.sqrt(2.0)
 
-    mk = functools.partial(make_helper, HelperCls)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
 
     row = mk(
         f"__device__ int {t}_row(int i) {{ return i / $NX.get(0)$; }}",
-        NX=nx_p,
+        NX=param_need("NX", nx_p),
     )
     col = mk(
         f"__device__ int {t}_col(int i) {{ return i % $NX.get(0)$; }}",
-        NX=nx_p,
+        NX=param_need("NX", nx_p),
     )
     index = mk(
         f"__device__ int {t}_index(int row, int col) {{ return row * $NX.get(0)$ + col; }}",
-        NX=nx_p,
+        NX=param_need("NX", nx_p),
     )
 
     if d8:
@@ -112,7 +115,7 @@ __device__ int {t}_row_wrap(int row) {{
     return r;
 }}
 """,
-            NY=ny_p,
+            NY=param_need("NY", ny_p),
         )
     )
     col_wrap = (
@@ -127,7 +130,7 @@ __device__ int {t}_col_wrap(int col) {{
     return c;
 }}
 """,
-            NX=nx_p,
+            NX=param_need("NX", nx_p),
         )
     )
     wrap = mk(
@@ -137,8 +140,8 @@ __device__ void {t}_wrap(int row, int col, int* wrow, int* wcol) {{
     *wcol = $col_wrap(col)$;
 }}
 """,
-        row_wrap=row_wrap,
-        col_wrap=col_wrap,
+        row_wrap=helper_need("row_wrap", row_wrap),
+        col_wrap=helper_need("col_wrap", col_wrap),
     )
 
     row_edge_ok = (
@@ -146,7 +149,7 @@ __device__ void {t}_wrap(int row, int col, int* wrow, int* wcol) {{
         if boundary == "periodic_NS"
         else mk(
             f"__device__ int {t}_row_edge_ok(int row) {{ return (row >= 0 && row < $NY.get(0)$) ? 1 : 0; }}",
-            NY=ny_p,
+            NY=param_need("NY", ny_p),
         )
     )
     col_edge_ok = (
@@ -154,14 +157,14 @@ __device__ void {t}_wrap(int row, int col, int* wrow, int* wcol) {{
         if boundary == "periodic_EW"
         else mk(
             f"__device__ int {t}_col_edge_ok(int col) {{ return (col >= 0 && col < $NX.get(0)$) ? 1 : 0; }}",
-            NX=nx_p,
+            NX=param_need("NX", nx_p),
         )
     )
 
     source_ok = (
         mk(
             f"__device__ int {t}_source_ok(int i) {{ return ($NODATA_MASK.get(i)$ == 1) ? 0 : 1; }}",
-            NODATA_MASK=nodata_mask_p,
+            NODATA_MASK=param_need("NODATA_MASK", nodata_mask_p),
         )
         if nodata
         else mk(f"__device__ int {t}_source_ok(int i) {{ return 1; }}")
@@ -180,17 +183,17 @@ __device__ int {t}_move_allowed(int i, int k) {{
     return a * b * c;
 }}
 """,
-        row=row,
-        col=col,
-        delta=delta,
-        row_edge_ok=row_edge_ok,
-        col_edge_ok=col_edge_ok,
-        source_ok=source_ok,
+        row=helper_need("row", row),
+        col=helper_need("col", col),
+        delta=helper_need("delta", delta),
+        row_edge_ok=helper_need("row_edge_ok", row_edge_ok),
+        col_edge_ok=helper_need("col_edge_ok", col_edge_ok),
+        source_ok=helper_need("source_ok", source_ok),
     )
 
-    valid_binds = {"NX": nx_p, "NY": ny_p}
+    valid_binds = {"NX": param_need("NX", nx_p), "NY": param_need("NY", ny_p)}
     if nodata:
-        valid_binds["NODATA_MASK"] = nodata_mask_p
+        valid_binds["NODATA_MASK"] = param_need("NODATA_MASK", nodata_mask_p)
         valid = mk(
             f"""
 __device__ int {t}_valid(int j) {{
@@ -218,11 +221,11 @@ __device__ int {t}_neighbour_raw(int i, int k) {{
     return $index(wrow, wcol)$;
 }}
 """,
-        row=row,
-        col=col,
-        delta=delta,
-        wrap=wrap,
-        index=index,
+        row=helper_need("row", row),
+        col=helper_need("col", col),
+        delta=helper_need("delta", delta),
+        wrap=helper_need("wrap", wrap),
+        index=helper_need("index", index),
     )
 
     neighbour = mk(
@@ -236,22 +239,22 @@ __device__ int {t}_neighbour(int i, int k) {{
     return j;
 }}
 """,
-        move_allowed=move_allowed,
-        neighbour_raw=neighbour_raw,
-        valid=valid,
+        move_allowed=helper_need("move_allowed", move_allowed),
+        neighbour_raw=helper_need("neighbour_raw", neighbour_raw),
+        valid=helper_need("valid", valid),
     )
 
     is_active = (
         mk(
             f"__device__ int {t}_is_active(int i) {{ return ($NODATA_MASK.get(i)$ == 1) ? 0 : 1; }}",
-            NODATA_MASK=nodata_mask_p,
+            NODATA_MASK=param_need("NODATA_MASK", nodata_mask_p),
         )
         if nodata
         else mk(f"__device__ int {t}_is_active(int i) {{ return 1; }}")
     )
     nodata_fn = mk(
         f"__device__ int {t}_nodata(int i) {{ return 1 - $is_active(i)$; }}",
-        is_active=is_active,
+        is_active=helper_need("is_active", is_active),
     )
 
     row_is_edge = (
@@ -259,7 +262,7 @@ __device__ int {t}_neighbour(int i, int k) {{
         if boundary == "periodic_NS"
         else mk(
             f"__device__ int {t}_row_is_edge(int row) {{ return (row == 0 || row == $NY.get(0)$ - 1) ? 1 : 0; }}",
-            NY=ny_p,
+            NY=param_need("NY", ny_p),
         )
     )
     col_is_edge = (
@@ -267,7 +270,7 @@ __device__ int {t}_neighbour(int i, int k) {{
         if boundary == "periodic_EW"
         else mk(
             f"__device__ int {t}_col_is_edge(int col) {{ return (col == 0 || col == $NX.get(0)$ - 1) ? 1 : 0; }}",
-            NX=nx_p,
+            NX=param_need("NX", nx_p),
         )
     )
     is_on_edge = mk(
@@ -278,10 +281,10 @@ __device__ int {t}_is_on_edge(int i) {{
     return ($row_is_edge(row)$ == 1 || $col_is_edge(col)$ == 1) ? 1 : 0;
 }}
 """,
-        row=row,
-        col=col,
-        row_is_edge=row_is_edge,
-        col_is_edge=col_is_edge,
+        row=helper_need("row", row),
+        col=helper_need("col", col),
+        row_is_edge=helper_need("row_is_edge", row_is_edge),
+        col_is_edge=helper_need("col_is_edge", col_is_edge),
     )
 
     row_edge_code = (
@@ -295,7 +298,7 @@ __device__ int {t}_row_edge_code(int row) {{
     return -1;
 }}
 """,
-            NY=ny_p,
+            NY=param_need("NY", ny_p),
         )
     )
     col_edge_code = (
@@ -309,7 +312,7 @@ __device__ int {t}_col_edge_code(int col) {{
     return -1;
 }}
 """,
-            NX=nx_p,
+            NX=param_need("NX", nx_p),
         )
     )
     which_edge = mk(
@@ -322,21 +325,21 @@ __device__ int {t}_which_edge(int i) {{
     return code;
 }}
 """,
-        row=row,
-        col=col,
-        row_edge_code=row_edge_code,
-        col_edge_code=col_edge_code,
+        row=helper_need("row", row),
+        col=helper_need("col", col),
+        row_edge_code=helper_need("row_edge_code", row_edge_code),
+        col_edge_code=helper_need("col_edge_code", col_edge_code),
     )
 
     if outlet == "mask":
         can_out = mk(
             f"__device__ int {t}_can_out(int i) {{ return ($OUTLET_MASK.get(i)$ == 1) ? 1 : 0; }}",
-            OUTLET_MASK=outlet_mask_p,
+            OUTLET_MASK=param_need("OUTLET_MASK", outlet_mask_p),
         )
     else:
         can_out = mk(
             f"__device__ int {t}_can_out(int i) {{ return $is_on_edge(i)$; }}",
-            is_on_edge=is_on_edge,
+            is_on_edge=helper_need("is_on_edge", is_on_edge),
         )
 
     if d8:
@@ -348,12 +351,12 @@ __device__ float {t}_dist_from_k(int k) {{
     return d;
 }}
 """,
-            DX=dx_p,
+            DX=param_need("DX", dx_p),
         )
     else:
         dist_from_k = mk(
             f"__device__ float {t}_dist_from_k(int k) {{ return $DX.get(0)$; }}",
-            DX=dx_p,
+            DX=param_need("DX", dx_p),
         )
 
     row_dist = (
@@ -367,7 +370,7 @@ __device__ int {t}_row_dist(int raw) {{
     return d < (n - d) ? d : (n - d);
 }}
 """,
-            NY=ny_p,
+            NY=param_need("NY", ny_p),
         )
     )
     col_dist = (
@@ -381,7 +384,7 @@ __device__ int {t}_col_dist(int raw) {{
     return d < (n - d) ? d : (n - d);
 }}
 """,
-            NX=nx_p,
+            NX=param_need("NX", nx_p),
         )
     )
 
@@ -403,11 +406,11 @@ __device__ float {t}_dist_between(int i, int j) {{
     return out;
 }}
 """,
-        row=row,
-        col=col,
-        row_dist=row_dist,
-        col_dist=col_dist,
-        DX=dx_p,
+        row=helper_need("row", row),
+        col=helper_need("col", col),
+        row_dist=helper_need("row_dist", row_dist),
+        col_dist=helper_need("col_dist", col_dist),
+        DX=param_need("DX", dx_p),
     )
 
     neighbour_and_distance = mk(
@@ -420,8 +423,8 @@ __device__ void {t}_neighbour_and_distance(int i, int k, int* j_out, float* d_ou
     *d_out = d;
 }}
 """,
-        neighbour=neighbour,
-        dist_from_k=dist_from_k,
+        neighbour=helper_need("neighbour", neighbour),
+        dist_from_k=helper_need("dist_from_k", dist_from_k),
     )
 
     return {

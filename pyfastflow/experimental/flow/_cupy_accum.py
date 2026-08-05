@@ -16,7 +16,7 @@ backend's fused-vs-split() choice.
 Author: B.G (07/2026)
 """
 
-from ..core.context.bag import Bag
+from ..core.context.backends import helper_need
 from ..core.context.need import Kind, Need
 from ..core.pool.base import new_uid
 
@@ -39,7 +39,7 @@ def build_ping_pong_helpers(HelperCls, *, iteration_need: Need):
     t = f"pp{new_uid()}"
     iter_need = Need("ITER", kind=Kind.PARAM, dtype=iteration_need.dtype, modes=iteration_need.modes)
     iter_need.bind(iteration_need.value)
-    get_src = HelperCls().need(iter_need).ingest(
+    get_src = HelperCls(strict_needs=True).need(iter_need).ingest(
         f"""
 __device__ int {t}_get_src(const int* src, int tid) {{
     int entry = src[tid];
@@ -50,7 +50,7 @@ __device__ int {t}_get_src(const int* src, int tid) {{
 }}
 """
     )
-    update_src = HelperCls().need(iter_need).ingest(
+    update_src = HelperCls(strict_needs=True).need(iter_need).ingest(
         f"""
 __device__ void {t}_update_src(int* src, int tid, int flip) {{
     int it = $ITER.get(0)$;
@@ -75,14 +75,14 @@ def build_atomic(KernelCls, *, source: Need, n_flat: int):
     `source` is the caller's already-bound `Need("source", kind=Kind.PARAM)`
     (see make_accumulation) - a fresh, internally-named `Need("source", ...)`
     is bound here to the same underlying Parameter and declared on both
-    KernelBuilders via `.need()`.
+    KernelBuilders via `.need()`. `strict_needs=True` on both.
 
     Author: B.G (07/2026)
     """
     t = f"pa{new_uid()}"
     source_need = Need("source", kind=Kind.PARAM, dtype=source.dtype, modes=source.modes)
     source_need.bind(source.value)
-    q_init = KernelCls().need(source_need).ingest(
+    q_init = KernelCls(strict_needs=True).need(source_need).ingest(
         f"""
 __global__ void {t}_q_init(float* q) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -101,7 +101,7 @@ __global__ void {t}_q_init(float* q) {{
     # n_flat=1e6 in _verify_accum.py. Matches legacy
     # accum_downstream_atomic_kernel and the closure-backend port, which
     # both re-read the weight function/Parameter directly for this reason.
-    accum = KernelCls().need(source_need).ingest(
+    accum = KernelCls(strict_needs=True).need(source_need).ingest(
         f"""
 __global__ void {t}_accum_downstream_atomic(const int* rec, float* q) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -149,6 +149,12 @@ def build_rake_compress(
     `Need("ITER", ...)`, matching what these templates' bodies actually
     reference, are bound here to the same underlying Parameters and declared
     on every KernelBuilder/HelperBuilder that needs them via `.need()`.
+    Every KernelBuilder/HelperBuilder is constructed strict_needs=True;
+    `_GETSRC`/`_UPDATESRC` go through helper_need. The returned RoutineBuilder
+    is never given a bind_bag() bag: every step's own dependencies are
+    already fully resolved via Need by the time it is built, so there is
+    nothing left for a routine-level bag to supply (see routine.py,
+    RoutineBuilder._validate).
 
     Author: B.G (07/2026)
     """
@@ -164,7 +170,7 @@ def build_rake_compress(
     get_src, update_src = build_ping_pong_helpers(HelperCls, iteration_need=iteration_p)
     t = f"pr{new_uid()}"
 
-    zero_init = KernelCls().ingest(
+    zero_init = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_zero_init(int* ndonors, int* ndonors_alt, int* src) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -175,14 +181,14 @@ __global__ void {t}_zero_init(int* ndonors, int* ndonors_alt, int* src) {{
 }}
 """
     )
-    reset_iteration = KernelCls().need(iter_need).ingest(
+    reset_iteration = KernelCls(strict_needs=True).need(iter_need).ingest(
         f"""
 __global__ void {t}_reset_iteration() {{
     $ITER.set_node(0, 0)$;
 }}
 """
     )
-    bump_iteration = KernelCls().need(iter_need).ingest(
+    bump_iteration = KernelCls(strict_needs=True).need(iter_need).ingest(
         f"""
 __global__ void {t}_bump_iteration() {{
     int cur = $ITER.get(0)$;
@@ -190,7 +196,7 @@ __global__ void {t}_bump_iteration() {{
 }}
 """
     )
-    decrement_iteration = KernelCls().need(iter_need).ingest(
+    decrement_iteration = KernelCls(strict_needs=True).need(iter_need).ingest(
         f"""
 __global__ void {t}_decrement_iteration() {{
     int cur = $ITER.get(0)$;
@@ -198,7 +204,7 @@ __global__ void {t}_decrement_iteration() {{
 }}
 """
     )
-    q_init = KernelCls().need(source_need).ingest(
+    q_init = KernelCls(strict_needs=True).need(source_need).ingest(
         f"""
 __global__ void {t}_q_init(float* q) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -207,7 +213,7 @@ __global__ void {t}_q_init(float* q) {{
 }}
 """
     )
-    receivers_to_donors = KernelCls().ingest(
+    receivers_to_donors = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_receivers_to_donors(const int* rec, int* donors, int* ndonors) {{
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -220,10 +226,14 @@ __global__ void {t}_receivers_to_donors(const int* rec, int* donors, int* ndonor
 }}
 """
     )
+    getsrc_need = helper_need("_GETSRC", get_src)
+    updatesrc_need = helper_need("_UPDATESRC", update_src)
     rake_compress_accum = (
-        KernelCls()
-        .bind("_GETSRC", get_src)
-        .bind("_UPDATESRC", update_src)
+        KernelCls(strict_needs=True)
+        .need(getsrc_need)
+        .bind("_GETSRC", getsrc_need.value)
+        .need(updatesrc_need)
+        .bind("_UPDATESRC", updatesrc_need.value)
         .ingest(
             f"""
 __global__ void {t}_rake_compress_accum(int* donors, int* ndonors, float* q, int* src,
@@ -292,7 +302,8 @@ __global__ void {t}_rake_compress_accum(int* donors, int* ndonors, float* q, int
 """
         )
     )
-    fuse_accum_buffers = KernelCls().bind("_GETSRC", get_src).ingest(
+    fuse_accum_buffers = (
+        KernelCls(strict_needs=True).need(helper_need("_GETSRC", get_src)).bind("_GETSRC", get_src).ingest(
         f"""
 __global__ void {t}_fuse_accum_buffers(float* q, int* src, float* q_alt) {{
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -302,6 +313,7 @@ __global__ void {t}_fuse_accum_buffers(float* q, int* src, float* q_alt) {{
     }}
 }}
 """
+        )
     )
 
     kernels = {
@@ -316,10 +328,11 @@ __global__ void {t}_fuse_accum_buffers(float* q, int* src, float* q_alt) {{
     }
 
     rb = RoutineBuilderCls(grid=default_grid, block=default_block)
-    # "ITER"/"source" are absent here on purpose: they arrive via .need(),
-    # resolved directly by each step's own compile() rather than through this
-    # bag - see need.py/compile.py's CompileBuilder._resolve_needs.
-    rb.bind_bag(Bag({"_GETSRC": get_src, "_UPDATESRC": update_src}))
+    # No bind_bag() call: "_GETSRC"/"_UPDATESRC" are bound to
+    # rake_compress_accum/fuse_accum_buffers' own already-bound helper_need
+    # at construction time; "ITER"/"source" arrive via .need() alone,
+    # resolved directly by each step's own compile() - nothing left for a
+    # routine-level bag to supply (see routine.py, RoutineBuilder._validate).
     for name in ("rec", "q", "donors", "ndonors", "donors_alt", "ndonors_alt", "q_alt", "src"):
         rb.add_data(name, None)
 
@@ -358,7 +371,7 @@ def build_pointer_jump_push(
     `source` is the caller's already-bound `Need("source", kind=Kind.PARAM)`
     (see make_accumulation) - a fresh, internally-named `Need("source", ...)`
     is bound here to the same underlying Parameter and declared on q_init via
-    `.need()`.
+    `.need()`. Every KernelBuilder is constructed strict_needs=True.
 
     Author: B.G (07/2026)
     """
@@ -369,7 +382,7 @@ def build_pointer_jump_push(
     source_need = Need("source", kind=Kind.PARAM, dtype=source.dtype, modes=source.modes)
     source_need.bind(source.value)
 
-    q_init = KernelCls().need(source_need).ingest(
+    q_init = KernelCls(strict_needs=True).need(source_need).ingest(
         f"""
 __global__ void {t}_q_init(float* q) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -378,7 +391,7 @@ __global__ void {t}_q_init(float* q) {{
 }}
 """
     )
-    copy_rec_to_work = KernelCls().ingest(
+    copy_rec_to_work = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_copy_rec_to_work(const int* rec, int* work) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -395,7 +408,7 @@ __global__ void {t}_copy_rec_to_work(const int* rec, int* work) {{
     # copy into q_next has landed everywhere before any push into it, the
     # same guarantee two consecutive top-level for-loops in one Taichi/
     # Quadrants kernel give for free (see _closure_accum.py's equivalent).
-    step_copy = KernelCls().ingest(
+    step_copy = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_step_copy(const float* q_curr, float* q_next) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -404,7 +417,7 @@ __global__ void {t}_step_copy(const float* q_curr, float* q_next) {{
 }}
 """
     )
-    step_core = KernelCls().ingest(
+    step_core = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_step_core(const int* rec_curr, int* rec_next, const float* q_curr, float* q_next) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -431,8 +444,9 @@ __global__ void {t}_step_core(const int* rec_curr, int* rec_next, const float* q
     }
 
     rb = RoutineBuilderCls(grid=default_grid, block=default_block)
-    # "source" is absent here on purpose - see build_rake_compress above.
-    rb.bind_bag(Bag({}))
+    # No bind_bag() call: "source" arrives via .need() alone, resolved
+    # directly by q_init's own compile(); no step here binds anything else -
+    # see build_rake_compress's own equivalent note above.
     for name in ("rec", "work", "work2", "q", "q_work"):
         rb.add_data(name, None)
 

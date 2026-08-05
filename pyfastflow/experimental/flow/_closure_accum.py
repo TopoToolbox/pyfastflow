@@ -25,7 +25,7 @@ mutually-dependent passes in one hand-written kernel.
 Author: B.G (07/2026)
 """
 
-from ..core.context.bag import Bag
+from ..core.context.backends import helper_need
 from ..core.context.need import Kind, Need
 from ._closure_shared import _tensor_annotation
 
@@ -60,14 +60,15 @@ def build_ping_pong_helpers(HelperCls, *, iteration_need: Need):
     kind=Kind.PARAM)` (see make_accumulation) - a fresh, internally-named
     `Need("_ITER", ...)`, matching what these templates' bodies actually
     reference, is bound here to the same underlying Parameter and declared
-    on both helpers via `.need()`.
+    on both helpers via `.need()`. `strict_needs=True` on both, mirroring
+    every other converted HelperBuilder in this module.
 
     Author: B.G (07/2026)
     """
     iter_need = Need("_ITER", kind=Kind.PARAM, dtype=iteration_need.dtype, modes=iteration_need.modes)
     iter_need.bind(iteration_need.value)
-    get_src = HelperCls().need(iter_need).ingest(_get_src_tmpl)
-    update_src = HelperCls().need(iter_need).ingest(_update_src_tmpl)
+    get_src = HelperCls(strict_needs=True).need(iter_need).ingest(_get_src_tmpl)
+    update_src = HelperCls(strict_needs=True).need(iter_need).ingest(_update_src_tmpl)
     return get_src, update_src
 
 
@@ -84,7 +85,8 @@ def build_atomic(KernelCls, *, backend, backend_mod, source: Need, n_flat: int):
     (see make_accumulation) - a fresh, internally-named `Need("_SOURCE", ...)`,
     matching this template's own `_SOURCE.get(i)` references, is bound here
     to the same underlying Parameter and declared on the KernelBuilder via
-    `.need()`.
+    `.need()`. `strict_needs=True`. `_BK` needs no bind at all - auto-
+    injected (see core/context/_closure_backend.py's module docstring).
 
     Author: B.G (07/2026)
     """
@@ -109,7 +111,7 @@ def build_atomic(KernelCls, *, backend, backend_mod, source: Need, n_flat: int):
                 guard += 1
             _BK.atomic_add(q[j], wi)
 
-    return KernelCls().need(source_need).bind("_BK", backend_mod).ingest(accum_downstream_atomic_template)
+    return KernelCls(strict_needs=True).need(source_need).ingest(accum_downstream_atomic_template)
 
 
 def build_rake_compress(
@@ -144,6 +146,14 @@ def build_rake_compress(
     `Need("_ITER", ...)`, matching what these templates' bodies actually
     reference, are bound here to the same underlying Parameters and declared
     on every KernelBuilder/HelperBuilder that needs them via `.need()`.
+    Every KernelBuilder/HelperBuilder built here is constructed with
+    `strict_needs=True`; `_GETSRC`/`_UPDATESRC` (HelperBuilders, from
+    build_ping_pong_helpers) go through helper_need. `_BK` needs no bind at
+    all - auto-injected (see core/context/_closure_backend.py's module
+    docstring). The returned RoutineBuilder is never given a bind_bag() bag:
+    every step's own dependencies are already fully resolved via Need by the
+    time it is built, so there is nothing left for a routine-level bag to
+    supply (see routine.py, RoutineBuilder._validate).
 
     Returns (routine_builder, kernel_builders_dict). The routine is
     uncompiled and its data names are placeholders (add_data(name, None)) -
@@ -247,21 +257,29 @@ def build_rake_compress(
             if _GETSRC(src, tid):
                 q[tid] = q_alt[tid]
 
-    zero_init = KernelCls().ingest(zero_init_template)
-    reset_iteration = KernelCls().need(iter_need).ingest(reset_iteration_template)
-    bump_iteration = KernelCls().need(iter_need).ingest(bump_iteration_template)
-    decrement_iteration = KernelCls().need(iter_need).ingest(decrement_iteration_template)
-    q_init = KernelCls().need(source_need).ingest(q_init_template)
-    receivers_to_donors = KernelCls().bind("_BK", backend_mod).ingest(receivers_to_donors_template)
+    zero_init = KernelCls(strict_needs=True).ingest(zero_init_template)
+    reset_iteration = KernelCls(strict_needs=True).need(iter_need).ingest(reset_iteration_template)
+    bump_iteration = KernelCls(strict_needs=True).need(iter_need).ingest(bump_iteration_template)
+    decrement_iteration = KernelCls(strict_needs=True).need(iter_need).ingest(decrement_iteration_template)
+    q_init = KernelCls(strict_needs=True).need(source_need).ingest(q_init_template)
+    receivers_to_donors = KernelCls(strict_needs=True).ingest(receivers_to_donors_template)
+    getsrc_need = helper_need("_GETSRC", get_src)
+    updatesrc_need = helper_need("_UPDATESRC", update_src)
     rake_compress_accum = (
-        KernelCls()
-        .bind("_BK", backend_mod)
-        .bind("_GETSRC", get_src)
-        .bind("_UPDATESRC", update_src)
+        KernelCls(strict_needs=True)
+        .need(getsrc_need)
+        .bind("_GETSRC", getsrc_need.value)
+        .need(updatesrc_need)
+        .bind("_UPDATESRC", updatesrc_need.value)
         .need(iter_need)
         .ingest(rake_compress_accum_template)
     )
-    fuse_accum_buffers = KernelCls().bind("_GETSRC", get_src).ingest(fuse_accum_buffers_template)
+    fuse_accum_buffers = (
+        KernelCls(strict_needs=True)
+        .need(helper_need("_GETSRC", get_src))
+        .bind("_GETSRC", get_src)
+        .ingest(fuse_accum_buffers_template)
+    )
 
     kernels = {
         "zero_init": zero_init,
@@ -275,22 +293,12 @@ def build_rake_compress(
     }
 
     rb = RoutineBuilderCls()
-    # rebind() (routine.py, RoutineBuilder._validate) re-resolves every name
-    # each step's own KernelBuilder currently binds against this one shared
-    # bag - so every name any step bound via .bind() above must be a member
-    # here too, under the same name. "_ITER"/"_SOURCE" are absent here on
-    # purpose: they arrive via .need(), resolved directly by each step's own
-    # compile() rather than through this bag - see need.py/compile.py's
-    # CompileBuilder._resolve_needs.
-    rb.bind_bag(
-        Bag(
-            {
-                "_BK": backend_mod,
-                "_GETSRC": get_src,
-                "_UPDATESRC": update_src,
-            }
-        )
-    )
+    # No bind_bag() call here: every name any step above binds ("_GETSRC",
+    # "_UPDATESRC" via .bind() on their own already-bound Need; "_ITER",
+    # "_SOURCE" via .need() alone) is already fully resolved at construction
+    # time, and "_BK" is auto-injected (see _closure_backend.py) rather than
+    # ever bound at all - there is nothing left for a routine-level bag to
+    # supply. See routine.py, RoutineBuilder._validate.
     for name in ("rec", "q", "donors", "ndonors", "donors_alt", "ndonors_alt", "q_alt", "src"):
         rb.add_data(name, None)
 
@@ -331,7 +339,8 @@ def build_pointer_jump_push(
     `source` is the caller's already-bound `Need("source", kind=Kind.PARAM)`
     (see make_accumulation) - a fresh, internally-named `Need("_SOURCE", ...)`
     is bound here to the same underlying Parameter and declared on q_init via
-    `.need()`.
+    `.need()`. `strict_needs=True` on every KernelBuilder; `_BK` needs no
+    bind at all - auto-injected.
 
     Retirement rule (kept exactly, not restructured): when a node's parent
     is a sink in the current jumped graph (grandparent == parent), the node
@@ -366,14 +375,16 @@ def build_pointer_jump_push(
                 grandparent = rec_curr[parent]
                 rec_next[i] = i if grandparent == parent else grandparent
 
-    q_init = KernelCls().need(source_need).ingest(q_init_template)
-    copy_rec_to_work = KernelCls().ingest(copy_rec_to_work_template)
-    step = KernelCls().bind("_BK", backend_mod).ingest(accum_pointer_jump_push_step_template)
+    q_init = KernelCls(strict_needs=True).need(source_need).ingest(q_init_template)
+    copy_rec_to_work = KernelCls(strict_needs=True).ingest(copy_rec_to_work_template)
+    step = KernelCls(strict_needs=True).ingest(accum_pointer_jump_push_step_template)
 
     kernels = {"q_init": q_init, "copy_rec_to_work": copy_rec_to_work, "accum_pointer_jump_push_step": step}
 
     rb = RoutineBuilderCls()
-    rb.bind_bag(Bag({"_BK": backend_mod}))
+    # No bind_bag() call here: "_BK" is auto-injected (see
+    # _closure_backend.py) rather than ever bound, and no step below binds
+    # anything else - see build_rake_compress's own equivalent note above.
     for name in ("rec", "work", "work2", "q", "q_work"):
         rb.add_data(name, None)
 

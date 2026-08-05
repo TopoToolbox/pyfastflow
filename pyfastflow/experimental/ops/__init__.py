@@ -43,6 +43,35 @@ internal RoutineBuilder compiled unfused, so every step is its own kernel
 launch and the global barrier each one needs is real, and their own
 atomic-accumulate kernels for reduce - see _closure_blocks.py.
 
+_closure_blocks.py/_cupy_blocks.py's own internal wiring goes through a Need
+(need.py) now, every HelperBuilder/KernelBuilder built `strict_needs=True`
+(compile.py) - the third factory converted, after grid/ and noise/, and the
+first with real KernelBuilder construction of its own (make_kernel,
+make_helper's twin, is exercised here for the first time - see
+backends.py). build_scan_routine's RoutineBuilder is never given a
+bind_bag() bag - none of its KernelBuilders bind anything at all (see
+_closure_blocks.py's build_scan_routine).
+build_bitpack now returns a Bag rather than a plain dict - make_reduce reads
+its own internal use of it (pack/unpack_index) the same way make_bitpack's
+external caller would. Internal only - every factory's own signature and
+every Bag/Scan/Reduce's member names/types are unchanged.
+
+make_scan's/make_reduce's returned Parameters (Scan.count_param,
+Reduce.{sum,min,max,argmin}_param) stay bare, not wrapped in a Need - a
+deliberate decision, not an oversight. Need's contract models a caller
+building an object and handing it to a factory that binds it later at a
+distance (see need.py's module docstring); this is the opposite direction,
+the factory building the object and handing it to a caller who may or may
+not ever bind it anywhere. Wrapping it here would check nothing (there is no
+bind-site yet for a mismatch to be caught at) and would just be a returned
+Need standing in for a returned Parameter with the same information. A
+caller wanting to bind one of these into its own strict_needs=True builder
+already can, today, with no change here: param_need(name, scan.count_param)
+constructs exactly the Need such a builder needs, the same way a caller
+already wraps any other bare Parameter it receives (e.g. grid.nx) - nothing
+about make_scan/make_reduce is different from any other Bag member in this
+respect, Scan/Reduce just are not Bags.
+
 Author: B.G (07/2026)
 """
 
@@ -83,15 +112,15 @@ def make_bitpack(backend: str) -> Bag:
     packed value behaves as a lexicographic argmin over (value, index) - see
     _closure_blocks.build_bitpack / _cupy_blocks.build_bitpack.
 
+    build_bitpack already returns a Bag (both backends) - see its own
+    docstring for why (its result is also threaded internally by
+    make_reduce, not just returned here) - so this returns it directly.
+
     Author: B.G (07/2026)
     """
-    backend_mod, _, HelperCls, _ = backend_classes(backend)
+    _, _, HelperCls, _ = backend_classes(backend)
     blocks = _blocks_for(backend)
-    if backend == "cupy":
-        helpers = blocks.build_bitpack(HelperCls)
-    else:
-        helpers = blocks.build_bitpack(HelperCls, backend_mod)
-    return Bag(helpers)
+    return blocks.build_bitpack(HelperCls)
 
 
 def make_math(backend: str) -> Bag:
@@ -102,12 +131,9 @@ def make_math(backend: str) -> Bag:
 
     Author: B.G (07/2026)
     """
-    backend_mod, _, HelperCls, _ = backend_classes(backend)
+    _, _, HelperCls, _ = backend_classes(backend)
     blocks = _blocks_for(backend)
-    if backend == "cupy":
-        helpers = blocks.build_math(HelperCls)
-    else:
-        helpers = blocks.build_math(HelperCls, backend_mod)
+    helpers = blocks.build_math(HelperCls)
     return Bag(helpers)
 
 
@@ -435,13 +461,13 @@ def make_reduce(backend: str, pool, n: int) -> Reduce:
     # pair that argmin_unpack_kernel resolves into argmin_p's bare index.
     argmin_packed_p = ParamCls("REDUCE_ARGMIN_PACKED", dtype=backend_mod.i64, mode="scalar", value=0, pool=pool)
 
-    bitpack = blocks.build_bitpack(HelperCls, backend_mod)
+    bitpack = blocks.build_bitpack(HelperCls)
     sum_kernel, min_kernel, max_kernel, argmin_kernel, argmin_unpack_kernel = blocks.build_reduce_kernels(
         KernelCls,
         backend,
         backend_mod,
-        bitpack["pack"],
-        bitpack["unpack_index"],
+        bitpack.pack,
+        bitpack.unpack_index,
         sum_p.get().data,
         min_p.get().data,
         max_p.get().data,

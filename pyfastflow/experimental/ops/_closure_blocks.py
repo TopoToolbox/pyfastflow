@@ -19,6 +19,17 @@ annotation, and Taichi/Quadrants spell that differently (`ti.template()` vs
 all: the template factory closes over it as a plain python int, so it is baked
 in without going through bind()/rebind() - see build_scan_routine.
 
+Every bind in this module goes through a Need (param_need/helper_need/
+bag_need, see backends.py) and every HelperBuilder/KernelBuilder is
+constructed strict_needs=True - the first module converted with real
+KernelBuilder use (make_helper's twin, make_kernel, is exercised here for
+the first time). build_scan_routine's RoutineBuilder is never given a
+bind_bag() bag - none of its KernelBuilders bind anything at all (see that
+function's own note); only the KernelBuilders it is built from are
+converted. build_bitpack returns a Bag rather than a plain dict, since its result
+is threaded internally (build_reduce_kernels' pack/unpack_index arguments)
+as well as returned publicly by make_bitpack.
+
 Author: B.G (07/2026)
 """
 
@@ -26,8 +37,9 @@ import functools
 
 import numpy as np
 
-from ..core.context.backends import make_helper
+from ..core.context.backends import bag_need, helper_need, make_helper, make_kernel, param_need
 from ..core.context.bag import Bag
+from ..core.context.need import Kind, Need
 from ..core.context.routine import RoutineBuilder
 
 # ---------------------------------------------------------------------------
@@ -72,22 +84,38 @@ def _unpack_index_tmpl(packed):
     return _BK.bit_cast(i_enc, _BK.i32)
 
 
-def build_bitpack(HelperCls, backend_mod):
+def build_bitpack(HelperCls) -> Bag:
     """
     pack(f, i) -> i64, unpack_value(p) -> f32, unpack_index(p) -> i32: the
     IEEE-754 bit-flip trick that makes an i64 atomic_min double as a
     lexicographic argmin over (float, int).
 
+    Every bind goes through a Need (helper_need, see backends.py) and every
+    HelperBuilder is constructed strict_needs=True - see
+    grid/_closure_blocks.py's build_helpers for the reference conversion.
+    `_BK` needs no bind at all - auto-injected, see
+    core/context/_closure_backend.py's module docstring.
+
+    Returns a Bag, not a plain dict: make_bitpack returns this directly, and
+    make_reduce's own internal reuse of it (build_reduce_kernels' pack_helper/
+    unpack_index_helper arguments, below) reads it the same way, by attribute
+    - the honest type for a named group of HelperBuilders that gets threaded
+    internally as well as handed back to an outside caller.
+
     Author: B.G (07/2026)
     """
-    mk = functools.partial(make_helper, HelperCls)
-    flip = mk(_flip_float_bits_tmpl, _BK=backend_mod)
-    unflip = mk(_unflip_float_bits_tmpl, _BK=backend_mod)
-    pack = mk(_pack_tmpl, _BK=backend_mod, _FLIP=flip)
-    unpack_raw = mk(_unpack_raw_tmpl, _BK=backend_mod)
-    unpack_value = mk(_unpack_value_tmpl, _BK=backend_mod, _UNPACKRAW=unpack_raw, _UNFLIP=unflip)
-    unpack_index = mk(_unpack_index_tmpl, _BK=backend_mod, _UNPACKRAW=unpack_raw)
-    return {"pack": pack, "unpack_value": unpack_value, "unpack_index": unpack_index}
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
+    flip = mk(_flip_float_bits_tmpl)
+    unflip = mk(_unflip_float_bits_tmpl)
+    pack = mk(_pack_tmpl, _FLIP=helper_need("_FLIP", flip))
+    unpack_raw = mk(_unpack_raw_tmpl)
+    unpack_value = mk(
+        _unpack_value_tmpl,
+        _UNPACKRAW=helper_need("_UNPACKRAW", unpack_raw),
+        _UNFLIP=helper_need("_UNFLIP", unflip),
+    )
+    unpack_index = mk(_unpack_index_tmpl, _UNPACKRAW=helper_need("_UNPACKRAW", unpack_raw))
+    return Bag({"pack": pack, "unpack_value": unpack_value, "unpack_index": unpack_index})
 
 
 # ---------------------------------------------------------------------------
@@ -114,16 +142,19 @@ def _nextafter_tmpl(x, y):
     return result
 
 
-def build_math(HelperCls, backend_mod):
+def build_math(HelperCls):
     """
     atan(x) via atan2(x, 1); nextafter(x, y), one ULP of f32 towards y via
     IEEE-754 bit-twiddling (no libm nextafter on GPU).
 
+    `strict_needs=True` for consistency (see build_bitpack); neither template
+    references anything but `_BK`, which needs no bind - auto-injected.
+
     Author: B.G (07/2026)
     """
-    mk = functools.partial(make_helper, HelperCls)
-    atan = mk(_atan_tmpl, _BK=backend_mod)
-    nextafter = mk(_nextafter_tmpl, _BK=backend_mod)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
+    atan = mk(_atan_tmpl)
+    nextafter = mk(_nextafter_tmpl)
     return {"atan": atan, "nextafter": nextafter}
 
 
@@ -149,6 +180,14 @@ def build_elementwise(KernelCls, backend: str, backend_mod):
     multiply_by_scalar over a flat buffer, as unbuilt KernelBuilders - the
     caller's own .compile() specializes each to whatever field/ndarray it is
     first launched against.
+
+    Every KernelBuilder is constructed strict_needs=True (see grid/
+    _closure_blocks.py's build_helpers for the reference conversion) though
+    none of these six actually bind anything - `swap`'s `_BK.grouped(...)`
+    needs no explicit bind either, auto-injected like every other closure
+    template's `_BK`. `backend_mod` stays a plain argument here for
+    `_tensor_annotation` - the one use Stage 1's auto-injection does not
+    cover.
 
     Author: B.G (07/2026)
     """
@@ -181,13 +220,14 @@ def build_elementwise(KernelCls, backend: str, backend_mod):
         for i in A:
             A[i] *= scalar
 
+    mkk = functools.partial(make_kernel, KernelCls, strict_needs=True)
     return {
-        "swap": KernelCls().bind("_BK", backend_mod).ingest(swap_template),
-        "add_B_to_A": KernelCls().ingest(add_B_to_A_template),
-        "add_B_to_weighted_A": KernelCls().ingest(add_B_to_weighted_A_template),
-        "weighted_mean_B_in_A": KernelCls().ingest(weighted_mean_B_in_A_template),
-        "arange": KernelCls().ingest(arange_template),
-        "multiply_by_scalar": KernelCls().ingest(multiply_by_scalar_template),
+        "swap": mkk(swap_template),
+        "add_B_to_A": mkk(add_B_to_A_template),
+        "add_B_to_weighted_A": mkk(add_B_to_weighted_A_template),
+        "weighted_mean_B_in_A": mkk(weighted_mean_B_in_A_template),
+        "arange": mkk(arange_template),
+        "multiply_by_scalar": mkk(multiply_by_scalar_template),
     }
 
 
@@ -222,11 +262,24 @@ def build_slope(HelperCls, grid: Bag):
     surface, so they follow whatever topology/boundary/nodata `grid` was
     built with.
 
+    `_GRID=grid` - a whole Bag bound under one name - goes through a
+    Kind.BAG Need (bag_need, see backends.py), same as noise/_closure_blocks.
+    py's `GRID=grid`; both templates read the same three members, so one
+    `contains` list is built once and reused across the two `bag_need()`
+    calls below (safe - a sub-Need is only ever read via `._check()`, never
+    itself bound, so sharing the list does not risk the "frozen after one
+    bind" issue a top-level Need would have).
+
     Author: B.G (07/2026)
     """
-    mk = functools.partial(make_helper, HelperCls)
-    sumslope_downstream = mk(_sumslope_downstream_tmpl, _GRID=grid)
-    slope_dir = mk(_slope_dir_tmpl, _GRID=grid)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
+    grid_contains = [
+        Need("n_neighbours", kind=Kind.PARAM, dtype=grid.n_neighbours.dtype, modes={grid.n_neighbours.mode}),
+        Need("neighbour", kind=Kind.HELPER),
+        Need("dx", kind=Kind.PARAM, dtype=grid.dx.dtype, modes={grid.dx.mode}),
+    ]
+    sumslope_downstream = mk(_sumslope_downstream_tmpl, _GRID=bag_need("_GRID", grid, contains=grid_contains))
+    slope_dir = mk(_slope_dir_tmpl, _GRID=bag_need("_GRID", grid, contains=grid_contains))
     return {"sumslope_downstream": sumslope_downstream, "slope_dir": slope_dir}
 
 
@@ -346,35 +399,41 @@ def build_scan_routine(RoutineBuilderCls, KernelCls, backend: str, backend_mod, 
     work_h = pool.get_data(dtype, (work_size,))
     scan_out_h = pool.get_data(dtype, (n,))
 
+    # No bind_bag() call: none of the KernelBuilders below bind anything at
+    # all - each step's stride/root-index/n is a plain python int closed
+    # over by the template factories above, never bound as a Parameter (see
+    # this function's own docstring) - so there is nothing for a
+    # routine-level bag to supply (see routine.py, RoutineBuilder._validate).
+    # strict_needs=True is still applied to each KernelBuilder, below, for
+    # consistency with every other converted build_* function.
     rb = RoutineBuilderCls()
-    rb.bind_bag(Bag())
     rb.add_data("scan_in", scan_in_h.data)
     rb.add_data("work", work_h.data)
     rb.add_data("scan_out", scan_out_h.data)
 
-    copy_builder = KernelCls().ingest(_make_copy_input_to_work_template(T, n, work_size))
+    copy_builder = KernelCls(strict_needs=True).ingest(_make_copy_input_to_work_template(T, n, work_size))
     rb.add_kernel(copy_builder, data_handle_ref=("scan_in", "work"))
     rb.split()
 
     stride = 1
     while stride < work_size:
-        up_builder = KernelCls().ingest(_make_upsweep_template(T, work_size, stride))
+        up_builder = KernelCls(strict_needs=True).ingest(_make_upsweep_template(T, work_size, stride))
         rb.add_kernel(up_builder, data_handle_ref=("work",))
         rb.split()
         stride *= 2
 
-    zero_builder = KernelCls().ingest(_make_set_root_zero_template(T, work_size - 1))
+    zero_builder = KernelCls(strict_needs=True).ingest(_make_set_root_zero_template(T, work_size - 1))
     rb.add_kernel(zero_builder, data_handle_ref=("work",))
     rb.split()
 
     stride = work_size // 2
     while stride > 0:
-        down_builder = KernelCls().ingest(_make_downsweep_template(T, work_size, stride))
+        down_builder = KernelCls(strict_needs=True).ingest(_make_downsweep_template(T, work_size, stride))
         rb.add_kernel(down_builder, data_handle_ref=("work",))
         rb.split()
         stride //= 2
 
-    inc_builder = KernelCls().ingest(_make_inclusive_and_copy_template(T, n))
+    inc_builder = KernelCls(strict_needs=True).ingest(_make_inclusive_and_copy_template(T, n))
     rb.add_kernel(inc_builder, data_handle_ref=("scan_in", "work", "scan_out"))
     rb.split()
 
@@ -388,11 +447,15 @@ def build_count_and_scatter_kernels(KernelCls, backend: str, backend_mod, count_
     side, no host sync. scatter(flags, scan_out, ids): for flags[i]==1,
     ids[scan_out[i]-1] = i - the scatter half of scan-based compaction.
 
+    `COUNT=count_param` goes through param_need; strict_needs=True on both -
+    see grid/_closure_blocks.py's build_helpers for the reference conversion.
+
     Author: B.G (07/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
-    read_count = KernelCls().bind("COUNT", count_param).ingest(_make_read_count_template(T, n)).compile()
-    scatter = KernelCls().ingest(_make_scatter_template(T, n)).compile()
+    mkk = functools.partial(make_kernel, KernelCls, strict_needs=True)
+    read_count = mkk(_make_read_count_template(T, n), COUNT=param_need("COUNT", count_param)).compile()
+    scatter = mkk(_make_scatter_template(T, n)).compile()
     return read_count, scatter
 
 
@@ -469,26 +532,32 @@ def build_reduce_kernels(
     encoding a reader would have to know the backend to interpret. The
     packed accumulator stays internal.
 
+    `_PACK`/`_UNPACK_INDEX` (HelperBuilders, from build_bitpack) go through
+    helper_need; strict_needs=True on every kernel here - see
+    grid/_closure_blocks.py's build_helpers for the reference conversion.
+    `_SUM`/`_MIN`/`_MAX`/`_ARGMIN`/`_ARGMIN_OUT` are raw backend fields, not
+    Parameters (bound directly so the backend's own atomic ops apply to them,
+    per this function's own docstring above) - a plain value with no
+    dtype/mode for a Need to check, same category as ops's own `SQRT2`-style
+    binds elsewhere in this package; strict_needs=True binds them unchanged
+    (see compile.py's `_bind_raw`). `_BK` needs no bind at all - auto-injected.
+
     Author: B.G (07/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
-    sum_kernel = KernelCls().bind("_SUM", sum_field).ingest(_make_sum_template(T, n)).compile()
-    min_kernel = KernelCls().bind("_BK", backend_mod).bind("_MIN", min_field).ingest(_make_min_template(T, n)).compile()
-    max_kernel = KernelCls().bind("_BK", backend_mod).bind("_MAX", max_field).ingest(_make_max_template(T, n)).compile()
-    argmin_kernel = (
-        KernelCls()
-        .bind("_BK", backend_mod)
-        .bind("_PACK", pack_helper)
-        .bind("_ARGMIN", argmin_packed_field)
-        .ingest(_make_argmin_template(T, n))
-        .compile()
-    )
-    argmin_unpack_kernel = (
-        KernelCls()
-        .bind("_UNPACK_INDEX", unpack_index_helper)
-        .bind("_ARGMIN", argmin_packed_field)
-        .bind("_ARGMIN_OUT", argmin_field)
-        .ingest(_make_argmin_unpack_template())
-        .compile()
-    )
+    mkk = functools.partial(make_kernel, KernelCls, strict_needs=True)
+    sum_kernel = mkk(_make_sum_template(T, n), _SUM=sum_field).compile()
+    min_kernel = mkk(_make_min_template(T, n), _MIN=min_field).compile()
+    max_kernel = mkk(_make_max_template(T, n), _MAX=max_field).compile()
+    argmin_kernel = mkk(
+        _make_argmin_template(T, n),
+        _PACK=helper_need("_PACK", pack_helper),
+        _ARGMIN=argmin_packed_field,
+    ).compile()
+    argmin_unpack_kernel = mkk(
+        _make_argmin_unpack_template(),
+        _UNPACK_INDEX=helper_need("_UNPACK_INDEX", unpack_index_helper),
+        _ARGMIN=argmin_packed_field,
+        _ARGMIN_OUT=argmin_field,
+    ).compile()
     return sum_kernel, min_kernel, max_kernel, argmin_kernel, argmin_unpack_kernel

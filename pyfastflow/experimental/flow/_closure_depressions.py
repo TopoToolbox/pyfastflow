@@ -12,10 +12,30 @@ Every array here (rec, bid, tag, basin_saddle, outlet, ...) is n_flat-sized,
 basin id = pit index + 1, so a per-basin array is safely indexed by any node
 index too - the same double duty the legacy kernels rely on.
 
+Every KernelBuilder built here is constructed strict_needs=True, every bind
+going through a Need (param_need/helper_need/bag_need, see backends.py) -
+mirrors _closure_receivers.py/_closure_accum.py's own conversions. `grid`
+binds go through bag_need, one `contains` list per site declaring only the
+members that template actually reads (`can_out`, `neighbour`, or both - never
+one blanket "grid" contract). `bitpack` (make_depressions' own argument) is
+the real `Bag` ops.make_bitpack returns (`pack`/`unpack_value`/
+`unpack_index`), not a re-wrapped dict - each site here reaches only the
+member(s) it calls via helper_need, since no single site uses all three.
+`_BK` needs no bind anywhere - auto-injected (see
+core/context/_closure_backend.py's module docstring). No RoutineBuilder built
+here is ever given a bind_bag() bag: every step's own dependencies are
+already fully resolved via Need by the time it is built, so there is nothing
+left for a routine-level bag to supply (see routine.py,
+RoutineBuilder._validate) - a Sequence wrapping one of these routines still
+propagates its own outer bag into it via RoutineBuilder.bind_bag, which is
+harmless since rebind() against it only ever re-resolves names to the exact
+objects they already hold.
+
 Author: B.G (07/2026)
 """
 
-from ..core.context.bag import Bag
+from ..core.context.backends import bag_need, helper_need, make_kernel, param_need
+from ..core.context.need import Kind, Need
 from ._closure_shared import _tensor_annotation
 
 
@@ -26,6 +46,9 @@ def build_copy_field(KernelCls, *, backend, backend_mod):
     (rec -> rec_jump, rec_work -> rec, ...), reused across every routine that
     needs it rather than rebuilt per call site.
 
+    `strict_needs=True`, though nothing here binds anything - see
+    _closure_receivers.py's build_receivers for the reference conversion.
+
     Author: B.G (07/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -34,13 +57,16 @@ def build_copy_field(KernelCls, *, backend, backend_mod):
         for i in src:
             dst[i] = src[i]
 
-    return KernelCls().ingest(copy_field_template)
+    return KernelCls(strict_needs=True).ingest(copy_field_template)
 
 
 def build_basin_id_init(KernelCls, *, backend, backend_mod, grid):
     """
     bid[i] = 0 on a can_out node, i+1 otherwise - the seed for vanilla basin
     labelling's pointer-jump propagation.
+
+    `_GRID=grid` goes through bag_need, declaring only `can_out` - the
+    member this template actually reads. `strict_needs=True`.
 
     Author: B.G (07/2026)
     """
@@ -50,13 +76,16 @@ def build_basin_id_init(KernelCls, *, backend, backend_mod, grid):
         for i in bid:
             bid[i] = 0 if _GRID.can_out(i) else (i + 1)
 
-    return KernelCls().bind("_GRID", grid).ingest(basin_id_init_template)
+    grid_contains = [Need("can_out", kind=Kind.HELPER)]
+    return make_kernel(KernelCls, basin_id_init_template, strict_needs=True, _GRID=bag_need("_GRID", grid, contains=grid_contains))
 
 
 def build_propagate_basin_iter(KernelCls, *, backend, backend_mod):
     """
     One pointer-jump step over `rec_jump`, halving path length to the root
     each call.
+
+    `strict_needs=True`, though nothing here binds anything.
 
     Author: B.G (07/2026)
     """
@@ -67,13 +96,15 @@ def build_propagate_basin_iter(KernelCls, *, backend, backend_mod):
             if rec_jump[i] != rec_jump[rec_jump[i]]:
                 rec_jump[i] = rec_jump[rec_jump[i]]
 
-    return KernelCls().ingest(propagate_basin_iter_template)
+    return KernelCls(strict_needs=True).ingest(propagate_basin_iter_template)
 
 
 def build_propagate_basin_final(KernelCls, *, backend, backend_mod):
     """
     bid[i] = bid[root(i)] - finalizes vanilla basin labelling once
     `rec_jump` has been pointer-jumped down to (near-)roots.
+
+    `strict_needs=True`, though nothing here binds anything.
 
     Author: B.G (07/2026)
     """
@@ -83,7 +114,7 @@ def build_propagate_basin_final(KernelCls, *, backend, backend_mod):
         for i in bid:
             bid[i] = bid[rec_jump[i]]
 
-    return KernelCls().ingest(propagate_basin_final_template)
+    return KernelCls(strict_needs=True).ingest(propagate_basin_final_template)
 
 
 def build_basin_labelling_vanilla(RoutineBuilderCls, KernelCls, *, backend, backend_mod, grid, copy_field, logn: int):
@@ -102,6 +133,9 @@ def build_basin_labelling_vanilla(RoutineBuilderCls, KernelCls, *, backend, back
     Data names (add_data placeholders, positional order of a real call):
     "rec", "bid", "rec_jump".
 
+    The returned RoutineBuilder is never given a bind_bag() bag - see the
+    module docstring.
+
     Author: B.G (07/2026)
     """
     basin_id_init = build_basin_id_init(KernelCls, backend=backend, backend_mod=backend_mod, grid=grid)
@@ -115,7 +149,9 @@ def build_basin_labelling_vanilla(RoutineBuilderCls, KernelCls, *, backend, back
     }
 
     rb = RoutineBuilderCls()
-    rb.bind_bag(Bag({"_GRID": grid}))
+    # No bind_bag() call: "_GRID" is bound to basin_id_init's own already-
+    # bound bag_need at construction time - nothing left for a routine-level
+    # bag to supply (see routine.py, RoutineBuilder._validate).
     for name in ("rec", "bid", "rec_jump"):
         rb.add_data(name, None)
 
@@ -138,6 +174,9 @@ def build_basin_labelling_optimized(KernelCls, *, backend, backend_mod, grid, n_
 
     Data args (rec, rec_jump, bid).
 
+    `_GRID=grid` goes through bag_need, declaring only `can_out`.
+    `strict_needs=True`.
+
     Author: B.G (07/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -155,7 +194,10 @@ def build_basin_labelling_optimized(KernelCls, *, backend, backend_mod, grid, n_
             root = rec_jump[i]
             bid[i] = 0 if _GRID.can_out(root) else root + 1
 
-    return KernelCls().bind("_GRID", grid).ingest(label_basins_walk_template)
+    grid_contains = [Need("can_out", kind=Kind.HELPER)]
+    return make_kernel(
+        KernelCls, label_basins_walk_template, strict_needs=True, _GRID=bag_need("_GRID", grid, contains=grid_contains)
+    )
 
 
 def build_saddlesort(RoutineBuilderCls, KernelCls, *, backend, backend_mod, grid, bitpack):
@@ -166,8 +208,14 @@ def build_saddlesort(RoutineBuilderCls, KernelCls, *, backend, backend_mod, grid
     identification, bitpacked atomic-min outlet search, basin-graph
     2-cycle break. Shared unchanged by both `method`s.
 
-    `bitpack` is the {"pack", "unpack_value", "unpack_index"} dict from
-    ops.make_bitpack, replacing legacy's f32_i32_struct helpers.
+    `bitpack` is the Bag {"pack", "unpack_value", "unpack_index"} from
+    ops.make_bitpack, replacing legacy's f32_i32_struct helpers - each
+    KernelBuilder below reaches only the members it actually calls, via
+    helper_need (not one blanket bag_need contract, since no single site here
+    uses all three). `_GRID=grid` likewise declares, per site, only
+    `can_out`/`neighbour` - whichever this template actually reads.
+    `strict_needs=True` throughout; `_BK` needs no bind at all - auto-
+    injected (see core/context/_closure_backend.py's module docstring).
 
     Returns (routine_builder, kernels_dict) - kernels_dict keys
     "border_zprime", "init_saddle_outlet", "atomic_min_saddle",
@@ -176,13 +224,16 @@ def build_saddlesort(RoutineBuilderCls, KernelCls, *, backend, backend_mod, grid
     Data names: "bid", "z", "z_prime", "is_border", "basin_saddle",
     "basin_saddlenode", "outlet".
 
+    The returned RoutineBuilder is never given a bind_bag() bag - see the
+    module docstring.
+
     Author: B.G (07/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
     NN = grid.n_neighbours.get()
-    pack = bitpack["pack"]
-    unpack_value = bitpack["unpack_value"]
-    unpack_index = bitpack["unpack_index"]
+    pack = bitpack.pack
+    unpack_value = bitpack.unpack_value
+    unpack_index = bitpack.unpack_index
 
     def border_zprime_template(bid: T, z: T, z_prime: T, is_border: T):
         for i in z:
@@ -271,30 +322,39 @@ def build_saddlesort(RoutineBuilderCls, KernelCls, *, backend, backend_mod, grid
                     basin_saddle[bid_d] = invalid_c
                     basin_saddlenode[bid_d] = -1
 
-    border_zprime = KernelCls().bind("_GRID", grid).bind("_BK", backend_mod).ingest(border_zprime_template)
-    init_saddle_outlet = KernelCls().bind("_PACK", pack).ingest(init_saddle_outlet_template)
-    atomic_min_saddle = (
-        KernelCls()
-        .bind("_GRID", grid)
-        .bind("_BK", backend_mod)
-        .bind("_PACK", pack)
-        .ingest(atomic_min_saddle_template)
+    can_out_need = Need("can_out", kind=Kind.HELPER)
+    neighbour_need = Need("neighbour", kind=Kind.HELPER)
+    border_zprime_grid = [can_out_need, neighbour_need]
+    neighbour_only_grid = [neighbour_need]
+
+    border_zprime = make_kernel(
+        KernelCls, border_zprime_template, strict_needs=True,
+        _GRID=bag_need("_GRID", grid, contains=border_zprime_grid),
     )
-    find_saddlenode = (
-        KernelCls()
-        .bind("_GRID", grid)
-        .bind("_UNPACKVALUE", unpack_value)
-        .bind("_UNPACKINDEX", unpack_index)
-        .ingest(find_saddlenode_template)
+    init_saddle_outlet = make_kernel(
+        KernelCls, init_saddle_outlet_template, strict_needs=True, _PACK=helper_need("_PACK", pack)
     )
-    atomic_min_outlet = (
-        KernelCls()
-        .bind("_GRID", grid)
-        .bind("_BK", backend_mod)
-        .bind("_PACK", pack)
-        .ingest(atomic_min_outlet_template)
+    atomic_min_saddle = make_kernel(
+        KernelCls, atomic_min_saddle_template, strict_needs=True,
+        _GRID=bag_need("_GRID", grid, contains=neighbour_only_grid),
+        _PACK=helper_need("_PACK", pack),
     )
-    break_cycle = KernelCls().bind("_PACK", pack).bind("_UNPACKINDEX", unpack_index).ingest(break_cycle_template)
+    find_saddlenode = make_kernel(
+        KernelCls, find_saddlenode_template, strict_needs=True,
+        _GRID=bag_need("_GRID", grid, contains=neighbour_only_grid),
+        _UNPACKVALUE=helper_need("_UNPACKVALUE", unpack_value),
+        _UNPACKINDEX=helper_need("_UNPACKINDEX", unpack_index),
+    )
+    atomic_min_outlet = make_kernel(
+        KernelCls, atomic_min_outlet_template, strict_needs=True,
+        _GRID=bag_need("_GRID", grid, contains=neighbour_only_grid),
+        _PACK=helper_need("_PACK", pack),
+    )
+    break_cycle = make_kernel(
+        KernelCls, break_cycle_template, strict_needs=True,
+        _PACK=helper_need("_PACK", pack),
+        _UNPACKINDEX=helper_need("_UNPACKINDEX", unpack_index),
+    )
 
     kernels = {
         "border_zprime": border_zprime,
@@ -306,17 +366,10 @@ def build_saddlesort(RoutineBuilderCls, KernelCls, *, backend, backend_mod, grid
     }
 
     rb = RoutineBuilderCls()
-    rb.bind_bag(
-        Bag(
-            {
-                "_GRID": grid,
-                "_BK": backend_mod,
-                "_PACK": pack,
-                "_UNPACKVALUE": unpack_value,
-                "_UNPACKINDEX": unpack_index,
-            }
-        )
-    )
+    # No bind_bag() call: "_GRID"/"_PACK"/"_UNPACKVALUE"/"_UNPACKINDEX" are
+    # each bound to their own step's already-bound bag_need/helper_need at
+    # construction time, and "_BK" is auto-injected - nothing left for a
+    # routine-level bag to supply (see routine.py, RoutineBuilder._validate).
     for name in ("bid", "z", "z_prime", "is_border", "basin_saddle", "basin_saddlenode", "outlet"):
         rb.add_data(name, None)
 
@@ -351,11 +404,17 @@ def build_reroute_carve_vanilla(RoutineBuilderCls, KernelCls, *, backend, backen
     Data names: "rec", "rec_work", "rec_jump", "tag", "tag_alt", "bid",
     "basin_saddlenode", "outlet", "rerouted".
 
+    `bitpack` is the Bag from ops.make_bitpack; `finalise_reroute_carve`
+    reaches its `pack`/`unpack_index` members via helper_need, the only site
+    here that needs either. `strict_needs=True` throughout.
+    The returned RoutineBuilder is never given a bind_bag() bag - see the
+    module docstring.
+
     Author: B.G (07/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
-    pack = bitpack["pack"]
-    unpack_index = bitpack["unpack_index"]
+    pack = bitpack.pack
+    unpack_index = bitpack.unpack_index
 
     def init_reroute_carve_template(tag: T, tag_alt: T, saddlenode: T):
         for i in tag:
@@ -394,10 +453,11 @@ def build_reroute_carve_vanilla(RoutineBuilderCls, KernelCls, *, backend, backen
                 rec[saddlenode[i]] = node
                 rerouted[saddlenode[i]] = 1
 
-    init_reroute_carve = KernelCls().ingest(init_reroute_carve_template)
-    iteration_reroute_carve = KernelCls().ingest(iteration_reroute_carve_template)
-    finalise_reroute_carve = (
-        KernelCls().bind("_PACK", pack).bind("_UNPACKINDEX", unpack_index).ingest(finalise_reroute_carve_template)
+    init_reroute_carve = KernelCls(strict_needs=True).ingest(init_reroute_carve_template)
+    iteration_reroute_carve = KernelCls(strict_needs=True).ingest(iteration_reroute_carve_template)
+    finalise_reroute_carve = make_kernel(
+        KernelCls, finalise_reroute_carve_template, strict_needs=True,
+        _PACK=helper_need("_PACK", pack), _UNPACKINDEX=helper_need("_UNPACKINDEX", unpack_index),
     )
 
     kernels = {
@@ -407,7 +467,10 @@ def build_reroute_carve_vanilla(RoutineBuilderCls, KernelCls, *, backend, backen
     }
 
     rb = RoutineBuilderCls()
-    rb.bind_bag(Bag({"_PACK": pack, "_UNPACKINDEX": unpack_index}))
+    # No bind_bag() call: "_PACK"/"_UNPACKINDEX" are bound to
+    # finalise_reroute_carve's own already-bound helper_need at construction
+    # time - nothing left for a routine-level bag to supply (see routine.py,
+    # RoutineBuilder._validate).
     for name in ("rec", "rec_work", "rec_jump", "tag", "tag_alt", "bid", "basin_saddlenode", "outlet", "rerouted"):
         rb.add_data(name, None)
 
@@ -432,10 +495,13 @@ def build_reroute_carve_optimized(KernelCls, *, backend, backend_mod, bitpack):
 
     Data args (rec, basin_saddlenode, outlet).
 
+    `bitpack` is the Bag from ops.make_bitpack; `pack`/`unpack_index` go
+    through helper_need. `strict_needs=True`.
+
     Author: B.G (07/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
-    unpack_index = bitpack["unpack_index"]
+    unpack_index = bitpack.unpack_index
 
     def carve_basins_serial_template(rec: T, basin_saddlenode: T, outlet: T):
         invalid = _PACK(1e8, 42)
@@ -453,11 +519,9 @@ def build_reroute_carve_optimized(KernelCls, *, backend, backend_mod, bitpack):
                 node = nxt
                 nxt = nnxt
 
-    return (
-        KernelCls()
-        .bind("_PACK", bitpack["pack"])
-        .bind("_UNPACKINDEX", unpack_index)
-        .ingest(carve_basins_serial_template)
+    return make_kernel(
+        KernelCls, carve_basins_serial_template, strict_needs=True,
+        _PACK=helper_need("_PACK", bitpack.pack), _UNPACKINDEX=helper_need("_UNPACKINDEX", unpack_index),
     )
 
 
@@ -476,6 +540,9 @@ def build_reroute_jump(KernelCls, *, backend, backend_mod, bitpack):
 
     Data args (rec, outlet, rerouted).
 
+    `bitpack` is the Bag from ops.make_bitpack; `pack`/`unpack_index` go
+    through helper_need. `strict_needs=True`.
+
     Author: B.G (07/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -490,11 +557,9 @@ def build_reroute_jump(KernelCls, *, backend, backend_mod, bitpack):
                 rec[i - 1] = rrec
                 rerouted[i - 1] = 1
 
-    return (
-        KernelCls()
-        .bind("_PACK", bitpack["pack"])
-        .bind("_UNPACKINDEX", bitpack["unpack_index"])
-        .ingest(reroute_jump_template)
+    return make_kernel(
+        KernelCls, reroute_jump_template, strict_needs=True,
+        _PACK=helper_need("_PACK", bitpack.pack), _UNPACKINDEX=helper_need("_UNPACKINDEX", bitpack.unpack_index),
     )
 
 
@@ -508,6 +573,14 @@ def build_depression_counter(KernelCls, *, backend, backend_mod, grid, ndep_raw)
     launch - this kernel only accumulates, mirroring ops.Reduce.run_sum's
     own reset-then-launch pattern.
 
+    `_GRID=grid` goes through bag_need, declaring only `can_out`.
+    `_NDEP=ndep_raw` is a raw backend field (bound directly, not through a
+    Parameter, per this function's own docstring above) - a plain value with
+    no dtype/mode for a Need to check, same category as ops's own raw-field
+    binds (`_SUM`/`_MIN`/... in ops/_closure_blocks.py's build_reduce_kernels);
+    strict_needs=True binds it unchanged. `_BK` needs no bind at all - auto-
+    injected.
+
     Author: B.G (07/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -517,12 +590,11 @@ def build_depression_counter(KernelCls, *, backend, backend_mod, grid, ndep_raw)
             if rec[i] == i and not _GRID.can_out(i):
                 _BK.atomic_add(_NDEP[None], 1)
 
-    return (
-        KernelCls()
-        .bind("_GRID", grid)
-        .bind("_BK", backend_mod)
-        .bind("_NDEP", ndep_raw)
-        .ingest(depression_counter_template)
+    grid_contains = [Need("can_out", kind=Kind.HELPER)]
+    return make_kernel(
+        KernelCls, depression_counter_template, strict_needs=True,
+        _GRID=bag_need("_GRID", grid, contains=grid_contains),
+        _NDEP=ndep_raw,
     )
 
 

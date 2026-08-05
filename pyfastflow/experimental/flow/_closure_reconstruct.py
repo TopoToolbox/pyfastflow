@@ -35,6 +35,7 @@ directly against this Taichi/Quadrants install before use here:
 Author: B.G (07/2026)
 """
 
+from ..core.context.backends import bag_need, helper_need, make_kernel, param_need
 from ..core.context.need import Kind, Need
 from ._closure_shared import _tensor_annotation
 
@@ -45,6 +46,9 @@ def build_fill_reconstruct_init(KernelCls, *, backend, backend_mod, grid):
     """
     init_filled KernelBuilder, data args (z, filled, parent) - see
     _cupy_blocks.build_fill_reconstruct_init.
+
+    `_GRID=grid` goes through bag_need, declaring only `can_out`.
+    `strict_needs=True`.
 
     Author: B.G (07/2026)
     """
@@ -59,7 +63,10 @@ def build_fill_reconstruct_init(KernelCls, *, backend, backend_mod, grid):
                 filled[i] = _POS_SENTINEL
                 parent[i] = -1
 
-    return KernelCls().bind("_GRID", grid).ingest(init_filled_template)
+    grid_contains = [Need("can_out", kind=Kind.HELPER)]
+    return make_kernel(
+        KernelCls, init_filled_template, strict_needs=True, _GRID=bag_need("_GRID", grid, contains=grid_contains)
+    )
 
 
 def build_fill_reconstruct_sweeps(KernelCls, *, backend, backend_mod, nx: int, ny: int):
@@ -119,10 +126,10 @@ def build_fill_reconstruct_sweeps(KernelCls, *, backend, backend_mod, nx: int, n
                     parent[i] = down
 
     return {
-        "row_lr": KernelCls().ingest(sweep_row_lr_template),
-        "row_rl": KernelCls().ingest(sweep_row_rl_template),
-        "col_tb": KernelCls().ingest(sweep_col_tb_template),
-        "col_bt": KernelCls().ingest(sweep_col_bt_template),
+        "row_lr": KernelCls(strict_needs=True).ingest(sweep_row_lr_template),
+        "row_rl": KernelCls(strict_needs=True).ingest(sweep_row_rl_template),
+        "col_tb": KernelCls(strict_needs=True).ingest(sweep_col_tb_template),
+        "col_bt": KernelCls(strict_needs=True).ingest(sweep_col_bt_template),
     }
 
 
@@ -130,6 +137,9 @@ def build_fill_reconstruct_frontier_init(KernelCls, *, backend, backend_mod):
     """
     frontier_init KernelBuilder, data args (z, filled, frontier, counters) -
     see _cupy_blocks.build_fill_reconstruct_frontier_init.
+
+    `strict_needs=True`; `_BK` needs no bind at all - auto-injected (see
+    core/context/_closure_backend.py's module docstring).
 
     Author: B.G (07/2026)
     """
@@ -141,7 +151,7 @@ def build_fill_reconstruct_frontier_init(KernelCls, *, backend, backend_mod):
                 pos = _BK.atomic_add(counters[0], 1)
                 frontier[pos] = i
 
-    return KernelCls().bind("_BK", backend_mod).ingest(frontier_init_template)
+    return KernelCls(strict_needs=True).ingest(frontier_init_template)
 
 
 def build_fill_reconstruct_relax(KernelCls, *, backend, backend_mod, grid, pass_p: Need, n_flat: int):
@@ -161,7 +171,9 @@ def build_fill_reconstruct_relax(KernelCls, *, backend, backend_mod, grid, pass_
     bound here to the same underlying Parameter and declared on this
     KernelBuilder via `.need()`. Read only here; bumping it between passes is
     the caller's job, the same division of labour `iteration_p` has for
-    rake_compress.
+    rake_compress. `_GRID=grid` goes through bag_need, declaring only
+    `n_neighbours`/`neighbour`. `strict_needs=True`; `_BK` needs no bind at
+    all - auto-injected.
 
     Author: B.G (07/2026)
     """
@@ -205,10 +217,14 @@ def build_fill_reconstruct_relax(KernelCls, *, backend, backend_mod, grid, pass_
                                 pos = _BK.atomic_add(counters[p + 1], 1)
                                 frontier[out_base + pos] = j
 
+    grid_contains = [
+        Need("n_neighbours", kind=Kind.PARAM, dtype=grid.n_neighbours.dtype, modes={grid.n_neighbours.mode}),
+        Need("neighbour", kind=Kind.HELPER),
+    ]
     return (
-        KernelCls()
+        KernelCls(strict_needs=True)
+        .need(bag_need("_GRID", grid, contains=grid_contains))
         .bind("_GRID", grid)
-        .bind("_BK", backend_mod)
         .need(p_need)
         .ingest(relax_template)
     )

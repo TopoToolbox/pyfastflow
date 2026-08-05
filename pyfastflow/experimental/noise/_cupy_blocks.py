@@ -24,22 +24,51 @@ Author: B.G (07/2026)
 
 import functools
 
-from ..core.context.backends import make_helper
+from ..core.context.backends import bag_need, helper_need, make_helper, param_need
+from ..core.context.need import Kind, Need
 from ..core.pool.base import new_uid
 
 
-def build_hash_u32(HelperCls, backend_mod=None):
+def _grid_nx_need(name: str, grid) -> Need:
+    """
+    A `Need(name, kind=Kind.BAG)` bound to `grid`, requiring only the `nx`
+    member row/col actually read. See _closure_blocks.py's own
+    _grid_nx_need for the closure-backend twin.
+
+    Author: B.G (08/2026)
+    """
+    return bag_need(name, grid, contains=[Need("nx", kind=Kind.PARAM, dtype=grid.nx.dtype, modes={grid.nx.mode})])
+
+
+def _grid_nx_ny_need(name: str, grid) -> Need:
+    """
+    A `Need(name, kind=Kind.BAG)` bound to `grid`, requiring the `nx`/`ny`
+    members Perlin's `at` actually reads. See _closure_blocks.py's own
+    _grid_nx_ny_need for the closure-backend twin.
+
+    Author: B.G (08/2026)
+    """
+    return bag_need(
+        name,
+        grid,
+        contains=[
+            Need("nx", kind=Kind.PARAM, dtype=grid.nx.dtype, modes={grid.nx.mode}),
+            Need("ny", kind=Kind.PARAM, dtype=grid.ny.dtype, modes={grid.ny.mode}),
+        ],
+    )
+
+
+def build_hash_u32(HelperCls):
     """
     The standalone hash_u32(x) HelperBuilder - no bound Parameters, so it
     can be built without a grid, a pool, or any of make_noise's other
-    config. `backend_mod` is accepted for signature parity with the closure
-    backend's build_hash_u32 and unused here. See _closure_blocks.py's
-    build_hash_u32 for why this exists.
+    config. See _closure_blocks.py's build_hash_u32 for why this exists.
+    `strict_needs=True` - see build_helpers below.
 
     Author: B.G (07/2026)
     """
     t = f"pn{new_uid()}"
-    mk = functools.partial(make_helper, HelperCls)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
     return mk(
         f"""
 __device__ unsigned int {t}_hash_u32(unsigned int x) {{
@@ -67,7 +96,6 @@ def build_helpers(
     frequency_y_p,
     octaves_p,
     persistence_p,
-    backend_mod=None,
 ):
     """
     Wire one noise bag's private blocks and its public `at` for the cupy
@@ -76,20 +104,22 @@ def build_helpers(
     real emitted C symbol at span-expansion time - see cupy_backend.py's
     _SpanParser).
 
+    Every bind below goes through a Need (param_need/helper_need/bag_need,
+    see backends.py) and every HelperBuilder is constructed with
+    `strict_needs=True` (via `mk`) - mirrors _closure_blocks.py's own
+    conversion; see its build_helpers docstring for `GRID`'s Kind.BAG use.
+
     Returns {public_name: HelperBuilder}, meant to be merged straight into
-    the Bag make_noise() returns. `backend_mod` is accepted for signature
-    parity with the closure backend's build_helpers and unused here - cupy
-    templates call plain C (floorf, casts) rather than a bound backend
-    module.
+    the Bag make_noise() returns.
 
     Author: B.G (07/2026)
     """
     t = f"pn{new_uid()}"
 
-    mk = functools.partial(make_helper, HelperCls)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
 
-    row = mk(f"__device__ int {t}_row(int i) {{ return i / $GRID.nx.get(0)$; }}", GRID=grid)
-    col = mk(f"__device__ int {t}_col(int i) {{ return i % $GRID.nx.get(0)$; }}", GRID=grid)
+    row = mk(f"__device__ int {t}_row(int i) {{ return i / $GRID.nx.get(0)$; }}", GRID=_grid_nx_need("GRID", grid))
+    col = mk(f"__device__ int {t}_col(int i) {{ return i % $GRID.nx.get(0)$; }}", GRID=_grid_nx_need("GRID", grid))
     # Built unconditionally (not just for kind="white") - hash_u32 is also a
     # public bag member, reused by callers outside make_noise (e.g. flow's
     # rand_unit) that want the same integer hash without pulling in the rest
@@ -110,10 +140,10 @@ __device__ float {t}_white_unit(int i) {{
     return (float)hashed / 4294967296.0f;
 }}
 """,
-            row=row,
-            col=col,
-            hash_u32=hash_u32,
-            SEED=seed_p,
+            row=helper_need("row", row),
+            col=helper_need("col", col),
+            hash_u32=helper_need("hash_u32", hash_u32),
+            SEED=param_need("SEED", seed_p),
         )
         at = mk(
             f"""
@@ -121,8 +151,8 @@ __device__ float {t}_at(int i) {{
     return ($white_unit(i)$ - 0.5f) * 2.0f * $AMP.get(0)$;
 }}
 """,
-            white_unit=white_unit,
-            AMP=amplitude_p,
+            white_unit=helper_need("white_unit", white_unit),
+            AMP=param_need("AMP", amplitude_p),
         )
         return {"at": at, "white_unit": white_unit, "hash_u32": hash_u32}
 
@@ -185,10 +215,10 @@ __device__ float {t}_perlin_at(float x, float y) {{
     return $lerp(v, lo, hi)$;
 }}
 """,
-        fade=fade,
-        lerp=lerp,
-        grad=grad,
-        PERM=perm_p,
+        fade=helper_need("fade", fade),
+        lerp=helper_need("lerp", lerp),
+        grad=helper_need("grad", grad),
+        PERM=param_need("PERM", perm_p),
     )
     at = mk(
         f"""
@@ -216,14 +246,14 @@ __device__ float {t}_at(int i) {{
     return 0.0f;
 }}
 """,
-        row=row,
-        col=col,
-        perlin_at=perlin_at,
-        GRID=grid,
-        FX=frequency_x_p,
-        FY=frequency_y_p,
-        OCTAVES=octaves_p,
-        PERSISTENCE=persistence_p,
-        AMP=amplitude_p,
+        row=helper_need("row", row),
+        col=helper_need("col", col),
+        perlin_at=helper_need("perlin_at", perlin_at),
+        GRID=_grid_nx_ny_need("GRID", grid),
+        FX=param_need("FX", frequency_x_p),
+        FY=param_need("FY", frequency_y_p),
+        OCTAVES=param_need("OCTAVES", octaves_p),
+        PERSISTENCE=param_need("PERSISTENCE", persistence_p),
+        AMP=param_need("AMP", amplitude_p),
     )
     return {"at": at, "perlin_at": perlin_at, "hash_u32": hash_u32}

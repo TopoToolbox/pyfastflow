@@ -33,9 +33,11 @@ class Bag:
     quantity with the helpers that act on it works exactly like one holding
     parameters alone.
 
-    Two ways to use one: bind it whole - bind("grid", bag) - and reach its
-    members by dotted path in the template body (grid.nx.get(i), grid.nbr(i)),
-    or bind_bag(bag) to merge every member in at top level under its own name.
+    Bind it whole - bind("grid", bag) - and reach its members by dotted path
+    in the template body (grid.nx.get(i), grid.nbr(i)); or, at the
+    RoutineBuilder/SequenceBuilder layer (routine.py/sequence.py),
+    bind_bag(bag) sets the one bag every step/block is rebound against at
+    compile time.
 
     Build it, grow it, bind it. There is no removal or reassignment: to change
     the contents, build another bag.

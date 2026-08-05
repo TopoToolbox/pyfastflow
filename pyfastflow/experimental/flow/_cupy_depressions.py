@@ -14,11 +14,26 @@ here (rec, bid, tag, basin_saddle, outlet, ...) is n_flat-sized, basin id =
 pit index + 1, so a per-basin array is safely indexed by any node index too -
 the same double duty the legacy kernels rely on.
 
+Every KernelBuilder/HelperBuilder built here is constructed strict_needs=True,
+every bind going through a Need (helper_need/bag_need, see backends.py) -
+mirrors _closure_depressions.py's own conversion. `grid` binds go through
+bag_need, one `contains` list per site declaring only the members that
+template actually reads. `bitpack` (make_depressions' own argument) is the
+real `Bag` ops.make_bitpack returns, not a re-wrapped dict; each site here
+reaches only the member(s) it calls via helper_need. No RoutineBuilder built
+here is ever given a bind_bag() bag: every step's own dependencies are
+already fully resolved via Need by the time it is built, so there is nothing
+left for a routine-level bag to supply (see routine.py,
+RoutineBuilder._validate) - a Sequence wrapping one of these routines still
+propagates its own outer bag into it via RoutineBuilder.bind_bag, which is
+harmless since rebind() against it only ever re-resolves names to the exact
+objects they already hold.
+
 Author: B.G (07/2026)
 """
 
-from ..core.context.backends import make_helper
-from ..core.context.bag import Bag
+from ..core.context.backends import bag_need, helper_need, make_helper, make_kernel
+from ..core.context.need import Kind, Need
 from ..core.pool.base import new_uid
 
 
@@ -28,6 +43,8 @@ def build_atomic_min_ll(HelperCls):
     atomicMin for signed long long (only int and unsigned long long), and
     the bitpacked saddle/outlet values need signed comparison to match
     Taichi/Quadrants' `atomic_min` over an i64 field.
+
+    `strict_needs=True`, though nothing here binds anything.
 
     Author: B.G (07/2026)
     """
@@ -45,6 +62,7 @@ __device__ long long {t}_atomic_min_ll(long long* addr, long long val) {{
     return old;
 }}
 """,
+        strict_needs=True,
     )
 
 
@@ -57,10 +75,12 @@ def build_copy_field(KernelCls, *, n_flat: int):
     dst[i] = src[i] over a whole n_flat int32 buffer - see
     _closure_blocks.build_copy_field.
 
+    `strict_needs=True`, though nothing here binds anything.
+
     Author: B.G (07/2026)
     """
     t = f"pd{new_uid()}"
-    return KernelCls().ingest(
+    return KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_copy_field(const int* src, int* dst) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -80,21 +100,29 @@ def build_basin_labelling_vanilla(RoutineBuilderCls, KernelCls, *, grid, copy_fi
 
     Data names: "rec", "bid", "rec_jump".
 
+    `grid=grid` goes through bag_need, declaring only `can_out`.
+    `strict_needs=True` throughout. The returned RoutineBuilder is never given
+    a bind_bag() bag - see the module docstring.
+
     Author: B.G (07/2026)
     """
     default_grid, default_block = _launch_dims(n_flat)
     t = f"pbl{new_uid()}"
 
-    basin_id_init = KernelCls().bind("grid", grid).ingest(
+    can_out_only = [Need("can_out", kind=Kind.HELPER)]
+    basin_id_init = make_kernel(
+        KernelCls,
         f"""
 __global__ void {t}_basin_id_init(int* bid) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
     bid[i] = $grid.can_out(i)$ ? 0 : (i + 1);
 }}
-"""
+""",
+        strict_needs=True,
+        grid=bag_need("grid", grid, contains=can_out_only),
     )
-    propagate_basin_iter = KernelCls().ingest(
+    propagate_basin_iter = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_propagate_basin_iter(int* rec_jump) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -105,7 +133,7 @@ __global__ void {t}_propagate_basin_iter(int* rec_jump) {{
 }}
 """
     )
-    propagate_basin_final = KernelCls().ingest(
+    propagate_basin_final = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_propagate_basin_final(int* bid, const int* rec_jump) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -122,7 +150,9 @@ __global__ void {t}_propagate_basin_final(int* bid, const int* rec_jump) {{
     }
 
     rb = RoutineBuilderCls(grid=default_grid, block=default_block)
-    rb.bind_bag(Bag({"grid": grid}))
+    # No bind_bag() call: "grid" is bound to basin_id_init's own already-
+    # bound bag_need at construction time - nothing left for a routine-level
+    # bag to supply (see routine.py, RoutineBuilder._validate).
     for name in ("rec", "bid", "rec_jump"):
         rb.add_data(name, None)
 
@@ -147,12 +177,16 @@ def build_basin_labelling_optimized(RoutineBuilderCls, KernelCls, *, grid, n_fla
 
     Data names: "rec", "rec_jump", "bid".
 
+    `grid=grid` goes through bag_need, declaring only `can_out`.
+    `strict_needs=True` throughout. The returned RoutineBuilder is never given
+    a bind_bag() bag - see the module docstring.
+
     Author: B.G (07/2026)
     """
     default_grid, default_block = _launch_dims(n_flat)
     t = f"pbo{new_uid()}"
 
-    walk_copy = KernelCls().ingest(
+    walk_copy = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_walk_copy(const int* rec, int* rec_jump) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -161,7 +195,7 @@ __global__ void {t}_walk_copy(const int* rec, int* rec_jump) {{
 }}
 """
     )
-    walk_halving = KernelCls().ingest(
+    walk_halving = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_walk_halving(int* rec_jump) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -174,7 +208,8 @@ __global__ void {t}_walk_halving(int* rec_jump) {{
 }}
 """
     )
-    walk_finalize = KernelCls().bind("grid", grid).ingest(
+    walk_finalize = make_kernel(
+        KernelCls,
         f"""
 __global__ void {t}_walk_finalize(const int* rec_jump, int* bid) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -182,13 +217,17 @@ __global__ void {t}_walk_finalize(const int* rec_jump, int* bid) {{
     int root = rec_jump[i];
     bid[i] = $grid.can_out(root)$ ? 0 : root + 1;
 }}
-"""
+""",
+        strict_needs=True,
+        grid=bag_need("grid", grid, contains=[Need("can_out", kind=Kind.HELPER)]),
     )
 
     kernels = {"walk_copy": walk_copy, "walk_halving": walk_halving, "walk_finalize": walk_finalize}
 
     rb = RoutineBuilderCls(grid=default_grid, block=default_block)
-    rb.bind_bag(Bag({"grid": grid}))
+    # No bind_bag() call: "grid" is bound to walk_finalize's own already-
+    # bound bag_need at construction time - nothing left for a routine-level
+    # bag to supply (see routine.py, RoutineBuilder._validate).
     for name in ("rec", "rec_jump", "bid"):
         rb.add_data(name, None)
 
@@ -203,9 +242,14 @@ def build_saddlesort(RoutineBuilderCls, KernelCls, HelperCls, *, grid, bitpack, 
     """
     RoutineBuilder for the six saddlesort passes - see
     _closure_blocks.build_saddlesort for the step sequence, and this
-    module's own bitpack-mirroring notes. `bitpack` is the
-    {"pack","unpack_value","unpack_index"} dict from ops.make_bitpack built
-    for "cupy".
+    module's own bitpack-mirroring notes. `bitpack` is the Bag
+    {"pack","unpack_value","unpack_index"} from ops.make_bitpack built for
+    "cupy" - each KernelBuilder below reaches only the member(s) it actually
+    calls, via helper_need (no single site here uses all three). `grid`
+    binds go through bag_need, one `contains` list per site declaring only
+    `can_out`/`neighbour` - whichever this template actually reads.
+    `strict_needs=True` throughout. The returned RoutineBuilder is never given
+    a bind_bag() bag - see the module docstring.
 
     Data names: "bid", "z", "z_prime", "is_border", "basin_saddle",
     "basin_saddlenode", "outlet".
@@ -214,13 +258,17 @@ def build_saddlesort(RoutineBuilderCls, KernelCls, HelperCls, *, grid, bitpack, 
     """
     default_grid, default_block = _launch_dims(n_flat)
     NN = grid.n_neighbours.get()
-    pack = bitpack["pack"]
-    unpack_value = bitpack["unpack_value"]
-    unpack_index = bitpack["unpack_index"]
+    pack = bitpack.pack
+    unpack_value = bitpack.unpack_value
+    unpack_index = bitpack.unpack_index
     atomic_min_ll = build_atomic_min_ll(HelperCls)
     t = f"pss{new_uid()}"
 
-    border_zprime = KernelCls().bind("grid", grid).ingest(
+    can_out_and_neighbour = [Need("can_out", kind=Kind.HELPER), Need("neighbour", kind=Kind.HELPER)]
+    neighbour_only = [Need("neighbour", kind=Kind.HELPER)]
+
+    border_zprime = make_kernel(
+        KernelCls,
         f"""
 __global__ void {t}_border_zprime(const int* bid, const float* z, float* z_prime, unsigned char* is_border) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -244,9 +292,12 @@ __global__ void {t}_border_zprime(const int* bid, const float* z, float* z_prime
         z_prime[i] = fmaxf(z[i], zn);
     }}
 }}
-"""
+""",
+        strict_needs=True,
+        grid=bag_need("grid", grid, contains=can_out_and_neighbour),
     )
-    init_saddle_outlet = KernelCls().bind("pack", pack).ingest(
+    init_saddle_outlet = make_kernel(
+        KernelCls,
         f"""
 __global__ void {t}_init_saddle_outlet(long long* basin_saddle, long long* outlet, int* basin_saddlenode) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -256,15 +307,13 @@ __global__ void {t}_init_saddle_outlet(long long* basin_saddle, long long* outle
     outlet[i] = invalid;
     basin_saddlenode[i] = -1;
 }}
-"""
+""",
+        strict_needs=True,
+        pack=helper_need("pack", pack),
     )
-    atomic_min_saddle = (
-        KernelCls()
-        .bind("grid", grid)
-        .bind("pack", pack)
-        .bind("atomic_min_ll", atomic_min_ll)
-        .ingest(
-            f"""
+    atomic_min_saddle = make_kernel(
+        KernelCls,
+        f"""
 __global__ void {t}_atomic_min_saddle(const int* bid, const unsigned char* is_border, const float* z_prime, long long* basin_saddle) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
@@ -284,16 +333,15 @@ __global__ void {t}_atomic_min_saddle(const int* bid, const unsigned char* is_bo
         $atomic_min_ll(&basin_saddle[tbid], res)$;
     }}
 }}
-"""
-        )
+""",
+        strict_needs=True,
+        grid=bag_need("grid", grid, contains=neighbour_only),
+        pack=helper_need("pack", pack),
+        atomic_min_ll=helper_need("atomic_min_ll", atomic_min_ll),
     )
-    find_saddlenode = (
-        KernelCls()
-        .bind("grid", grid)
-        .bind("unpack_value", unpack_value)
-        .bind("unpack_index", unpack_index)
-        .ingest(
-            f"""
+    find_saddlenode = make_kernel(
+        KernelCls,
+        f"""
 __global__ void {t}_find_saddlenode(const int* bid, const unsigned char* is_border, const float* z_prime,
                                      const long long* basin_saddle, int* basin_saddlenode) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -314,16 +362,15 @@ __global__ void {t}_find_saddlenode(const int* bid, const unsigned char* is_bord
         basin_saddlenode[bid[i]] = i;
     }}
 }}
-"""
-        )
+""",
+        strict_needs=True,
+        grid=bag_need("grid", grid, contains=neighbour_only),
+        unpack_value=helper_need("unpack_value", unpack_value),
+        unpack_index=helper_need("unpack_index", unpack_index),
     )
-    atomic_min_outlet = (
-        KernelCls()
-        .bind("grid", grid)
-        .bind("pack", pack)
-        .bind("atomic_min_ll", atomic_min_ll)
-        .ingest(
-            f"""
+    atomic_min_outlet = make_kernel(
+        KernelCls,
+        f"""
 __global__ void {t}_atomic_min_outlet(const int* bid, const long long* basin_saddle, const int* basin_saddlenode,
                                        const float* z, long long* outlet) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -346,10 +393,14 @@ __global__ void {t}_atomic_min_outlet(const int* bid, const long long* basin_sad
         $atomic_min_ll(&outlet[i], candidate)$;
     }}
 }}
-"""
-        )
+""",
+        strict_needs=True,
+        grid=bag_need("grid", grid, contains=neighbour_only),
+        pack=helper_need("pack", pack),
+        atomic_min_ll=helper_need("atomic_min_ll", atomic_min_ll),
     )
-    break_cycle = KernelCls().bind("pack", pack).bind("unpack_index", unpack_index).ingest(
+    break_cycle = make_kernel(
+        KernelCls,
         f"""
 __global__ void {t}_break_cycle(const int* bid, long long* outlet, long long* basin_saddle, int* basin_saddlenode) {{
     int bid_d = blockIdx.x * blockDim.x + threadIdx.x;
@@ -367,7 +418,10 @@ __global__ void {t}_break_cycle(const int* bid, long long* outlet, long long* ba
         basin_saddlenode[bid_d] = -1;
     }}
 }}
-"""
+""",
+        strict_needs=True,
+        pack=helper_need("pack", pack),
+        unpack_index=helper_need("unpack_index", unpack_index),
     )
 
     kernels = {
@@ -380,7 +434,10 @@ __global__ void {t}_break_cycle(const int* bid, long long* outlet, long long* ba
     }
 
     rb = RoutineBuilderCls(grid=default_grid, block=default_block)
-    rb.bind_bag(Bag({"grid": grid, "pack": pack, "unpack_value": unpack_value, "unpack_index": unpack_index, "atomic_min_ll": atomic_min_ll}))
+    # No bind_bag() call: "grid"/"pack"/"unpack_value"/"unpack_index"/
+    # "atomic_min_ll" are each bound to their own step's already-bound
+    # bag_need/helper_need at construction time - nothing left for a
+    # routine-level bag to supply (see routine.py, RoutineBuilder._validate).
     for name in ("bid", "z", "z_prime", "is_border", "basin_saddle", "basin_saddlenode", "outlet"):
         rb.add_data(name, None)
 
@@ -407,14 +464,19 @@ def build_reroute_carve_vanilla(RoutineBuilderCls, KernelCls, *, bitpack, copy_f
     Data names: "rec", "rec_work", "rec_jump", "tag", "tag_alt", "bid",
     "basin_saddlenode", "outlet", "rerouted".
 
+    `bitpack` is the Bag from ops.make_bitpack; `finalise_outlet` (the only
+    site here needing either) reaches `pack`/`unpack_index` via helper_need.
+    `strict_needs=True` throughout. The returned RoutineBuilder is never given
+    a bind_bag() bag - see the module docstring.
+
     Author: B.G (07/2026)
     """
     default_grid, default_block = _launch_dims(n_flat)
-    pack = bitpack["pack"]
-    unpack_index = bitpack["unpack_index"]
+    pack = bitpack.pack
+    unpack_index = bitpack.unpack_index
     t = f"prc{new_uid()}"
 
-    init_reset_tag = KernelCls().ingest(
+    init_reset_tag = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_init_reset_tag(unsigned char* tag) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -423,7 +485,7 @@ __global__ void {t}_init_reset_tag(unsigned char* tag) {{
 }}
 """
     )
-    init_scatter_tag = KernelCls().ingest(
+    init_scatter_tag = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_init_scatter_tag(unsigned char* tag, const int* saddlenode) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -434,7 +496,7 @@ __global__ void {t}_init_scatter_tag(unsigned char* tag, const int* saddlenode) 
 }}
 """
     )
-    init_copy_tag_alt = KernelCls().ingest(
+    init_copy_tag_alt = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_init_copy_tag_alt(const unsigned char* tag, unsigned char* tag_alt) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -443,7 +505,7 @@ __global__ void {t}_init_copy_tag_alt(const unsigned char* tag, unsigned char* t
 }}
 """
     )
-    iter_build_work = KernelCls().ingest(
+    iter_build_work = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_iter_build_work(const unsigned char* tag, unsigned char* tag_alt, const int* rec,
                                      int* rec_work, const int* bid) {{
@@ -457,7 +519,7 @@ __global__ void {t}_iter_build_work(const unsigned char* tag, unsigned char* tag
 }}
 """
     )
-    iter_jump = KernelCls().ingest(
+    iter_jump = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_iter_jump(unsigned char* tag, const unsigned char* tag_alt, int* rec,
                                const int* rec_work, const int* bid) {{
@@ -471,7 +533,7 @@ __global__ void {t}_iter_jump(unsigned char* tag, const unsigned char* tag_alt, 
 }}
 """
     )
-    finalise_reset_rec = KernelCls().ingest(
+    finalise_reset_rec = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_finalise_reset_rec(int* rec, const int* rec_orig) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -480,7 +542,7 @@ __global__ void {t}_finalise_reset_rec(int* rec, const int* rec_orig) {{
 }}
 """
     )
-    finalise_reverse = KernelCls().ingest(
+    finalise_reverse = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_finalise_reverse(int* rec, const int* rec_orig, const unsigned char* tag, unsigned char* rerouted) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -493,7 +555,8 @@ __global__ void {t}_finalise_reverse(int* rec, const int* rec_orig, const unsign
 }}
 """
     )
-    finalise_outlet = KernelCls().bind("pack", pack).bind("unpack_index", unpack_index).ingest(
+    finalise_outlet = make_kernel(
+        KernelCls,
         f"""
 __global__ void {t}_finalise_outlet(int* rec, const long long* outlet, const int* saddlenode, unsigned char* rerouted) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -505,7 +568,10 @@ __global__ void {t}_finalise_outlet(int* rec, const long long* outlet, const int
         rerouted[saddlenode[i]] = 1;
     }}
 }}
-"""
+""",
+        strict_needs=True,
+        pack=helper_need("pack", pack),
+        unpack_index=helper_need("unpack_index", unpack_index),
     )
 
     kernels = {
@@ -520,7 +586,10 @@ __global__ void {t}_finalise_outlet(int* rec, const long long* outlet, const int
     }
 
     rb = RoutineBuilderCls(grid=default_grid, block=default_block)
-    rb.bind_bag(Bag({"pack": pack, "unpack_index": unpack_index}))
+    # No bind_bag() call: "pack"/"unpack_index" are bound to
+    # finalise_outlet's own already-bound helper_need at construction time -
+    # nothing left for a routine-level bag to supply (see routine.py,
+    # RoutineBuilder._validate).
     for name in ("rec", "rec_work", "rec_jump", "tag", "tag_alt", "bid", "basin_saddlenode", "outlet", "rerouted"):
         rb.add_data(name, None)
 
@@ -550,17 +619,17 @@ def build_reroute_carve_optimized(KernelCls, *, bitpack, n_flat: int):
 
     Data args (rec, basin_saddlenode, outlet).
 
+    `bitpack` is the Bag from ops.make_bitpack; `pack`/`unpack_index` go
+    through helper_need. `strict_needs=True`.
+
     Author: B.G (07/2026)
     """
-    pack = bitpack["pack"]
-    unpack_index = bitpack["unpack_index"]
+    pack = bitpack.pack
+    unpack_index = bitpack.unpack_index
     t = f"pco{new_uid()}"
-    return (
-        KernelCls()
-        .bind("pack", pack)
-        .bind("unpack_index", unpack_index)
-        .ingest(
-            f"""
+    return make_kernel(
+        KernelCls,
+        f"""
 __global__ void {t}_carve_basins_serial(int* rec, const int* basin_saddlenode, const long long* outlet) {{
     int b = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= {n_flat}) return;
@@ -578,8 +647,10 @@ __global__ void {t}_carve_basins_serial(int* rec, const int* basin_saddlenode, c
         nxt = nnxt;
     }}
 }}
-"""
-        )
+""",
+        strict_needs=True,
+        pack=helper_need("pack", pack),
+        unpack_index=helper_need("unpack_index", unpack_index),
     )
 
 
@@ -596,14 +667,19 @@ def build_reroute_jump(RoutineBuilderCls, KernelCls, *, bitpack, n_flat: int):
 
     Data names: "rec", "outlet", "rerouted".
 
+    `bitpack` is the Bag from ops.make_bitpack; `jump` (the only site here
+    needing either) reaches `pack`/`unpack_index` via helper_need.
+    `strict_needs=True` throughout. The returned RoutineBuilder is never given
+    a bind_bag() bag - see the module docstring.
+
     Author: B.G (07/2026)
     """
     default_grid, default_block = _launch_dims(n_flat)
-    pack = bitpack["pack"]
-    unpack_index = bitpack["unpack_index"]
+    pack = bitpack.pack
+    unpack_index = bitpack.unpack_index
     t = f"prj{new_uid()}"
 
-    reset_rerouted = KernelCls().ingest(
+    reset_rerouted = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_reset_rerouted(unsigned char* rerouted) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -612,7 +688,8 @@ __global__ void {t}_reset_rerouted(unsigned char* rerouted) {{
 }}
 """
     )
-    jump = KernelCls().bind("pack", pack).bind("unpack_index", unpack_index).ingest(
+    jump = make_kernel(
+        KernelCls,
         f"""
 __global__ void {t}_jump(int* rec, const long long* outlet, unsigned char* rerouted) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -624,13 +701,18 @@ __global__ void {t}_jump(int* rec, const long long* outlet, unsigned char* rerou
         rerouted[i - 1] = 1;
     }}
 }}
-"""
+""",
+        strict_needs=True,
+        pack=helper_need("pack", pack),
+        unpack_index=helper_need("unpack_index", unpack_index),
     )
 
     kernels = {"reset_rerouted": reset_rerouted, "jump": jump}
 
     rb = RoutineBuilderCls(grid=default_grid, block=default_block)
-    rb.bind_bag(Bag({"pack": pack, "unpack_index": unpack_index}))
+    # No bind_bag() call: "pack"/"unpack_index" are bound to jump's own
+    # already-bound helper_need at construction time - nothing left for a
+    # routine-level bag to supply (see routine.py, RoutineBuilder._validate).
     for name in ("rec", "outlet", "rerouted"):
         rb.add_data(name, None)
 
@@ -653,10 +735,14 @@ def build_depression_counter(KernelCls, *, grid, n_flat: int):
     as `rec`. The caller must reset `ndep_p` to 0 (`.set(0)`) before each
     launch.
 
+    `grid=grid` goes through bag_need, declaring only `can_out`.
+    `strict_needs=True`.
+
     Author: B.G (07/2026)
     """
     t = f"pdc{new_uid()}"
-    return KernelCls().bind("grid", grid).ingest(
+    return make_kernel(
+        KernelCls,
         f"""
 __global__ void {t}_depression_counter(const int* rec, int* ndep) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -665,7 +751,9 @@ __global__ void {t}_depression_counter(const int* rec, int* ndep) {{
         atomicAdd(ndep, 1);
     }}
 }}
-"""
+""",
+        strict_needs=True,
+        grid=bag_need("grid", grid, contains=[Need("can_out", kind=Kind.HELPER)]),
     )
 
 

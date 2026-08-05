@@ -34,6 +34,7 @@ is unchanged from the script - CUDA has it natively.
 Author: B.G (07/2026)
 """
 
+from ..core.context.backends import bag_need, make_kernel
 from ..core.context.need import Kind, Need
 from ..core.pool.base import new_uid
 
@@ -47,10 +48,14 @@ def build_fill_reconstruct_init(KernelCls, *, grid, n_flat: int):
     convention); elsewhere filled[i] = +inf sentinel, parent[i] = -1 (never
     yet claimed) - the seed state every sweep/relax pass decreases from.
 
+    `grid=grid` goes through bag_need, declaring only `can_out`.
+    `strict_needs=True`.
+
     Author: B.G (07/2026)
     """
     t = f"pfi{new_uid()}"
-    return KernelCls().bind("grid", grid).ingest(
+    return make_kernel(
+        KernelCls,
         f"""
 __global__ void {t}_init_filled(const float* z, float* filled, int* parent) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -63,7 +68,9 @@ __global__ void {t}_init_filled(const float* z, float* filled, int* parent) {{
         parent[i] = -1;
     }}
 }}
-"""
+""",
+        strict_needs=True,
+        grid=bag_need("grid", grid, contains=[Need("can_out", kind=Kind.HELPER)]),
     )
 
 
@@ -82,7 +89,7 @@ def build_fill_reconstruct_sweeps(KernelCls, *, nx: int, ny: int):
     """
     t = f"pfs{new_uid()}"
 
-    row_lr = KernelCls().ingest(
+    row_lr = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_sweep_row_lr(const float* z, float* filled, int* parent) {{
     int r = blockIdx.x * blockDim.x + threadIdx.x;
@@ -100,7 +107,7 @@ __global__ void {t}_sweep_row_lr(const float* z, float* filled, int* parent) {{
 }}
 """
     )
-    row_rl = KernelCls().ingest(
+    row_rl = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_sweep_row_rl(const float* z, float* filled, int* parent) {{
     int r = blockIdx.x * blockDim.x + threadIdx.x;
@@ -118,7 +125,7 @@ __global__ void {t}_sweep_row_rl(const float* z, float* filled, int* parent) {{
 }}
 """
     )
-    col_tb = KernelCls().ingest(
+    col_tb = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_sweep_col_tb(const float* z, float* filled, int* parent) {{
     int c = blockIdx.x * blockDim.x + threadIdx.x;
@@ -135,7 +142,7 @@ __global__ void {t}_sweep_col_tb(const float* z, float* filled, int* parent) {{
 }}
 """
     )
-    col_bt = KernelCls().ingest(
+    col_bt = KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_sweep_col_bt(const float* z, float* filled, int* parent) {{
     int c = blockIdx.x * blockDim.x + threadIdx.x;
@@ -166,10 +173,12 @@ def build_fill_reconstruct_frontier_init(KernelCls, *, n_flat: int):
     module note; pass 0 always reads the [0, n_flat) half, so this writes
     there unconditionally rather than computing a parity.
 
+    `strict_needs=True`, though nothing here binds anything.
+
     Author: B.G (07/2026)
     """
     t = f"pff{new_uid()}"
-    return KernelCls().ingest(
+    return KernelCls(strict_needs=True).ingest(
         f"""
 __global__ void {t}_frontier_init(const float* z, const float* filled, int* frontier, int* counters) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -207,14 +216,24 @@ def build_fill_reconstruct_relax(KernelCls, *, grid, pass_p: Need, n_flat: int):
     KernelBuilder via `.need()`. Read only here, via `$P.get(0)$` - bumping
     it between passes is the caller's job (a host_step in the Sequence the
     solver builds), the same division of labour `iteration_p` has for
-    rake_compress.
+    rake_compress. `grid=grid` goes through bag_need, declaring only
+    `n_neighbours`/`neighbour`. `strict_needs=True`.
 
     Author: B.G (07/2026)
     """
     t = f"pfr{new_uid()}"
     p_need = Need("P", kind=Kind.PARAM, dtype=pass_p.dtype, modes=pass_p.modes)
     p_need.bind(pass_p.value)
-    return KernelCls().bind("grid", grid).need(p_need).ingest(
+    grid_contains = [
+        Need("n_neighbours", kind=Kind.PARAM, dtype=grid.n_neighbours.dtype, modes={grid.n_neighbours.mode}),
+        Need("neighbour", kind=Kind.HELPER),
+    ]
+    return (
+        KernelCls(strict_needs=True)
+        .need(bag_need("grid", grid, contains=grid_contains))
+        .bind("grid", grid)
+        .need(p_need)
+        .ingest(
         f"""
 __global__ void {t}_relax(const float* z, float* filled, int* parent, int* frontier,
                            int* counters, int* queued_gen) {{
@@ -259,4 +278,5 @@ __global__ void {t}_relax(const float* z, float* filled, int* parent, int* front
     }}
 }}
 """
+        )
     )

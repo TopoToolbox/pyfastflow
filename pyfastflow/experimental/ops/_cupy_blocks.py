@@ -13,12 +13,18 @@ scatter kernel (scan) - `cp.cumsum`/`cp.sum`/`cp.min`/`cp.max`/`cp.argmin`
 already do the rest, and CUB's own DeviceScan/reduction accelerators are the
 default on this build (see ops/__init__.py's module docstring).
 
+Every bind goes through a Need (helper_need/bag_need, see backends.py) and
+every HelperBuilder/KernelBuilder is constructed strict_needs=True - mirrors
+_closure_blocks.py's own conversion.
+
 Author: B.G (07/2026)
 """
 
 import functools
 
-from ..core.context.backends import make_helper
+from ..core.context.backends import bag_need, helper_need, make_helper, make_kernel
+from ..core.context.bag import Bag
+from ..core.context.need import Kind, Need
 from ..core.pool.base import new_uid
 
 # ---------------------------------------------------------------------------
@@ -26,16 +32,21 @@ from ..core.pool.base import new_uid
 # ---------------------------------------------------------------------------
 
 
-def build_bitpack(HelperCls):
+def build_bitpack(HelperCls) -> Bag:
     """
     pack(f, i) -> i64, unpack_value(p) -> f32, unpack_index(p) -> i32, same
     IEEE-754 bit-flip trick as _closure_blocks.build_bitpack, using CUDA's
     __float_as_uint/__uint_as_float instead of Taichi's bit_cast.
 
+    Every bind goes through a Need (helper_need, see backends.py) and every
+    HelperBuilder is constructed strict_needs=True - mirrors
+    _closure_blocks.build_bitpack's own conversion, including returning a
+    Bag rather than a plain dict (see its docstring for why).
+
     Author: B.G (07/2026)
     """
     t = f"pf{new_uid()}"
-    mk = functools.partial(make_helper, HelperCls)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
 
     flip = mk(
         f"""
@@ -64,7 +75,7 @@ __device__ long long {t}_pack(float f, int i) {{
     return flipped_upper | unchanged_lower;
 }}
 """,
-        flip=flip,
+        flip=helper_need("flip", flip),
     )
     unpack_raw = mk(
         f"""
@@ -83,8 +94,8 @@ __device__ float {t}_unpack_value(long long packed) {{
     return $unflip(f_enc)$;
 }}
 """,
-        unpack_raw=unpack_raw,
-        unflip=unflip,
+        unpack_raw=helper_need("unpack_raw", unpack_raw),
+        unflip=helper_need("unflip", unflip),
     )
     unpack_index = mk(
         f"""
@@ -94,9 +105,9 @@ __device__ int {t}_unpack_index(long long packed) {{
     return (int)i_enc;
 }}
 """,
-        unpack_raw=unpack_raw,
+        unpack_raw=helper_need("unpack_raw", unpack_raw),
     )
-    return {"pack": pack, "unpack_value": unpack_value, "unpack_index": unpack_index}
+    return Bag({"pack": pack, "unpack_value": unpack_value, "unpack_index": unpack_index})
 
 
 # ---------------------------------------------------------------------------
@@ -109,10 +120,13 @@ def build_math(HelperCls):
     atan(x) via atan2f(x, 1); nextafter(x, y), one ULP of f32 towards y via
     the same bit-twiddling as _closure_blocks.build_math.
 
+    `strict_needs=True` for consistency (see build_bitpack); neither
+    template binds anything.
+
     Author: B.G (07/2026)
     """
     t = f"pf{new_uid()}"
-    mk = functools.partial(make_helper, HelperCls)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
 
     atan = mk(f"__device__ float {t}_atan(float x) {{ return atan2f(x, 1.0f); }}")
     nextafter = mk(
@@ -151,11 +165,15 @@ def build_elementwise(KernelCls):
     multiply_by_scalar over a flat f32 buffer, as unbuilt KernelBuilders.
     Every kernel takes the buffer length `n` as its own last argument.
 
+    Every KernelBuilder is constructed strict_needs=True for consistency
+    (see _closure_blocks.build_elementwise); none binds anything - every
+    argument here is CUDA source text, not a python-level bind().
+
     Author: B.G (07/2026)
     """
     t = f"pf{new_uid()}"
     return {
-        "swap": KernelCls().ingest(
+        "swap": KernelCls(strict_needs=True).ingest(
             f"""
 extern "C" __global__ void {t}_swap(float* array1, float* array2, int n) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -166,7 +184,7 @@ extern "C" __global__ void {t}_swap(float* array1, float* array2, int n) {{
 }}
 """
         ),
-        "add_B_to_A": KernelCls().ingest(
+        "add_B_to_A": KernelCls(strict_needs=True).ingest(
             f"""
 extern "C" __global__ void {t}_add_B_to_A(float* array1, const float* array2, int n) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -175,7 +193,7 @@ extern "C" __global__ void {t}_add_B_to_A(float* array1, const float* array2, in
 }}
 """
         ),
-        "add_B_to_weighted_A": KernelCls().ingest(
+        "add_B_to_weighted_A": KernelCls(strict_needs=True).ingest(
             f"""
 extern "C" __global__ void {t}_add_B_to_weighted_A(float* array1, const float* array2, float weight, int n) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -184,7 +202,7 @@ extern "C" __global__ void {t}_add_B_to_weighted_A(float* array1, const float* a
 }}
 """
         ),
-        "weighted_mean_B_in_A": KernelCls().ingest(
+        "weighted_mean_B_in_A": KernelCls(strict_needs=True).ingest(
             f"""
 extern "C" __global__ void {t}_weighted_mean_B_in_A(float* array1, const float* array2, float weight, int n) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -193,7 +211,7 @@ extern "C" __global__ void {t}_weighted_mean_B_in_A(float* array1, const float* 
 }}
 """
         ),
-        "arange": KernelCls().ingest(
+        "arange": KernelCls(strict_needs=True).ingest(
             f"""
 extern "C" __global__ void {t}_arange(float* array, int n) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -202,7 +220,7 @@ extern "C" __global__ void {t}_arange(float* array, int n) {{
 }}
 """
         ),
-        "multiply_by_scalar": KernelCls().ingest(
+        "multiply_by_scalar": KernelCls(strict_needs=True).ingest(
             f"""
 extern "C" __global__ void {t}_multiply_by_scalar(float* A, float scalar, int n) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -225,10 +243,20 @@ def build_slope(HelperCls, grid):
     _closure_blocks.build_slope, walking `grid`'s neighbour/dx/n_neighbours
     surface through $...$ spans.
 
+    `grid=grid` - a whole Bag bound under one name - goes through a
+    Kind.BAG Need (bag_need, see backends.py), mirroring
+    _closure_blocks.build_slope's own conversion; same shared `contains`
+    list reused across both bag_need() calls.
+
     Author: B.G (07/2026)
     """
     t = f"pf{new_uid()}"
-    mk = functools.partial(make_helper, HelperCls)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
+    grid_contains = [
+        Need("n_neighbours", kind=Kind.PARAM, dtype=grid.n_neighbours.dtype, modes={grid.n_neighbours.mode}),
+        Need("neighbour", kind=Kind.HELPER),
+        Need("dx", kind=Kind.PARAM, dtype=grid.dx.dtype, modes={grid.dx.mode}),
+    ]
 
     sumslope_downstream = mk(
         f"""
@@ -246,7 +274,7 @@ __device__ float {t}_sumslope_downstream(const float* z, int i) {{
     return sumslope;
 }}
 """,
-        grid=grid,
+        grid=bag_need("grid", grid, contains=grid_contains),
     )
     slope_dir = mk(
         f"""
@@ -259,7 +287,7 @@ __device__ float {t}_slope_dir(const float* z, int i, int k) {{
     return slope;
 }}
 """,
-        grid=grid,
+        grid=bag_need("grid", grid, contains=grid_contains),
     )
     return {"sumslope_downstream": sumslope_downstream, "slope_dir": slope_dir}
 
@@ -278,7 +306,7 @@ def build_scatter_kernel(KernelCls):
     Author: B.G (07/2026)
     """
     t = f"pf{new_uid()}"
-    return KernelCls().ingest(
+    return KernelCls(strict_needs=True).ingest(
         f"""
 extern "C" __global__ void {t}_scatter(const int* flags, const int* scan_out, int* ids, int n) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -304,10 +332,12 @@ def build_block_reduce(HelperCls, block_size: int = 128):
     warms up jitify's header cache for <cub/block/block_reduce.cuh> - budget
     roughly two minutes for that one-time cost.
 
+    `strict_needs=True` for consistency; nothing here binds anything.
+
     Author: B.G (07/2026)
     """
     t = f"pf{new_uid()}"
-    mk = functools.partial(make_helper, HelperCls)
+    mk = functools.partial(make_helper, HelperCls, strict_needs=True)
     sum_helper = mk(
         f"""
 #include <cub/block/block_reduce.cuh>

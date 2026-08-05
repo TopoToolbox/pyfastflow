@@ -84,6 +84,13 @@ to that same bag and then does its own validation when it compiles, net-swap
 -identity included - which matters more here than in a standalone Routine,
 since a Sequence may run it an unknown number of times.
 
+SequenceBuilder.bind(bag), unrelated to bind_bag() above, is the additive,
+Need-matching (need.py) counterpart described in routine.py's module
+docstring for RoutineBuilder.bind - it fans `bag` out to every block's own
+builder (a kernel's kernel_builder, a Routine block's whole RoutineBuilder,
+loop bodies included) and lets each fill in whichever of its own declared
+Needs match by name, leaving everything else untouched.
+
 What host code may and may not do, between blocks:
 
 - set() on a scalar or field Parameter is legal, and is the point of this
@@ -370,6 +377,29 @@ class SequenceBuilder(ABC):
         Author: B.G (07/2026)
         """
         self._bag = bag
+        return self
+
+    def bind(self, bag: "Bag") -> "SequenceBuilder":
+        """
+        Fan `bag` out to every block added so far - a kernel block's own
+        kernel_builder.bind(bag) (compile.py), a Routine block's nested
+        RoutineBuilder.bind(bag) (routine.py, which itself fans further out
+        to that routine's own steps), loop bodies included via
+        _flat_blocks(). A host block has no Needs of its own and is skipped.
+
+        The Sequence-level counterpart to RoutineBuilder.bind: additive,
+        Need-matching, unrelated to bind_bag()/_validate()'s rebind of
+        kernel blocks and bind_bag() of nested RoutineBuilders - see
+        RoutineBuilder.bind's own docstring for why this needs no
+        check_handles-equivalent guard the way that path does. Call it more
+        than once, with different bags, to fill in Needs left unmet by an
+        earlier call.
+
+        Author: B.G (08/2026)
+        """
+        for _, block in self._flat_blocks():
+            if block.kind in ("kernel", "routine"):
+                block.builder.bind(bag)
         return self
 
     def add_kernel(

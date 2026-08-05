@@ -48,6 +48,13 @@ of that arithmetic, not a reimplementation. White noise lands in
 [-amplitude, amplitude]; Perlin is the octave-averaged lattice noise scaled by
 amplitude.
 
+_closure_blocks.py/_cupy_blocks.py's own internal wiring goes through a Need
+(need.py) now, every HelperBuilder built `strict_needs=True` (compile.py) -
+the second factory converted, after grid/, per the Need-restructuring plan.
+`GRID=grid` (a whole Bag bound under one name) is the first real use of
+`Kind.BAG` there. Internal only - make_noise's/make_hash_u32's own signatures
+and the returned Bag's member names/types are unchanged.
+
 Author: B.G (07/2026)
 """
 
@@ -107,9 +114,9 @@ def make_hash_u32(backend: str):
 
     Author: B.G (07/2026)
     """
-    backend_mod, _, HelperCls, _ = backend_classes(backend)
+    _, _, HelperCls, _ = backend_classes(backend)
     blocks = _blocks_for(backend)
-    return blocks.build_hash_u32(HelperCls, backend_mod)
+    return blocks.build_hash_u32(HelperCls)
 
 
 def make_noise(
@@ -214,7 +221,6 @@ def make_noise(
         frequency_y_p=frequency_y_p,
         octaves_p=octaves_p,
         persistence_p=persistence_p,
-        backend_mod=backend_mod,
     )
 
     members.update(helpers)
