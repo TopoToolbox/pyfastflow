@@ -40,13 +40,13 @@ itself (`nx_f`/`ny_f`); `NY` (Perlin only) likewise by `at` itself. Each of
 these wires its own local `NX`/`NY` PARAM slot (a device template can only
 call/read what is composed or wired directly onto its own scope - builder.py's
 module docstring), which would otherwise mint one independent address per
-occurrence at build() time. `_share_leaf`/`_find_param_paths` are the same
-mechanism grid/__init__.py uses for its own NX/NY/DX (see that module's own
-docstring) - copied here verbatim rather than imported, since sharing a
-canonical name across two independently-authored composites by anything
-other than an explicit, itemized, per-factory `share()` call would be the
-implicit name-matching bound.py's own module docstring explicitly warns
-against. Every value param (`AMPLITUDE`, `SEED`/`PERM`/`FX`/`FY`/`OCTAVES`/
+occurrence at build() time. `share_leaf`/`find_param_paths`
+(core/context/builder.py) are the same mechanism grid/__init__.py uses for
+its own NX/NY/DX (see that module's own docstring) - sharing a canonical
+name across two independently-authored composites is always this explicit,
+itemized, per-factory `share()` call, never the implicit name-matching
+bound.py's own module docstring explicitly warns against. Every value param
+(`AMPLITUDE`, `SEED`/`PERM`/`FX`/`FY`/`OCTAVES`/
 `PERSISTENCE`) is shared the same way even though each currently occurs only
 once in the tree - mirroring grid's own NODATA_MASK/OUTLET_MASK precedent -
 so every one of noise's PARAM addresses lives at the group's own top level
@@ -72,9 +72,8 @@ Author: B.G (08/2026)
 import numpy as np
 
 from ..core.context.backends import backend_classes
-from ..core.context.builder import GroupBuilder, HelperBuilder
-from ..core.context.frozen import FrozenGroup, _Frozen
-from ..core.context.slot import SlotKind
+from ..core.context.builder import GroupBuilder, HelperBuilder, share_leaf
+from ..core.context.frozen import FrozenGroup
 
 _KINDS = frozenset({"white", "perlin"})
 _MODES = ("const", "scalar")
@@ -122,39 +121,6 @@ def _check_kind(kind: str) -> None:
         raise ValueError(f"make_noise_group: kind must be one of {sorted(_KINDS)}, got {kind!r}")
 
 
-def _find_param_paths(frozen: _Frozen, leaf_name: str, prefix: tuple = ()) -> list:
-    """
-    Every relative dotted path, as a `"a.b.NAME"` string, under `frozen`'s
-    own composed subtree whose PARAM slot is literally named `leaf_name` -
-    see grid/__init__.py's own `_find_param_paths` (identical).
-
-    Author: B.G (08/2026)
-    """
-    paths = []
-    if leaf_name in frozen.slots.names(SlotKind.PARAM):
-        paths.append(".".join(prefix + (leaf_name,)))
-    for name, child in frozen.composed.items():
-        paths.extend(_find_param_paths(child, leaf_name, prefix + (name,)))
-    return paths
-
-
-def _share_leaf(group: GroupBuilder, canonical: str) -> None:
-    """
-    Declare every occurrence of a PARAM slot named `canonical` anywhere in
-    `group`'s already-composed subtree as build-phase-shared with `group`'s
-    own top-level `canonical` slot - see grid/__init__.py's own `_share_leaf`
-    (identical) and this module's own docstring for why noise needs this for
-    every value param, not just NX/NY.
-
-    Author: B.G (08/2026)
-    """
-    paths = []
-    for name, child in group.composed.items():
-        paths.extend(_find_param_paths(child, canonical, (name,)))
-    if paths:
-        group.share(canonical, *paths)
-
-
 def make_noise_group(backend: str, *, kind: str = "perlin") -> FrozenGroup:
     """
     Build one noise's structure: a FrozenGroup wiring `NX` (always) and `NY`
@@ -190,17 +156,17 @@ def make_noise_group(backend: str, *, kind: str = "perlin") -> FrozenGroup:
 
     blocks.build_group(group, kind=kind)
 
-    _share_leaf(group, "NX")
-    _share_leaf(group, "AMPLITUDE")
+    share_leaf(group, "NX")
+    share_leaf(group, "AMPLITUDE")
     if kind == "white":
-        _share_leaf(group, "SEED")
+        share_leaf(group, "SEED")
     else:
-        _share_leaf(group, "NY")
-        _share_leaf(group, "PERM")
-        _share_leaf(group, "FX")
-        _share_leaf(group, "FY")
-        _share_leaf(group, "OCTAVES")
-        _share_leaf(group, "PERSISTENCE")
+        share_leaf(group, "NY")
+        share_leaf(group, "PERM")
+        share_leaf(group, "FX")
+        share_leaf(group, "FY")
+        share_leaf(group, "OCTAVES")
+        share_leaf(group, "PERSISTENCE")
 
     return group.close()
 

@@ -48,7 +48,7 @@ scope (builder.py's module docstring) - never a sibling's. Grid's `row`/
 those composes its own copy of the same FrozenHelper object (shared by
 identity, per frozen.py) under its own local name - which, left alone, would
 mint one independent PARAM address per occurrence at build() time (bound.py)
-for what is conceptually one nx/ny/dx/mask value. `_share_leaf` below is
+for what is conceptually one nx/ny/dx/mask value. `share_leaf` (core/context/builder.py) is
 this module's own use of GroupBuilder.share() (builder.py): after
 `blocks.build_group()` composes every public helper onto the group, it walks
 the group's own already-composed subtree, finds every PARAM slot literally
@@ -73,9 +73,8 @@ Author: B.G (08/2026)
 import numpy as np
 
 from ..core.context.backends import backend_classes
-from ..core.context.builder import GroupBuilder
-from ..core.context.frozen import FrozenGroup, _Frozen
-from ..core.context.slot import SlotKind
+from ..core.context.builder import GroupBuilder, share_leaf
+from ..core.context.frozen import FrozenGroup
 
 _TOPOLOGIES = {"D4": 4, "D8": 8}
 _BOUNDARIES = frozenset({"normal", "periodic_EW", "periodic_NS"})
@@ -108,43 +107,6 @@ def _check_config(topology: str, boundary: str, outlet: str) -> None:
         raise ValueError(f"make_grid_group: outlet must be one of {sorted(_OUTLETS)}, got {outlet!r}")
 
 
-def _find_param_paths(frozen: _Frozen, leaf_name: str, prefix: tuple = ()) -> list:
-    """
-    Every relative dotted path, as a `"a.b.NAME"` string, under `frozen`'s
-    own composed subtree whose PARAM slot is literally named `leaf_name` -
-    the itemized list `_share_leaf` hands to GroupBuilder.share(). Recurses
-    through `.composed` only (a HELPER slot with nothing composed raises
-    earlier, at that structure's own ingest()/build(), never reached here).
-
-    Author: B.G (08/2026)
-    """
-    paths = []
-    if leaf_name in frozen.slots.names(SlotKind.PARAM):
-        paths.append(".".join(prefix + (leaf_name,)))
-    for name, child in frozen.composed.items():
-        paths.extend(_find_param_paths(child, leaf_name, prefix + (name,)))
-    return paths
-
-
-def _share_leaf(group: GroupBuilder, canonical: str) -> None:
-    """
-    Declare every occurrence of a PARAM slot named `canonical` anywhere in
-    `group`'s already-composed subtree as build-phase-shared with `group`'s
-    own top-level `canonical` slot - see the module docstring. A no-op if
-    `canonical` occurs nowhere in the subtree (e.g. OUTLET_MASK when no
-    block happens to reference it under the current config) - share()
-    itself requires at least one path, so this only calls it when there is
-    something to share.
-
-    Author: B.G (08/2026)
-    """
-    paths = []
-    for name, child in group.composed.items():
-        paths.extend(_find_param_paths(child, canonical, (name,)))
-    if paths:
-        group.share(canonical, *paths)
-
-
 def make_grid_group(
     backend: str,
     *,
@@ -159,7 +121,7 @@ def make_grid_group(
     own top-level PARAM slots, composing the neighbour/distance/edge public
     helper surface - uniform by name regardless of backend or config - and
     then declaring every private occurrence of each of those PARAM names
-    build-phase-shared with the group's own top-level slot (`_share_leaf`,
+    build-phase-shared with the group's own top-level slot (`share_leaf`,
     see the module docstring), so a caller composing this group into a
     kernel binds one `grid.NX` rather than one per private block that reads
     it. Returns structure only, no Parameter objects - make_grid_parameters
@@ -188,13 +150,13 @@ def make_grid_group(
 
     blocks.build_group(group, topology=topology, boundary=boundary, nodata=nodata, outlet=outlet)
 
-    _share_leaf(group, "NX")
-    _share_leaf(group, "NY")
-    _share_leaf(group, "DX")
+    share_leaf(group, "NX")
+    share_leaf(group, "NY")
+    share_leaf(group, "DX")
     if nodata:
-        _share_leaf(group, "NODATA_MASK")
+        share_leaf(group, "NODATA_MASK")
     if outlet == "mask":
-        _share_leaf(group, "OUTLET_MASK")
+        share_leaf(group, "OUTLET_MASK")
 
     return group.close()
 

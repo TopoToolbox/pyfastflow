@@ -2,7 +2,7 @@
 cupy (CUDA source) block templates behind make_accumulation: the ping-pong
 src helpers, and the three accumulation methods ("atomic", "rake_compress",
 "pointer_jump_push"), on the new builder/frozen/bound/sequence stack
-(../core/context/builder.py, frozen.py, bound.py, sequence_v2.py).
+(../core/context/builder.py, frozen.py, bound.py, sequence.py).
 
 Split out of a single _cupy_blocks.py that used to hold every flow algorithm
 - see _cupy_receivers.py/_cupy_depressions.py/_cupy_reconstruct.py for the
@@ -29,7 +29,7 @@ Author: B.G (08/2026)
 """
 
 from ..core.context.builder import HelperBuilder, KernelBuilder
-from ..core.context.sequence_v2 import SequenceBuilder
+from ..core.context.sequence import SequenceBuilder
 from ..core.pool.base import new_uid
 
 
@@ -135,7 +135,7 @@ extern "C" __global__ void {t}_accum_downstream_atomic(const int* rec, float* q)
     return {"q_init": q_init, "accum": accum}
 
 
-def build_rake_compress(*, grid, logn: int, n_flat: int):
+def build_rake_compress(*, n_neighbours: int, logn: int, n_flat: int):
     """
     SequenceBuilder for the rake-and-compress accumulation, plus the
     KernelBuilders it is made of - see _closure_accum.py's build_rake_compress
@@ -162,14 +162,14 @@ def build_rake_compress(*, grid, logn: int, n_flat: int):
     Every kernel here launches over an n_flat-sized index space except the
     single-thread iteration bookkeeping steps ("reset_iteration",
     "bump_iteration", "decrement_iteration"), composed with their own
-    `launch={"grid": 1, "block": 1}` override (sequence_v2.py's
+    `launch={"grid": 1, "block": 1}` override (sequence.py's
     compose(..., launch=...)) - the sequence-level `compile(backend,
     grid=..., block=...)` call the caller eventually makes supplies the
     n_flat-sized default every other step falls back to.
 
     Author: B.G (08/2026)
     """
-    NN = grid["N_NEIGHBOURS"].get()
+    NN = n_neighbours
     t = f"pr{new_uid()}"
 
     get_src, update_src = build_ping_pong_helpers()

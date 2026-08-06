@@ -189,20 +189,20 @@ def check_all(rec: np.ndarray, nx: int, ny: int, can_out: np.ndarray) -> dict:
 
 def _label_only_sequence(backend, deps, grid_params, n_flat, rec, rec_jump, bid):
     """
-    A compiled Sequence (sequence_v2.py) whose only block is `deps`'s
+    A compiled Sequence (sequence.py) whose only block is `deps`'s
     basin-labelling block, so the two labelling implementations can be run
     over one and the same receiver graph and diffed.
 
-    Reuses flow/__init__.py's own private `_bind_by_leaf`/`_bind_grid_everywhere`
-    - the same leaf-name binding make_depression_solver uses for its own
-    "label_basins" block - so what is measured here is the labelling block
-    exactly as the solver itself drives it, not a re-implementation of the
-    binding logic.
+    Reuses bound.py's own `bind_leaf` and flow/__init__.py's private
+    `_bind_grid_everywhere` - the same leaf-name binding make_depression_solver
+    uses for its own "label_basins" block - so what is measured here is the
+    labelling block exactly as the solver itself drives it, not a
+    re-implementation of the binding logic.
 
     Author: B.G (08/2026)
     """
-    from ..core.context.sequence_v2 import SequenceBuilder
-    from . import _bind_by_leaf, _bind_grid_everywhere, _bind_if_present
+    from ..core.context.sequence import SequenceBuilder
+    from . import _bind_grid_everywhere, _bind_if_present
 
     sb = SequenceBuilder()
     sb.compose("label_basins", deps["label_basins"])
@@ -210,7 +210,7 @@ def _label_only_sequence(backend, deps, grid_params, n_flat, rec, rec_jump, bid)
     frozen = sb.freeze()
     bound = frozen.build()
 
-    _bind_by_leaf(bound, ("label_basins",), {"rec": rec, "rec_jump": rec_jump, "bid": bid})
+    bound.bind_leaf({"rec": rec, "rec_jump": rec_jump, "bid": bid}, prefix=("label_basins",))
     _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "src"), rec)
     _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "dst"), rec_jump)
     _bind_grid_everywhere(bound, grid_params)
@@ -284,8 +284,7 @@ def run(backend: str):
 
     recv = make_receivers(backend, grid, topology="D8", mode="steepest")
     recv_bound = recv["receivers"].build()
-    for name in ("NX", "NY", "DX", "N_NEIGHBOURS"):
-        recv_bound.bind(name, grid_params[name])
+    recv_bound.bind_leaf(grid_params)
     recv_bound.bind("z", z.data)
     recv_bound.bind("rec", rec.data)
     recv_launch = {"grid": ((n + BLOCK - 1) // BLOCK,), "block": (BLOCK,)} if not closure else {}

@@ -1,835 +1,308 @@
 """
-A Routine is an ordered, device-only, linear sequence of kernels compiled and
-launched as one unit, sharing a single bag of Parameters and Helpers across
-every step.
+RoutineBuilder / FrozenRoutine / BoundRoutine / CompiledRoutine: the same
+build -> freeze -> bind -> compile lifecycle a kernel goes through (builder.py
+/frozen.py/bound.py), one level up - an ordered, device-only sequence of
+already-built kernels, sharing one address space, launched back to back as
+one unit.
 
-What this is for
------------------
-A single kernel is one pass over the grid. Most models need several passes
-run back to back, over the same underlying parameters, every substep - heat
-diffusion needs a diffuse pass then a source pass, repeated. Wiring that by
-hand means keeping several already-compiled Kernels around plus a python loop
-that launches them in order and juggles which buffer currently holds what.
-A Routine collects that sequence once, as a builder, and compiles it into one
-callable that launches every step in order.
+Named `routine` (not `routine`) only because `routine.py` already names
+the pre-1d implementation this replaces, which stays in the tree untouched
+until Phase 3 deletes it - see the Phase 1d report for this naming fork.
 
-A Routine is built from KernelBuilders that are otherwise ordinary - built
-exactly as they would be for a standalone compile, bind()ed against whatever
-Parameters and Helpers the step needs. Optionally, a Routine's steps need not
-each keep their own bindings forever: if bind_bag() is called, every step is
-rebound at compile() time (see compile.py, CompileBuilder.rebind) against the
-one bag the whole Routine shares, so a Parameter reached under a given name
-means the same object in every step that reaches it. A step whose every
-dependency is already wired through Need (need.py) at construction time never
-needs this at all - see bind_bag()'s and _validate's own docstrings.
-check_handles (bag.py) is always run across every step's own bindings, as
-authored, whether or not bind_bag() was called - so a
-step built against one object under a name another step expects to mean
-something else is caught at compile time, even though rebind would otherwise
-silently make both agree with whatever the routine's bag holds.
+Composition, not registration
+-------------------------------
+`compose(name, frozen_kernel)` is this module's only way to add a step: it
+both names the step (an explicit handle, never a positional `step0` - see
+builder.py's compose() for the same rule one level down) and fixes its
+position in launch order, which is insertion order. There is no separate
+"declare a step" call followed by a separate "now order it" call - the two
+are the same call, so a routine's execution order is always exactly its own
+composition order, readable straight off `FrozenRoutine.order`.
 
-RoutineBuilder.bind(bag) is a second, additive way to reach a step's own
-bindings, unrelated to bind_bag()/rebind() above: rather than requiring `bag`
-to be a complete superset of every step's current bindings, it fans `bag` out
-to each step's kernel_builder.bind(bag) (compile.py) and lets each one fill
-in whichever of its own *declared* Needs (need.py) match `bag` by member
-name, leaving the rest - and every step whose kernel_builder declares no
-matching Need - untouched. See RoutineBuilder.bind's own docstring for why
-this needs no check_handles-equivalent guard the way bind_bag()/rebind() do.
+Composing the *same* FrozenKernel object under two different step names
+(`rb.compose("diffuse1", diffuse).compose("diffuse2", diffuse)`) is how a
+kernel runs twice in one routine with independently-bound data at each
+occurrence - the routine-level extension of the instancing property
+frozen.py's module docstring describes for a helper composed into eighty
+kernels: one FrozenKernel, two addresses (`diffuse1.*`, `diffuse2.*`), two
+independently bindable slot sets, and - after compile() - two independent
+CompiledKernel launches. This is also what replaces the old routine.py's
+add_swap: instead of relabelling one shared data name between two launches of
+one compiled kernel, two separate step names each hold their own DATA
+address, bound to whichever buffer that occurrence needs.
 
-Bulk data - the buffers each step reads and writes - is handled separately
-from the bag. add_data(name, handle) gives a buffer a routine-local name;
-add_kernel's data_handle_ref maps positional template arguments onto those
-names. add_swap(a, b) relabels which buffer a name currently means, for every
-step added after it - it is bookkeeping only, resolved once at compile time,
-and costs nothing at launch. Because a Routine is called and re-called without
-returning to Python between steps, there is no place to do the python-level
-`T0, T1 = T1, T0` a hand-written ping-pong loop uses; add_swap is what stands
-in for it, and the compiled Routine keeps re-running correctly precisely
-because the net effect of every swap in it is required to be the identity -
-see RoutineBuilder.compile.
+compose() rejects a FrozenHelper (a helper has no standalone launch - compose
+it into a KernelBuilder first, then compose that kernel's FrozenKernel here)
+and anything that is not a FrozenKernel.
 
-A routine-local name may optionally carry a kind=DATA Need (need.py):
-add_data(name, handle, need=...). This Need belongs to the *name* - the slot
-add_data created - not to any one step's reference to it, and add_swap never
-touches it: a swap only relabels which name a later add_kernel's
-data_handle_ref resolves to, it does not move or duplicate the Need attached
-to the name that was swapped. compile() checks it two ways: the name must by
-then have a real handle (add_data(name, None, need=...) plus a later
-fill_data() is the only legal way to defer that, exactly as without a Need),
-and that handle's dtype must satisfy the Need. A step's own kernel_builder may
-separately declare its own per-argument data_needs (see compile.py and
-_cupy_mfd_accum.py's build_persistent_mfd for such a builder); compile() cross
--checks those against whatever handle the step's data_handle_ref currently
-points at too, so a step wired to the wrong-dtype buffer is caught here rather
-than at its first launch. Whichever names carried a Need this way, the
-compiled Routine re-validates again on every call that supplies a positional
-override for them - see Routine.__call__ - exactly as a Kernel's own
-data_needs are re-validated on every call. A name given no Need behaves
-exactly as it always has.
+Addressing
+-----------
+`build()` walks every composed step's own composition tree via bound.py's
+`_walk`, prefixed with that step's own name - `flux.grad.z` names the `z`
+PARAM slot of the `grad` helper composed inside the kernel composed under
+`flux`, exactly the nesting a kernel's own address tree already has, with one
+more level of handle name in front of it. No separate bookkeeping: the
+address table is derived fresh, every `build()` call, straight from what each
+composed FrozenKernel's own `.build()` would mint on its own - see bound.py's
+module docstring for why that is exactly the instancing guarantee this relies
+on.
 
-Executing a routine
---------------------
-    routine = (TaichiRoutineBuilder()
-               .add_data("T0", T0.data)
-               .add_data("T1", T1.data)
-               .bind_bag(shared_bag)
-               .add_kernel(diffuse_builder, data_handle_ref=("T1", "T0"))
-               .add_kernel(source_builder, data_handle_ref=("T1",))
-               .add_swap("T0", "T1")
-               .add_kernel(diffuse_builder, data_handle_ref=("T1", "T0"))
-               .add_kernel(source_builder, data_handle_ref=("T1",))
-               .add_swap("T0", "T1")
-               .compile())
-    routine()                 # uses the add_data() defaults
-    routine(T0.data, T1.data) # or override them positionally, per data_names
+Compiling
+----------
+`BoundRoutine.compile(backend, **kwargs)` checks this routine's own unmet
+slots first (routine-level addresses, not a per-step address a caller would
+have to map back), then, per step in order: builds a *fresh* BoundKernel from
+that step's own FrozenKernel, copies in whatever this BoundRoutine currently
+holds at each of that step's local addresses (routine address `name.*` ->
+step-local address `*`), and calls that BoundKernel's own `.compile(backend,
+**step_kwargs)` - reusing compile_closure.py/compile_cupy.py entirely
+unchanged. The result is one CompiledRoutine wrapping the steps' own
+CompiledKernels, in order.
 
-compile() rebinds and compiles each step, in the order added, into a Routine:
-an inert sequence of already-compiled kernels plus, per step, which of the
-routine's data names it launches with. Calling a Routine simply launches its
-steps in that order. This base implementation keeps every step a fully
-separate kernel launch; both backend subclasses build on it rather than
-replacing it outright. The closure-backend subclass (Taichi/Quadrants)
-overrides compile() to splice consecutive steps' loop bodies into one
-generated kernel by default; split() marks where that splicing should stop
-and a new generated kernel should start. CupyRoutineBuilder, having no
-source fusion available, instead defaults to capturing the compiled steps'
-launches into a CUDA graph and replaying that graph on call - see
-cupy_backend.py, CupyRoutineBuilder.compile and _CapturedRoutine. See
-RoutineBuilder.compile, ClosureRoutineBuilder.compile and
-CupyRoutineBuilder.compile for what a repeated call composes to and why the
-swaps must balance either way.
+Per-step launch config
+------------------------
+`compose(name, frozen_kernel, launch=None)` accepts an optional dict of
+compile()-kwargs (cupy's `grid=`/`block=`, in practice) that apply to this
+step only - the obvious case being `ops`' scan kernels, which need a
+different launch shape than whatever else shares a routine. `step_kwargs`
+above is `{**kwargs, **launch}` - the routine-level `compile(backend,
+**kwargs)` call is the default every step falls back to, `launch` overrides
+it key by key for that one step. A step composed with no `launch` uses the
+routine-level default outright.
 
-Contract: no set()/destroy() mid-routine
-------------------------------------------
-A compiled Routine holds the same kind of frozen snapshot a Kernel does (see
-parameter.py, "Lifetime of a compiled object"): scalar/field Parameters are baked
-in by their storage, const Parameters by their literal value. Calling set() or
-destroy() on any Parameter the routine's bag reaches, between two calls to the
-routine (or between two of its steps, if that were possible), is undefined:
-a scalar/field write is visible immediately since the routine holds the same
-storage, a const write is not since the literal was already baked into every
-step at compile time, and destroy() invalidates the storage a step still
-points at. None of this is enforced at runtime - recompile the routine after
-such a change, the same way a Kernel is recompiled.
+`CompiledRoutine.swap(addr, buf)` routes `name.*` to the matching step's own
+CompiledKernel.swap() - a dict write on that step alone, exactly as free as
+CompiledKernel.swap() itself (compile_shared.py). Calling a CompiledRoutine
+launches every step in order, each with whatever its own swap() state
+currently holds.
 
-Contract: a captured graph bakes in pointers, not just storage
------------------------------------------------------------------
-A CupyRoutineBuilder-compiled Routine (captured=True, its default - see
-cupy_backend.py) has everything above still true, plus one more thing a
-CUDA graph adds on top of what a plain kernel launch already has: every
-step's launch arguments, pointers included, are baked into the graph at
-capture time, not re-read at replay time.
-
-- A write to a scalar or field Parameter's storage - the ordinary set() -
-  still lands where the graph's launches already point, so it is seen on the
-  very next replay with no recompile needed; this is the intended way to
-  feed a captured routine changing data, exactly as for an uncaptured one.
-- set() on a const Parameter still only changes generated source the graph
-  never re-reads, so it goes stale exactly as an uncaptured Routine's kernels
-  would - recompile.
-- destroy(), or anything else that returns a data handle's buffer to the
-  pool, invalidates a pointer the graph's launches were captured with.
-  Recompile - there is no cheaper fix, since the graph does not know which
-  of its baked-in pointers came from which handle.
-None of this is enforced at runtime; see cupy_backend.py, _CapturedRoutine
-for the exact rule set and why.
-
-Author: B.G (07/2026)
+Author: B.G (08/2026)
 """
 
-import re
-from abc import ABC, abstractmethod
 from typing import Any
 
-from .bag import Bag, check_handles
-from .compile import CompileBuilder
-from .need import Kind, Need
+from ..pool.base import new_uid
+from .bound import Address, BindError, _Bound, _walk, _walk_group, format_address, parse_address
+from .compile_shared import CompileError, check_unmet
+from .frozen import FrozenBuilderError, FrozenHelper, FrozenKernel
 
-_C_FUNC_NAME_RE = re.compile(r"(?:__global__|__device__)\s+[\w:\*&]*\s*(\w+)\s*\(")
 
-
-def _template_label(template) -> str:
+class RoutineBuilderError(Exception):
     """
-    A short, human-readable name for a template, for error messages: a
-    python def's own __name__, or the __global__/__device__ entry point read
-    out of CUDA source text. Falls back to a truncated repr if neither
-    applies.
+    Raised by the RoutineBuilder build phase: a step name reused, an
+    attempt to compose a non-FrozenKernel, or a mutation after freeze().
 
-    Author: B.G (07/2026)
-    """
-    name = getattr(template, "__name__", None)
-    if name is not None:
-        return name
-    if isinstance(template, str):
-        match = _C_FUNC_NAME_RE.search(template)
-        if match:
-            return match.group(1)
-    return repr(template)[:60]
-
-
-def _flatten_bindings(bindings: dict[str, Any]) -> dict[str, Any]:
-    """
-    A step's bound names, expanded with a dotted entry for every member of
-    any bound Bag - the same shape Bag.walk() produces for a single bag,
-    covering a step's whole binding set instead of one bag's contents.
-
-    Author: B.G (07/2026)
-    """
-    flat: dict[str, Any] = {}
-    for name, obj in bindings.items():
-        flat[name] = obj
-        if isinstance(obj, Bag):
-            flat.update(dict(obj.walk(name)))
-    return flat
-
-
-class _Step:
-    """
-    One entry recorded by add_kernel: the kernel builder as given, and the
-    data names it launches with, resolved through the swap table as it stood
-    at the moment this step was added - see RoutineBuilder.add_kernel.
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
 
-    __slots__ = ("kernel_builder", "canonical_refs", "grid", "block")
 
-    def __init__(self, kernel_builder, canonical_refs: tuple, grid, block):
-        self.kernel_builder = kernel_builder
-        self.canonical_refs = canonical_refs
-        self.grid = grid
-        self.block = block
-
-
-class _CompiledStep:
+class RoutineBuilder:
     """
-    One step of a compiled Routine: a callable that launches the already
-    compiled kernel (backend launch convention baked in by
-    RoutineBuilder._make_caller), plus the data names it is called with.
+    Collects an ordered set of named kernel steps and freeze()s them into a
+    FrozenRoutine. See the module docstring.
 
-    Author: B.G (07/2026)
-    """
-
-    __slots__ = ("caller", "canonical_refs")
-
-    def __init__(self, caller, canonical_refs: tuple):
-        self.caller = caller
-        self.canonical_refs = canonical_refs
-
-
-class Routine:
-    """
-    A compiled, ordered sequence of kernels sharing one bag, ready to launch.
-
-    Inert, like every other compiled object in this package (see compile.py,
-    Specializable): it retains the steps it was built from and nothing reads
-    back from it to drive a later compile. Go through the RoutineBuilder that
-    produced it to change anything and compile again.
-
-    `data_names` lists the distinct names add_kernel's steps referenced, in
-    the order they first appear across the steps as they were added. Calling
-    the routine with no arguments launches every step using the handles given
-    to add_data(); calling it with `len(data_names)` positional arguments
-    overrides all of them for that call, matched up by position against
-    `data_names`. A repeated call, with or without override arguments, is
-    exactly what add_swap's net-identity requirement (see
-    RoutineBuilder.compile) makes safe: nothing about a Routine's own state
-    changes between calls, so calling it twice launches its steps against the
-    same starting arrangement of buffers twice.
-
-    Author: B.G (07/2026)
-    """
-
-    def __init__(
-        self,
-        steps: list[_CompiledStep],
-        data_names: tuple,
-        defaults: dict[str, Any],
-        data_needs: tuple = (),
-    ):
-        self._steps = steps
-        self._data_names = data_names
-        self._defaults = defaults
-        # one slot per data_names entry, None where add_data was given no
-        # Need for that name - see RoutineBuilder._data_needs_tuple. Empty
-        # tuple in means "nothing here declared a single Need", normalised
-        # to all-None so __call__'s zip below never has to special-case it.
-        self._data_needs = data_needs if data_needs else (None,) * len(data_names)
-
-    @property
-    def data_names(self) -> tuple:
-        """
-        The distinct data names this routine's steps reference, in
-        first-appearance order across the steps as they were added.
-
-        Author: B.G (07/2026)
-        """
-        return self._data_names
-
-    @property
-    def data_needs(self) -> tuple:
-        """
-        The kind=DATA Need (need.py), or None, declared for each entry of
-        `data_names`, in the same order - whatever add_data(name, handle,
-        need=...) attached to that name, aggregated at compile() time. A
-        name given no Need reports None here.
-
-        Author: B.G (08/2026)
-        """
-        return self._data_needs
-
-    def __call__(self, *args) -> None:
-        """
-        Launch every step in order. With no arguments, each data name
-        resolves to the handle given to add_data(); with
-        `len(data_names)` positional arguments, those override the defaults
-        for this call, matched by position against `data_names`. Any other
-        argument count raises.
-
-        Any positional argument whose matching data_names entry carries a
-        Need (see data_needs) is dtype-validated against it before any step
-        launches - re-validated every such call, exactly as a Kernel's own
-        data_needs are (see cupy_backend.py/_closure_backend.py,
-        CupyKernel/ClosureKernel.__call__). A call with no override
-        arguments validates nothing here: the defaults were already
-        validated once, at compile() time - see RoutineBuilder._validate.
-
-        Author: B.G (07/2026)
-        """
-        if args and len(args) != len(self._data_names):
-            raise ValueError(
-                f"Routine: expected 0 or {len(self._data_names)} argument(s) "
-                f"matching data_names={self._data_names}, got {len(args)}"
-            )
-        if args:
-            for need, arg in zip(self._data_needs, args):
-                if need is not None:
-                    need.bind(arg)
-        table = dict(self._defaults)
-        if args:
-            table.update(zip(self._data_names, args))
-        for step in self._steps:
-            step.caller(*(table[name] for name in step.canonical_refs))
-
-
-class RoutineBuilder(ABC):
-    """
-    Collects data names, a shared bag, and an ordered list of kernel steps,
-    and compiles them into a Routine.
-
-    add_data(name, handle) registers a routine-local name for a pooled data
-    handle. fill_data(name, handle) replaces a None default registered by
-    add_data, for a factory whose real buffer isn't allocated until later.
-    add_kernel(kernel_builder, data_handle_ref=(...)) appends a step:
-    `data_handle_ref` is a tuple of names, previously registered with
-    add_data, mapped positionally onto the template's own declared data
-    arguments. add_swap(a, b) is a build-time relabeling of which handle `a`
-    and `b` currently mean - it emits no code, costs nothing at launch, and
-    only affects steps added after it; a step added earlier keeps whatever
-    the table resolved to at the time it was added. split() records a fusion
-    boundary and otherwise does nothing; see its own docstring. bind_bag(bag)
-    sets the one bag every step is rebound against at compile time.
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
 
     def __init__(self):
-        self._data: dict[str, Any] = {}
-        self._data_needs: dict[str, Need] = {}
-        self._perm: dict[str, str] = {}
-        self._steps: list[_Step] = []
-        self._splits: set[int] = set()
-        self._bag: "Bag | None" = None
-        self._recording: "list | None" = None
-        self._repeat_times: int = 0
-
-    def add_data(self, name: str, handle: Any, need: "Need | None" = None) -> "RoutineBuilder":
-        """
-        Register `handle` under routine-local `name`, and the default it
-        resolves to unless a call to the compiled Routine overrides it.
-
-        `need`, if given, must be a kind=DATA Need (need.py) - it declares
-        this name's own dtype contract, independent of any step's reference
-        to it and untouched by add_swap (see the module docstring). Checked
-        immediately against `handle` if `handle` is not None; skipped if
-        `handle` is None (the fill_data() placeholder pattern - see
-        fill_data), deferred to compile() instead, which raises naming this
-        name if it is still unfilled by then. A name given no `need` behaves
-        exactly as it always has.
-
-        Author: B.G (07/2026)
-        """
-        if name in self._data:
-            raise KeyError(f"add_data: '{name}' is already registered")
-        if need is not None:
-            if need.kind is not Kind.DATA:
-                raise TypeError(f"add_data: '{name}' need must be kind=Kind.DATA, got {need.kind.value}")
-            self._data_needs[name] = need
-            if handle is not None:
-                need.bind(handle)
-        self._data[name] = handle
-        self._perm[name] = name
-        return self
-
-    def fill_data(self, name: str, handle: Any) -> "RoutineBuilder":
-        """
-        Replace `name`'s registered default with `handle`.
-
-        For a factory that registers add_data(name, None) because its real
-        buffer isn't allocated yet at builder-construction time (no pool of
-        its own - the caller owns the buffers). This is the sanctioned way
-        to fill such a placeholder, and to refill it: the same builder can be
-        wrapped into more than one Sequence (e.g. a solver's own Sequence and
-        a standalone one built around the same constituent builder for
-        verification), and each wrapping fills it again before its own
-        compile(). add_data itself raises on a name already registered,
-        since a second *registration* elsewhere in the tree is normally a
-        bug - fill_data is the deliberate update path, not a registration.
-
-        Raises KeyError if `name` was never registered via add_data(). If
-        `name` was registered with a Need (add_data's `need=`), `handle` is
-        validated against it here too - fill_data is the only place a
-        deferred placeholder's real buffer is ever attached, so this is the
-        first point such a contract can be checked.
-
-        Author: B.G (07/2026)
-        """
-        if name not in self._data:
-            raise KeyError(f"fill_data: '{name}' is not registered - call add_data() first")
-        need = self._data_needs.get(name)
-        if need is not None:
-            need.bind(handle)
-        self._data[name] = handle
-        return self
-
-    def add_kernel(
-        self,
-        kernel_builder: CompileBuilder,
-        data_handle_ref: tuple = (),
-        *,
-        grid=None,
-        block=None,
-    ) -> "RoutineBuilder":
-        """
-        Append a step launching `kernel_builder`'s compiled kernel with the
-        data handles named in `data_handle_ref`, mapped positionally onto
-        the template's own declared data arguments.
-
-        Each name in `data_handle_ref` must already be registered via
-        add_data(); which underlying handle it currently means is resolved
-        against the swap table as it stands right now; a later add_swap does
-        not reach back and change this step. `grid`/`block` are accepted on
-        every backend but only meaningful on cupy - see CupyRoutineBuilder.
-
-        Inside a begin_repeat()/end_repeat() block, this call is recorded
-        rather than applied immediately - see begin_repeat.
-
-        Author: B.G (07/2026)
-        """
-        data_handle_ref = tuple(data_handle_ref)
-        if self._recording is not None:
-            self._recording.append(("kernel", kernel_builder, data_handle_ref, grid, block))
-            return self
-        arity = self._data_arity(kernel_builder)
-        if arity != len(data_handle_ref):
-            name = _template_label(kernel_builder.template)
-            raise ValueError(
-                f"add_kernel: template {name!r} declares {arity} data argument(s), "
-                f"data_handle_ref gives {len(data_handle_ref)}"
-            )
-        unknown = [n for n in data_handle_ref if n not in self._perm]
-        if unknown:
-            raise KeyError(f"add_kernel: not registered via add_data: {sorted(unknown)}")
-        canonical = tuple(self._perm[n] for n in data_handle_ref)
-        self._steps.append(_Step(kernel_builder, canonical, grid, block))
-        return self
-
-    def add_swap(self, a: str, b: str) -> "RoutineBuilder":
-        """
-        Relabel the table so `a` and `b` swap which handle they currently
-        mean. Emits no code and has no runtime cost - it only changes what a
-        later add_kernel resolves its data_handle_ref against; steps added
-        before this call are unaffected. See compile() for the requirement
-        that every swap in a routine nets out to the identity.
-
-        Inside a begin_repeat()/end_repeat() block, this call is recorded
-        rather than applied immediately - see begin_repeat.
-
-        Author: B.G (07/2026)
-        """
-        if self._recording is not None:
-            self._recording.append(("swap", a, b))
-            return self
-        if a not in self._perm or b not in self._perm:
-            missing = sorted(n for n in (a, b) if n not in self._perm)
-            raise KeyError(f"add_swap: not registered via add_data: {missing}")
-        self._perm[a], self._perm[b] = self._perm[b], self._perm[a]
-        return self
-
-    def split(self) -> "RoutineBuilder":
-        """
-        Mark the boundary between this step and the next as a fusion
-        boundary: a fused compile() launches everything before this call and
-        everything after it as separate generated kernels, back to back,
-        rather than splicing them into one. It has no effect on an unfused
-        compile() - every step there is already its own kernel, in the order
-        added, whether or not split() was called between them.
-
-        Raises inside a begin_repeat()/end_repeat() block - what a fusion
-        boundary would mean for a body that is about to be replayed several
-        times is not worth defining, so it is simply rejected.
-
-        Author: B.G (07/2026)
-        """
-        if self._recording is not None:
-            raise ValueError("split: not supported inside a begin_repeat()/end_repeat() block")
-        self._splits.add(len(self._steps))
-        return self
-
-    def begin_repeat(self, times: int) -> "RoutineBuilder":
-        """
-        Start recording a repeated body: every add_kernel/add_swap call made
-        before the matching end_repeat() is recorded, verbatim, instead of
-        being applied to the step list right away.
-
-        end_repeat() replays the recorded calls `times` times, in order, by
-        calling the real add_kernel/add_swap for each recorded call on each
-        pass - so add_swap's relabeling and add_kernel's data_handle_ref
-        resolution against the swap table happen exactly as they would for
-        `times` copies of the body written out by hand. This is what lets the
-        existing net-permutation-is-identity check (see compile()/_validate)
-        run unchanged: it sees the fully unrolled step list either way, so an
-        odd repeat count over a body containing one swap is caught by that
-        same check with the same message.
-
-        Nested begin_repeat() raises - recording into a recording is not
-        supported. `times < 1` raises.
-
-        Author: B.G (07/2026)
-        """
-        if times < 1:
-            raise ValueError(f"begin_repeat: times must be >= 1, got {times}")
-        if self._recording is not None:
-            raise ValueError("begin_repeat: a repeat block is already open - nested repeat blocks are not supported")
-        self._recording = []
-        self._repeat_times = times
-        return self
-
-    def end_repeat(self) -> "RoutineBuilder":
-        """
-        Stop recording and replay the recorded add_kernel/add_swap calls the
-        number of times given to the matching begin_repeat(), in order, each
-        pass calling the real (non-recording) add_kernel/add_swap so the swap
-        table and step list end up exactly as if the body had been written
-        out `times` times by hand.
-
-        Raises if no begin_repeat() is open.
-
-        Author: B.G (07/2026)
-        """
-        if self._recording is None:
-            raise ValueError("end_repeat: no repeat block is open - call begin_repeat() first")
-        recorded = self._recording
-        times = self._repeat_times
-        self._recording = None
-        self._repeat_times = 0
-        for _ in range(times):
-            for call in recorded:
-                if call[0] == "kernel":
-                    _, kernel_builder, data_handle_ref, grid, block = call
-                    self.add_kernel(kernel_builder, data_handle_ref=data_handle_ref, grid=grid, block=block)
-                else:
-                    _, a, b = call
-                    self.add_swap(a, b)
-        return self
-
-    def bind_bag(self, bag: "Bag") -> "RoutineBuilder":
-        """
-        Set the one bag every step is rebound against at compile time.
-
-        Optional: a Routine built from steps whose dependencies are already
-        fully wired through Need (need.py) at construction time never needs
-        this call at all - compile() no longer requires a bag to have been
-        set (see _validate). Still the only way to reach for the older,
-        all-or-nothing rebind() contract when that is actually wanted (e.g.
-        SequenceBuilder._validate uses it to propagate its own outer bag
-        into every inner RoutineBuilder it compiles).
-
-        Author: B.G (07/2026)
-        """
-        self._bag = bag
-        return self
-
-    def bind(self, bag: "Bag") -> "RoutineBuilder":
-        """
-        Fan `bag` out to every step added so far, via each step's own
-        kernel_builder.bind(bag) (compile.py) - so any step whose
-        kernel_builder declares a Need matching one of `bag`'s members by
-        name gets it bound, and every other step is left exactly as it was.
-
-        This is the whole-routine counterpart to bind_bag()/rebind(), built
-        on the same Need-matching primitive rather than on that method's
-        require-a-complete-superset contract: a Need already bound (on any
-        step) is simply skipped, a step declaring no matching Need is
-        untouched, and a `bag` member matching no step's Need is ignored -
-        see CompileBuilder.bind()'s docstring for the full reasoning,
-        including why no check_handles (bag.py)-style cross-step guard is
-        needed here. "Every step's declared Needs collectively" is exactly
-        what this fan-out reaches: call it again, with a different bag, to
-        fill in Needs left unmet by an earlier call - two calls accumulate,
-        they do not replace one another.
-
-        Operates on whatever steps add_kernel has appended by the time this
-        is called; a step added afterwards is unaffected by a bind() already
-        made - call bind() again (or before compile(), when call order
-        relative to add_kernel doesn't matter) to reach it too.
-
-        Unrelated to bind_bag(), which sets the separate bag every step is
-        later rebound against wholesale in _validate()/compile() - both may
-        be used on the same builder; bind() only ever touches steps' own
-        Need-declaring kernel_builders, never `self._bag`.
-
-        Author: B.G (08/2026)
-        """
-        for step in self._steps:
-            step.kernel_builder.bind(bag)
-        return self
+        self._uid = new_uid()
+        self._order: list[str] = []
+        self._composed: dict[str, FrozenKernel] = {}
+        self._launch: dict[str, dict] = {}
+        self._frozen = False
 
     @property
-    def needs(self) -> dict[str, Need]:
-        """
-        Every Need declared on any step's kernel_builder, keyed by name -
-        not separately bookkept at this layer, walked fresh from each
-        step.kernel_builder.needs (compile.py) every time this is read. Two
-        steps declaring distinct Need objects under the same name are both
-        legal (see need.py's module docstring and CompileBuilder.bind()'s);
-        a plain dict can only show one object per key, so this view keeps
-        whichever comes last in step order - use unmet_needs() when what
-        matters is which Needs are unmet rather than which single object a
-        name currently maps to here.
+    def uid(self) -> int:
+        """Process-wide identity assigned at construction. See Parameter.uid (parameter.py)."""
+        return self._uid
 
-        Author: B.G (08/2026)
-        """
-        out: dict[str, Need] = {}
-        for step in self._steps:
-            out.update(step.kernel_builder.needs)
-        return out
-
-    def unmet_needs(self) -> list[Need]:
-        """
-        Every currently-unbound Need reachable from any step's
-        kernel_builder, flattened exactly as CompileBuilder.unmet_needs()
-        flattens through a bound HELPER need (compile.py) - no separate Need
-        bookkeeping at this layer, this walks each step's kernel_builder
-        fresh. A Need shared by two steps (the same object, declared on
-        both) that is still unbound is reported once per step that declares
-        it, same as CompileBuilder's own list is per-declaration, not
-        deduplicated by identity.
-
-        Author: B.G (08/2026)
-        """
-        unmet: list[Need] = []
-        for step in self._steps:
-            unmet.extend(step.kernel_builder.unmet_needs())
-        return unmet
-
-    @abstractmethod
-    def _data_arity(self, kernel_builder: CompileBuilder) -> int:
-        """
-        The number of data arguments `kernel_builder`'s ingested template
-        declares, for add_kernel's arity check.
-
-        Author: B.G (07/2026)
-        """
-        ...
-
-    @abstractmethod
-    def _make_caller(self, compiled_kernel, grid, block):
-        """
-        A callable(*data_args) that launches `compiled_kernel` the way this
-        backend requires - straight through for Taichi/Quadrants, with
-        grid/block supplied for cupy.
-
-        Author: B.G (07/2026)
-        """
-        ...
-
-    def _validate(self) -> None:
-        """
-        Everything a compile needs checked before any step is actually
-        compiled, fused or not.
-
-        In order: check_handles (bag.py) runs across every step's own
-        bindings, as authored - so two steps disagreeing about what one
-        handle means is caught here, before rebind would otherwise silently
-        make both agree with the routine's bag. If a bag was set via
-        bind_bag(), each step is then rebound against it; a step whose
-        current bindings the bag cannot satisfy raises naming that step and
-        everything missing. With no bag set, this rebind step is skipped
-        outright rather than raising - a step built with every dependency
-        wired through Need (need.py) at construction time never needed a
-        bag to begin with, and a step that still has a genuinely unmet
-        dependency is caught below regardless, when its own compile() runs
-        and its own _resolve_needs() reports exactly what is missing by
-        name - a strictly more specific error than a blanket "no bag bound"
-        would have been. This is what replaced the old unconditional "a bag
-        must have been bound via bind_bag() first" gate: that gate predates
-        Need and was guarding against a Routine with no context wiring at
-        all reaching a launch with unresolved names; unmet_needs()-driven
-        per-step compile validation already catches that same case, so the
-        gate no longer has anything left to protect against on its own.
-        The swap table's net permutation is then checked: every add_swap in
-        this routine must compose to the identity, since a Routine is called
-        and re-called without ever returning to Python to swap buffers
-        itself - an unbalanced set of swaps would compute into the wrong
-        buffer on the second call.
-
-        Author: B.G (07/2026)
-        """
-        if self._recording is not None:
-            raise ValueError("compile: a begin_repeat() block is still open - call end_repeat() first")
-        if not self._steps:
-            raise ValueError("compile: routine has no steps")
-
-        units = {}
-        for i, step in enumerate(self._steps):
-            label = f"step{i}:{_template_label(step.kernel_builder.template)}"
-            units[label] = _flatten_bindings(step.kernel_builder.bindings)
-        check_handles(units)
-
-        if self._bag is not None:
-            for i, step in enumerate(self._steps):
-                try:
-                    step.kernel_builder.rebind(self._bag)
-                except KeyError as exc:
-                    label = _template_label(step.kernel_builder.template)
-                    raise KeyError(f"compile: step {i} ({label!r}) cannot be satisfied by the routine's bag: {exc}") from exc
-
-        drift = {name: target for name, target in self._perm.items() if target != name}
-        if drift:
-            raise ValueError(f"compile: net swap permutation is not the identity, still swapped: {drift}")
-
-        self._check_data_needs()
-
-    def _check_data_needs(self) -> None:
-        """
-        Validate every add_data()-declared Need (see need.py, and the module
-        docstring's paragraph on this) against the handle currently
-        registered for its name, and every step's own
-        kernel_builder.data_needs - its own per-argument dtype contract, if
-        it declared any - against whatever handle its data_handle_ref
-        currently maps that argument onto. Both run here, at compile() time,
-        rather than waiting for a mismatch to reach a launch.
-
-        A name given a Need but never given a real handle (add_data(name,
-        None, need=...) with no matching fill_data() call before compile())
-        raises here, naming it - unlike Need.unmet_needs(), which never
-        reports a kind=DATA need as unmet (see need.py): that question is
-        "has this Need ever been bound", a different one from "is this
-        routine about to compile with a name we declared a contract for but
-        never gave a real buffer".
-
-        Author: B.G (08/2026)
-        """
-        missing = [name for name, need in self._data_needs.items() if self._data.get(name) is None]
-        if missing:
-            raise ValueError(
-                f"compile: data need(s) declared via add_data() but never given a handle "
-                f"(fill_data()?): {sorted(missing)}"
+    def _check_mutable(self) -> None:
+        if self._frozen:
+            raise FrozenBuilderError(
+                f"RoutineBuilder(uid={self._uid}) has already been freeze()-ed and is frozen - "
+                f"build a new RoutineBuilder instead of reusing this one"
             )
-        for name, need in self._data_needs.items():
-            need.bind(self._data[name])
 
-        for i, step in enumerate(self._steps):
-            step_needs = step.kernel_builder.data_needs
-            if not step_needs:
-                continue
-            for name, step_need in zip(step.canonical_refs, step_needs):
-                handle = self._data.get(name)
-                if handle is None:
-                    continue
-                try:
-                    step_need.bind(handle)
-                except (TypeError, ValueError) as exc:
-                    label = _template_label(step.kernel_builder.template)
-                    raise TypeError(
-                        f"compile: step {i} ({label!r}) data '{name}' violates its kernel_builder's "
-                        f"own Need contract: {exc}"
-                    ) from exc
-
-    def _data_needs_tuple(self, data_names: tuple) -> tuple:
+    def compose(self, name: str, frozen_kernel: FrozenKernel, *, launch: "dict | None" = None) -> "RoutineBuilder":
         """
-        The Need (or None) declared for each entry of `data_names`, in
-        order - what a compiled Routine's own `data_needs` carries. See
-        add_data's `need=` and Routine.data_needs.
+        Append a step named `name`, launching `frozen_kernel` at this
+        position in the routine's launch order (= composition order). See
+        the module docstring for the FrozenHelper rejection and the
+        same-kernel-twice-under-two-names instancing pattern.
+
+        `launch`, optional, is a dict of compile()-kwargs (cupy's `grid=`/
+        `block=`) that override the routine-level default for this step
+        only - see the module docstring's "Per-step launch config" section.
 
         Author: B.G (08/2026)
         """
-        return tuple(self._data_needs.get(name) for name in data_names)
-
-    def _grouped_steps(self) -> list[list[_Step]]:
-        """
-        `self._steps` partitioned at every split() boundary, in order. With
-        no split() calls this is a single group holding every step.
-
-        Author: B.G (07/2026)
-        """
-        groups: list[list[_Step]] = []
-        current: list[_Step] = []
-        for i, step in enumerate(self._steps):
-            if i in self._splits and current:
-                groups.append(current)
-                current = []
-            current.append(step)
-        if current:
-            groups.append(current)
-        return groups
-
-    def compile(self, fused: bool = False, dump_source: str | None = None) -> Routine:
-        """
-        Validate (see _validate) and compile every step into a Routine.
-
-        With fused=False (the default here - see the closure-backend
-        subclass for a backend where fusion is actually available and
-        defaults on), each step compiles to its own kernel and the Routine
-        launches them in order, exactly one host-side call per step.
-        `dump_source` is accepted for signature parity with a fusing
-        subclass and ignored, since there is no generated source to dump.
-        fused=True raises here: this base implementation backs cupy, which
-        has no source fusion.
-
-        Compiling a kernel_builder is deduplicated within one compile() call,
-        keyed on id(kernel_builder): a repeat block (begin_repeat/end_repeat)
-        unrolls the same KernelBuilder objects into several steps, and this
-        avoids recompiling an unchanged builder once per repetition. A
-        per-step caller is still built for every step even when its compiled
-        kernel is reused, since cupy steps sharing one builder may still
-        differ in grid/block.
-
-        Author: B.G (07/2026)
-        """
-        if fused:
-            raise NotImplementedError(
-                f"{type(self).__name__}: source fusion is not supported on this backend; "
-                "call compile(fused=False) (the default) instead"
+        self._check_mutable()
+        if isinstance(frozen_kernel, FrozenHelper):
+            raise TypeError(
+                f"compose({name!r}, ...): got a FrozenHelper, not a FrozenKernel - a helper has "
+                f"no standalone launch and cannot be a routine step. Compose it into a "
+                f"KernelBuilder first, then compose that kernel's FrozenKernel here."
             )
-        self._validate()
+        if not isinstance(frozen_kernel, FrozenKernel):
+            raise TypeError(f"compose({name!r}, ...): expected a FrozenKernel, got {type(frozen_kernel).__name__}")
+        if name in self._composed:
+            raise RoutineBuilderError(f"'{name}' is already composed on this routine")
+        self._composed[name] = frozen_kernel
+        self._launch[name] = dict(launch) if launch else {}
+        self._order.append(name)
+        return self
 
-        compiled_steps: list[_CompiledStep] = []
-        data_names: list[str] = []
-        compiled_cache: dict[int, Any] = {}
-        for step in self._steps:
-            key = id(step.kernel_builder)
-            compiled = compiled_cache.get(key)
-            if compiled is None:
-                compiled = step.kernel_builder.compile()
-                compiled_cache[key] = compiled
-            caller = self._make_caller(compiled, step.grid, step.block)
-            compiled_steps.append(_CompiledStep(caller, step.canonical_refs))
-            for name in step.canonical_refs:
-                if name not in data_names:
-                    data_names.append(name)
+    def freeze(self) -> "FrozenRoutine":
+        """
+        Close out the build phase: freeze this builder and return the
+        resulting FrozenRoutine. Raises if no step was ever composed - an
+        empty routine has nothing to launch.
 
-        defaults = {name: self._data[name] for name in data_names}
-        return Routine(compiled_steps, tuple(data_names), defaults, self._data_needs_tuple(data_names))
+        Author: B.G (08/2026)
+        """
+        self._check_mutable()
+        if not self._order:
+            raise RoutineBuilderError("freeze: routine has no steps - compose() at least one kernel first")
+        self._frozen = True
+        return FrozenRoutine(self._order, self._composed, self._launch)
+
+
+class FrozenRoutine:
+    """
+    The frozen result of a RoutineBuilder's freeze(): an ordered, immutable
+    {name: FrozenKernel}, plus each step's own launch-kwargs override. See
+    the module docstring.
+
+    Author: B.G (08/2026)
+    """
+
+    def __init__(self, order: list, composed: dict, launch: "dict | None" = None):
+        self._uid = new_uid()
+        self._order = tuple(order)
+        self._composed = dict(composed)
+        self._launch = dict(launch) if launch else {}
+
+    @property
+    def uid(self) -> int:
+        """Process-wide identity assigned at construction. See Parameter.uid (parameter.py)."""
+        return self._uid
+
+    @property
+    def order(self) -> tuple:
+        """Step names in launch order (= composition order)."""
+        return self._order
+
+    @property
+    def composed(self) -> dict:
+        """{step name: FrozenKernel}, read-only copy."""
+        return dict(self._composed)
+
+    @property
+    def launch(self) -> dict:
+        """{step name: launch-kwargs override dict}, read-only copy. See compose()'s `launch=`."""
+        return dict(self._launch)
+
+    def build(self) -> "BoundRoutine":
+        """
+        Walk every step's own composition tree (bound.py's `_walk`, prefixed
+        with that step's own name) and return a fresh BoundRoutine. See the
+        module docstring's "Addressing" section.
+
+        A step's own `.shared` (`_Builder.share()`, builder.py) is honoured
+        exactly as bound.py's own top-level `build()` honours it for a
+        standalone FrozenKernel - dispatching to `_walk_group` rather than
+        plain `_walk` - so a step composed with its own share() declarations
+        collapses identically whether it is built standalone or as one step
+        of a routine.
+
+        Author: B.G (08/2026)
+        """
+        table: dict[Address, Any] = {}
+        for name in self._order:
+            step = self._composed[name]
+            if step.shared:
+                _walk_group((name,), step, table, {}, frozenset())
+            else:
+                _walk((name,), step, table)
+        return BoundRoutine(self, table)
+
+    def __repr__(self) -> str:
+        return f"FrozenRoutine(uid={self._uid}, steps={list(self._order)})"
+
+
+class BoundRoutine(_Bound):
+    """
+    The bound result of build()-ing a FrozenRoutine - bind()/wire()/
+    inspect() work exactly as on a BoundKernel (_Bound, bound.py), over the
+    routine's whole `name.*` address space. See the module docstring's
+    "Compiling" section for compile().
+
+    Author: B.G (08/2026)
+    """
+
+    def compile(self, backend: str, **kwargs) -> "CompiledRoutine":
+        """
+        See the module docstring's "Compiling" section.
+
+        Author: B.G (08/2026)
+        """
+        check_unmet(self)
+        frozen: FrozenRoutine = self._frozen
+        steps: list[tuple[str, Any]] = []
+        for name in frozen.order:
+            step_frozen = frozen.composed[name]
+            step_bound = step_frozen.build()
+            for local_addr in step_bound.addresses():
+                val = self.value_at((name,) + local_addr)
+                if val is not None:
+                    step_bound.bind(local_addr, val)
+            step_kwargs = {**kwargs, **frozen.launch.get(name, {})}
+            compiled = step_bound.compile(backend, **step_kwargs)
+            steps.append((name, compiled))
+        return CompiledRoutine(steps)
+
+
+class CompiledRoutine:
+    """
+    An immutable, ordered sequence of already-compiled kernels, ready to
+    launch as one unit. See the module docstring.
+
+    Author: B.G (08/2026)
+    """
+
+    def __init__(self, steps: list):
+        self._steps = list(steps)
+        self._by_name = dict(steps)
+
+    @property
+    def step_names(self) -> list:
+        """Step names in launch order."""
+        return [name for name, _ in self._steps]
+
+    def swap(self, addr: "Address | str", buf: Any) -> "CompiledRoutine":
+        """
+        Re-point one step's DATA address at `buf` - routes `name.*` to that
+        step's own CompiledKernel.swap(), a dict write on that step alone.
+        See the module docstring.
+
+        Author: B.G (08/2026)
+        """
+        a = parse_address(addr) if isinstance(addr, str) else tuple(addr)
+        if not a:
+            raise BindError("swap: address must not be empty")
+        name, local = a[0], a[1:]
+        if name not in self._by_name:
+            raise BindError(
+                f"swap: {format_address(a)!r} - no such routine step {name!r} "
+                f"(steps: {sorted(self._by_name)})"
+            )
+        self._by_name[name].swap(local, buf)
+        return self
+
+    def __call__(self) -> None:
+        """Launch every step in order, each with whatever its own swap() state currently holds."""
+        for _, compiled in self._steps:
+            compiled()
+
+    def __repr__(self) -> str:
+        return f"CompiledRoutine(steps={[n for n, _ in self._steps]})"

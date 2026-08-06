@@ -1,26 +1,21 @@
 """
-Taichi implementations of Parameter and the two builders.
+Taichi implementation of Parameter.
 
-Templates are python defs. A builder specializes one by rebuilding it with the
-bound objects spliced into its globals, then hands the result to ti.func or
-ti.kernel; _closure_backend.py holds that machinery, shared with Quadrants.
-Everything below just names Taichi as the backend to use.
+A Parameter's device view is a python def specialized by rebuilding it with
+the bound objects spliced into its globals, then handed to ti.func;
+_closure_backend.py holds that machinery, shared with Quadrants. Everything
+below just names Taichi as the backend to use.
 
-Kernel templates declare their data arguments the usual Taichi way, typically
-ti.template(). Bound Parameters and helpers are not arguments - see parameter.py.
+The kernel/helper compile path (KernelBuilder/HelperBuilder -> FrozenKernel ->
+BoundKernel.compile("taichi")) is compile_closure.py, which reaches this
+module only for `ti` itself, imported directly there.
 
 Author: B.G (07/2026)
 """
 
 import taichi as ti
 
-from ._closure_backend import (
-    ClosureBackendParameter,
-    ClosureHelperBuilder,
-    ClosureKernelBuilder,
-    ClosureRoutineBuilder,
-    ClosureSequenceBuilder,
-)
+from ._closure_backend import ClosureBackendParameter
 
 
 class TaichiParameter(ClosureBackendParameter):
@@ -31,41 +26,3 @@ class TaichiParameter(ClosureBackendParameter):
     """
 
     _backend = ti
-
-
-class TaichiHelperBuilder(ClosureHelperBuilder):
-    """
-    Compiles a device helper with ti.func.
-
-    Author: B.G (07/2026)
-    """
-
-    _backend = ti
-
-
-class TaichiKernelBuilder(ClosureKernelBuilder):
-    """
-    Compiles a launchable kernel with ti.kernel.
-
-    Author: B.G (07/2026)
-    """
-
-    _backend = ti
-
-
-class TaichiRoutineBuilder(ClosureRoutineBuilder):
-    """
-    Compiles an ordered sequence of Taichi kernels sharing one bag into a
-    Routine.
-
-    Author: B.G (07/2026)
-    """
-
-
-class TaichiSequenceBuilder(ClosureSequenceBuilder):
-    """
-    Sequences Taichi kernels, Routines and host code under host-driven
-    control.
-
-    Author: B.G (07/2026)
-    """

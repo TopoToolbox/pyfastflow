@@ -64,10 +64,8 @@ def init_z_tmpl(ctx, z: ti.template()):
 
 
 init_bound = KernelBuilder().compose("noise", noise_group).wire_data("z").ingest(init_z_tmpl).build()
-init_bound.bind(("noise", "NX"), grid_params["NX"])
-init_bound.bind(("noise", "NY"), grid_params["NY"])
-for name, p in noise_params.items():
-    init_bound.bind(("noise", name), p)
+init_bound.bind_leaf(grid_params, prefix=("noise",))
+init_bound.bind_leaf(noise_params, prefix=("noise",))
 init_bound.bind("z", z.data)
 init_kernel = init_bound.compile("taichi")
 

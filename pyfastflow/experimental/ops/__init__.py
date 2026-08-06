@@ -40,12 +40,14 @@ authored composites).
 `make_block_reduce_group` is cupy-only (raises otherwise) - Taichi/Quadrants
 have no block-level reduction primitive this wraps.
 
-`make_scan`'s/`make_reduce`'s returned Parameters (`Scan.count_param`,
-`Reduce.{sum,min,max,argmin}_param`) are handed back bare, not wrapped in
-anything - there is no Need-shaped wrapper in this stack to reach for; a
-caller wanting one bound into its own KernelBuilder does so exactly like any
-other Parameter (`kb.wire_param("count"); bound.bind("count", scan.
-count_param)`).
+`make_scan`'s returned Parameter (`Scan.count_param`) is handed back bare,
+not wrapped in anything - there is no Need-shaped wrapper in this stack to
+reach for; a caller wanting it bound into its own KernelBuilder does so
+exactly like any other Parameter (`kb.wire_param("count"); bound.bind(
+"count", scan.count_param)`). `make_reduce`'s returned handles
+(`Reduce.{sum,min,max,argmin}_data`) are bare DataHandles instead, not
+Parameters - see "Reduce's DATA-not-PARAM accumulator" below for why a
+Parameter wrapper has nothing to add there.
 
 Reduce's DATA-not-PARAM accumulator
 -------------------------------------
@@ -55,23 +57,29 @@ accumulate. sum/min/max/argmin genuinely need atomic accumulation across
 threads (`ctx.bk.atomic_min(acc[None], x[i])`, Taichi's automatic atomic `+=`
 for sum), which needs the raw backend field/ndarray itself, not a Parameter's
 device_view - so the running total is wired as a DATA slot on the kernel
-(`acc`), not a PARAM one. The Parameter objects this module hands back to its
-own caller (`sum_param`, ...) still own that exact storage - `sum_p.get().
-data` is literally the array bound to the "acc" DATA address - only the
-device-side wiring differs from what a PARAM slot would have looked like; see
-_closure_blocks.py's own module docstring for the fuller reasoning.
+(`acc`), never a PARAM one, and is never reached through a PARAM slot
+anywhere in this factory's own kernels. A Parameter's only two jobs beyond
+raw storage - a device_view() for PARAM-slot binding, and dtype/mode
+bookkeeping for that binding - are therefore both unused here, so
+`make_reduce` hands its own caller the pooled DataHandle directly
+(`sum_data`, ...) rather than a Parameter wrapping it: `.from_numpy()`/
+`.to_numpy()` cover the host write/read this module itself needs, and a
+caller wanting to chain a result into another kernel binds the handle
+straight into that kernel's own DATA slot, no Parameter indirection either
+side. See _closure_blocks.py's own module docstring for the fuller reasoning
+on why atomic accumulation forces DATA over PARAM in the first place.
 
 Scan's cupy compaction: a genuine per-step `launch=` user
 -------------------------------------------------------------
 `.inclusive()` on cupy stays `cp.cumsum` (CUB's own DeviceScan is already the
 accelerator cupy dispatches to by default on this build). Compaction's
 count-read and scatter - previously a host-side numpy slice-copy plus one
-directly-launched kernel - are now a 2-step FrozenRoutine (routine_v2.py):
+directly-launched kernel - are now a 2-step FrozenRoutine (routine.py):
 "read_count" (1 thread) then "scatter" (ceil(n/block) blocks), each composed
 with its own `launch=` override sized to its own real thread count - see
 _cupy_blocks.build_count_and_scatter_routine's own docstring. This is a
 resolved design fork, flagged rather than chosen silently: the coordinating
-brief calls out routine_v2.py's per-step `launch=` as needing to be
+brief calls out routine.py's per-step `launch=` as needing to be
 "exercised" by scan, but scan's only genuinely multi-kernel pipeline
 (Blelloch up-sweep/down-sweep) lives on Taichi/Quadrants, where
 compile_closure.compile_kernel takes no extra kwargs at all - there is
@@ -345,22 +353,30 @@ def make_scan(backend: str, pool, n: int) -> Scan:
 class Reduce:
     """
     sum/min/max/argmin over a fixed-size f32 buffer, each backed by its own
-    device-side 0-d scalar Parameter (readable by another kernel via
-    `.get(0)` with no host sync) plus a syncing host getter - built once by
-    make_reduce for one backend/size, reused for every call.
+    device-side 0-d scalar DataHandle plus a syncing host getter - built once
+    by make_reduce for one backend/size, reused for every call.
 
-    Every parameter holds the same thing on every backend - `argmin_param` a
-    bare i64 index, not the packed (value, index) pair the Taichi/Quadrants
+    The four handles this hands back (`sum_data`, ...) are bare pooled
+    storage, not Parameters: the accumulator is wired as a DATA slot on the
+    underlying kernel (see the module docstring, "Reduce's DATA-not-PARAM
+    accumulator"), and a Parameter wrapping storage that is never read
+    through a PARAM slot anywhere has nothing left to add over the DataHandle
+    itself - see `sum_value`/etc. for the host read, or bind a handle
+    directly into another kernel's DATA slot to chain results device-side
+    with no host sync.
+
+    Every handle holds the same thing on every backend - `argmin_data` a bare
+    i64 index, not the packed (value, index) pair the Taichi/Quadrants
     reduction accumulates into on its way there.
 
     Author: B.G (08/2026)
     """
 
-    def __init__(self, sum_p, min_p, max_p, argmin_p, run, host):
-        self.sum_param = sum_p
-        self.min_param = min_p
-        self.max_param = max_p
-        self.argmin_param = argmin_p
+    def __init__(self, sum_h, min_h, max_h, argmin_h, run, host):
+        self.sum_data = sum_h
+        self.min_data = min_h
+        self.max_data = max_h
+        self.argmin_data = argmin_h
         self._run = run
         self._host = host
 
@@ -394,58 +410,59 @@ def make_reduce(backend: str, pool, n: int) -> Reduce:
     Build one Reduce over f32 buffers of length `n`.
 
     cupy: each op is `cp.sum`/`cp.min`/`cp.max`/`cp.argmin`, written into its
-    device Parameter via an async device-to-device copy. Taichi/Quadrants:
+    device DataHandle via an async device-to-device copy. Taichi/Quadrants:
     one atomic-accumulate FrozenKernel per op (sum via Taichi/Quadrants'
     automatic atomic `+=`, min/max via `ctx.bk.atomic_min`/`atomic_max`,
     argmin via atomic_min over ops.make_bitpack_group's packed (value, index)
     i64), each preceded by writing the identity element into that op's
-    Parameter from the host. See this module's own docstring for why the
-    running total is a DATA argument, not a PARAM slot.
+    DataHandle from the host. See this module's own docstring for why the
+    running total is a DATA argument, not a PARAM slot - and so pooled
+    storage handed back bare, not wrapped in a Parameter.
 
     Author: B.G (08/2026)
     """
-    _, ParamCls, _, dtypes = backend_classes(backend)
+    _, _, _, dtypes = backend_classes(backend)
 
     if backend == "cupy":
         import cupy as cp
 
-        sum_p = ParamCls("REDUCE_SUM", dtype=dtypes["f32"], mode="scalar", value=0.0, pool=pool)
-        min_p = ParamCls("REDUCE_MIN", dtype=dtypes["f32"], mode="scalar", value=float("inf"), pool=pool)
-        max_p = ParamCls("REDUCE_MAX", dtype=dtypes["f32"], mode="scalar", value=float("-inf"), pool=pool)
-        argmin_p = ParamCls("REDUCE_ARGMIN", dtype=np.int64, mode="scalar", value=0, pool=pool)
+        sum_h = pool.get_data(dtypes["f32"], ())
+        min_h = pool.get_data(dtypes["f32"], ())
+        max_h = pool.get_data(dtypes["f32"], ())
+        argmin_h = pool.get_data(np.int64, ())
 
         def run_sum(handle):
-            sum_p.get().data[...] = cp.sum(handle.data)
+            sum_h.data[...] = cp.sum(handle.data)
 
         def run_min(handle):
-            min_p.get().data[...] = cp.min(handle.data)
+            min_h.data[...] = cp.min(handle.data)
 
         def run_max(handle):
-            max_p.get().data[...] = cp.max(handle.data)
+            max_h.data[...] = cp.max(handle.data)
 
         def run_argmin(handle):
-            argmin_p.get().data[...] = cp.argmin(handle.data).astype(cp.int64)
+            argmin_h.data[...] = cp.argmin(handle.data).astype(cp.int64)
 
         run = {"sum": run_sum, "min": run_min, "max": run_max, "argmin": run_argmin}
         host = {
-            "sum": lambda: float(sum_p.get().data.get()),
-            "min": lambda: float(min_p.get().data.get()),
-            "max": lambda: float(max_p.get().data.get()),
-            "argmin": lambda: int(argmin_p.get().data.get()),
+            "sum": lambda: float(sum_h.data.get()),
+            "min": lambda: float(min_h.data.get()),
+            "max": lambda: float(max_h.data.get()),
+            "argmin": lambda: int(argmin_h.data.get()),
         }
-        return Reduce(sum_p, min_p, max_p, argmin_p, run, host)
+        return Reduce(sum_h, min_h, max_h, argmin_h, run, host)
 
     # Taichi / Quadrants
     backend_mod, _, _, _ = backend_classes(backend)
     blocks = _blocks_for(backend)
 
-    sum_p = ParamCls("REDUCE_SUM", dtype=dtypes["f32"], mode="scalar", value=0.0, pool=pool)
-    min_p = ParamCls("REDUCE_MIN", dtype=dtypes["f32"], mode="scalar", value=float("inf"), pool=pool)
-    max_p = ParamCls("REDUCE_MAX", dtype=dtypes["f32"], mode="scalar", value=float("-inf"), pool=pool)
-    argmin_p = ParamCls("REDUCE_ARGMIN", dtype=backend_mod.i64, mode="scalar", value=0, pool=pool)
+    sum_h = pool.get_data(dtypes["f32"], ())
+    min_h = pool.get_data(dtypes["f32"], ())
+    max_h = pool.get_data(dtypes["f32"], ())
+    argmin_h = pool.get_data(backend_mod.i64, ())
     # internal: the atomic_min accumulator, holding a packed (value, index)
-    # pair that argmin_unpack resolves into argmin_p's bare index.
-    argmin_packed_p = ParamCls("REDUCE_ARGMIN_PACKED", dtype=backend_mod.i64, mode="scalar", value=0, pool=pool)
+    # pair that argmin_unpack resolves into argmin_h's bare index.
+    argmin_packed_h = pool.get_data(backend_mod.i64, ())
 
     bitpack_group = blocks.build_bitpack_group()
     sum_frozen, min_frozen, max_frozen, argmin_frozen, argmin_unpack_frozen = blocks.build_reduce_kernels(
@@ -453,61 +470,61 @@ def make_reduce(backend: str, pool, n: int) -> Reduce:
     )
 
     sum_bound = sum_frozen.build()
-    sum_bound.bind("acc", sum_p.get().data)
-    sum_bound.bind("x", sum_p.get().data)  # placeholder, swapped every call
+    sum_bound.bind("acc", sum_h.data)
+    sum_bound.bind("x", sum_h.data)  # placeholder, swapped every call
     sum_compiled = sum_bound.compile(backend)
 
     min_bound = min_frozen.build()
-    min_bound.bind("acc", min_p.get().data)
-    min_bound.bind("x", min_p.get().data)  # placeholder, swapped every call
+    min_bound.bind("acc", min_h.data)
+    min_bound.bind("x", min_h.data)  # placeholder, swapped every call
     min_compiled = min_bound.compile(backend)
 
     max_bound = max_frozen.build()
-    max_bound.bind("acc", max_p.get().data)
-    max_bound.bind("x", max_p.get().data)  # placeholder, swapped every call
+    max_bound.bind("acc", max_h.data)
+    max_bound.bind("x", max_h.data)  # placeholder, swapped every call
     max_compiled = max_bound.compile(backend)
 
     argmin_bound = argmin_frozen.build()
-    argmin_bound.bind("acc", argmin_packed_p.get().data)
-    argmin_bound.bind("x", argmin_packed_p.get().data)  # placeholder, swapped every call
+    argmin_bound.bind("acc", argmin_packed_h.data)
+    argmin_bound.bind("x", argmin_packed_h.data)  # placeholder, swapped every call
     argmin_compiled = argmin_bound.compile(backend)
 
     argmin_unpack_bound = argmin_unpack_frozen.build()
-    argmin_unpack_bound.bind("packed_acc", argmin_packed_p.get().data)
-    argmin_unpack_bound.bind("out", argmin_p.get().data)
+    argmin_unpack_bound.bind("packed_acc", argmin_packed_h.data)
+    argmin_unpack_bound.bind("out", argmin_h.data)
     argmin_unpack_compiled = argmin_unpack_bound.compile(backend)
 
     _argmin_identity = _closure_pack_identity()
 
     def run_sum(handle):
-        sum_p.set(0.0)
+        sum_h.from_numpy(np.array(0.0, dtype=np.float32))
         sum_compiled.swap("x", handle.data)
         sum_compiled()
 
     def run_min(handle):
-        min_p.set(float("inf"))
+        min_h.from_numpy(np.array(float("inf"), dtype=np.float32))
         min_compiled.swap("x", handle.data)
         min_compiled()
 
     def run_max(handle):
-        max_p.set(float("-inf"))
+        max_h.from_numpy(np.array(float("-inf"), dtype=np.float32))
         max_compiled.swap("x", handle.data)
         max_compiled()
 
     def run_argmin(handle):
-        argmin_packed_p.set(_argmin_identity)
+        argmin_packed_h.from_numpy(np.array(_argmin_identity, dtype=np.int64))
         argmin_compiled.swap("x", handle.data)
         argmin_compiled()
         argmin_unpack_compiled()
 
     run = {"sum": run_sum, "min": run_min, "max": run_max, "argmin": run_argmin}
     host = {
-        "sum": lambda: float(sum_p.get().to_numpy()),
-        "min": lambda: float(min_p.get().to_numpy()),
-        "max": lambda: float(max_p.get().to_numpy()),
-        "argmin": lambda: int(argmin_p.get().to_numpy()),
+        "sum": lambda: float(sum_h.to_numpy()),
+        "min": lambda: float(min_h.to_numpy()),
+        "max": lambda: float(max_h.to_numpy()),
+        "argmin": lambda: int(argmin_h.to_numpy()),
     }
-    return Reduce(sum_p, min_p, max_p, argmin_p, run, host)
+    return Reduce(sum_h, min_h, max_h, argmin_h, run, host)
 
 
 def _closure_pack_identity() -> int:

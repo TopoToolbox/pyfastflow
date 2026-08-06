@@ -15,10 +15,10 @@ bearing).
 docstring: CUB's DeviceScan is already the accelerator cupy dispatches to by
 default) - no RoutineBuilder involved for that half. Compaction's count-read
 and scatter, previously a bare host-side numpy slice-copy plus one directly-
-launched kernel, are ported as a two-step FrozenRoutine (routine_v2.py)
+launched kernel, are ported as a two-step FrozenRoutine (routine.py)
 instead: "read_count" (a 1-thread kernel writing scan_out[n-1] into the COUNT
 PARAM) and "scatter", each composed with its own `launch=` override
-(routine_v2.py's `RoutineBuilder.compose(name, frozen, launch=...)`) - a
+(routine.py's `RoutineBuilder.compose(name, frozen, launch=...)`) - a
 genuinely different, meaningfully-sized grid/block per step, which is what
 actually exercises the per-step launch mechanism on a backend where launch
 dims mean anything (see ops/__init__.py's module docstring for the fuller
@@ -394,11 +394,11 @@ def _kernel(template, *, data=(), helpers=None):
 
 def build_count_and_scatter_routine(n: int, *, block: int = 256) -> "FrozenRoutine":
     """
-    A 2-step FrozenRoutine (routine_v2.py): "read_count" (one thread, writes
+    A 2-step FrozenRoutine (routine.py): "read_count" (one thread, writes
     scan_out[n-1] into the wired PARAM slot "COUNT") then "scatter" (one
     thread per node, `ids[scan_out[i]-1] = i` wherever `flags[i] != 0`) - the
     compaction half of scan-based stream compaction. Each step is composed
-    with its own `launch=` override (routine_v2.py's `RoutineBuilder.compose(
+    with its own `launch=` override (routine.py's `RoutineBuilder.compose(
     ..., launch=...)`) sized to that step's own real thread count - "
     read_count" is one thread regardless of `n`, "scatter" needs
     ceil(n/block) blocks of `block` threads - see the module docstring for
@@ -407,7 +407,7 @@ def build_count_and_scatter_routine(n: int, *, block: int = 256) -> "FrozenRouti
 
     Author: B.G (08/2026)
     """
-    from ..core.context.routine_v2 import RoutineBuilder
+    from ..core.context.routine import RoutineBuilder
 
     t = f"pf{new_uid()}"
     read_count = _kernel(

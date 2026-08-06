@@ -275,7 +275,7 @@ def _walk(
     see `_Builder.share()`, builder.py) is walked by `_walk_group` instead -
     see the module docstring's "Build-phase sharing" section. `redirect`, optional, collects the
     collapsed-address -> canonical-address table that mechanism needs;
-    every caller that does not care about it (routine_v2.py/sequence_v2.py/
+    every caller that does not care about it (routine.py/sequence.py/
     host_block.py's own direct `_walk()` calls, which only ever want a
     reduced `table`) may simply omit it.
 
@@ -639,6 +639,85 @@ class _Bound:
                         f"got {obj_dtype}"
                     )
         self._values[r] = obj
+        return self
+
+    def bind_leaf(self, mapping: dict[str, Any], *, prefix: "Address | str" = (), strict: bool = False) -> "_Bound":
+        """
+        Bind every address under `prefix` whose last segment is a key of
+        `mapping`, to that key's value - one bind() call per match, same
+        checks (PARAM/DATA kind, dtype) as an ordinary bind().
+
+        The bulk-bind counterpart to hand-writing one bind() per address: a
+        caller that does not know in advance exactly how many addresses under
+        `prefix` will need a given name bound - because that count depends on
+        backend/method/config, not on anything the caller controls (a
+        FrozenRoutine/FrozenSequence built differently per combination - see
+        e.g. _cupy_depressions.py's module docstring on real-launch
+        splitting) - matches against whatever `.addresses()` actually
+        minted, instead of a hand-typed address list that would need to
+        change with the combination.
+
+        `prefix`, if given, restricts the match to addresses starting with
+        it - this is what resolves a leaf name recurring under two different
+        meanings at two different prefixes (make_accumulation's
+        pointer_jump_push ping-pong, where "rec_curr" means one buffer under
+        "step_a" and a different one under "step_b" - two bind_leaf() calls,
+        one per prefix, rather than one call that would bind both to
+        whichever value came last).
+
+        `strict=True` raises if any `mapping` key matched no address under
+        `prefix` at all - off by default, since an existing caller may
+        deliberately pass one mapping wider than what a particular
+        combination's own address tree contains (leaf-name binding across
+        several method/reroute combinations relies on exactly this). A key
+        that genuinely never matches anything under any combination is
+        almost always a typo, though - pass `strict=True` wherever the
+        address set is known fixed.
+
+        Author: B.G (08/2026)
+        """
+        p = parse_address(prefix) if isinstance(prefix, str) else tuple(prefix)
+        plen = len(p)
+        matched: set[str] = set()
+        for addr in self._table:
+            if addr[:plen] == p and addr[-1] in mapping:
+                self.bind(addr, mapping[addr[-1]])
+                matched.add(addr[-1])
+        if strict:
+            unused = sorted(set(mapping) - matched)
+            if unused:
+                raise BindError(f"bind_leaf(prefix={format_address(p)!r}): {unused} matched no address")
+        return self
+
+    def bind_pattern(self, pattern: str, obj: Any) -> "_Bound":
+        """
+        Bind every address matching `pattern`, a dotted string the same
+        length as the addresses it may match - a `*` segment matches any one
+        segment, any other segment must match literally. `"step_a.*.rec_curr"`
+        matches `("step_a", "get_src", "rec_curr")` but neither
+        `("step_a", "rec_curr")` (too short) nor
+        `("step_a", "a", "b", "rec_curr")` (too long) - there is deliberately
+        no multi-segment wildcard (see the module docstring's note on Address
+        being a tuple precisely so a pattern/glob layer over these paths
+        could be added without disturbing the addressing scheme itself).
+
+        Raises if `pattern` matches zero addresses: unlike bind_leaf's
+        `strict` flag (off by default, since one mapping is often
+        deliberately wider than one combination's own address tree), a
+        single bind_pattern() call names one specific intended match, so a
+        pattern that resolves to nothing is almost always a typo, not a
+        legitimately-absent combination.
+
+        Author: B.G (08/2026)
+        """
+        segs = tuple(pattern.split("."))
+        matched = False
+        for addr in self._table:
+            if len(addr) == len(segs) and all(s == "*" or s == a for s, a in zip(segs, addr)):
+                self.bind(addr, obj)
+                matched = True
+        if not matched:
+            raise BindError(f"bind_pattern({pattern!r}): matched no address")
         return self
 
     def wire(self, addr_a: "Address | str", addr_b: "Address | str") -> "_Bound":

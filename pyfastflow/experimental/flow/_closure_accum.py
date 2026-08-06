@@ -3,7 +3,7 @@ Taichi/Quadrants (closure) block templates behind make_accumulation: the
 ping-pong src helpers, and the three accumulation methods ("atomic",
 "rake_compress", "pointer_jump_push"), on the new builder/frozen/bound/
 sequence stack (../core/context/builder.py, frozen.py, bound.py,
-sequence_v2.py).
+sequence.py).
 
 Split out of a single _closure_blocks.py that used to hold every flow
 algorithm - see _closure_receivers.py/_closure_depressions.py/
@@ -20,7 +20,7 @@ anywhere in this stack. `ITER` recurs at four independent addresses
 own `share("ITER", "get_src.ITER", "update_src.ITER")` (builder.py) collapses
 its own two composed helpers' ITER occurrences into its own top-level ITER -
 and the caller binds the same Parameter object at all four. `share()` takes
-effect here because routine_v2.py's `FrozenRoutine.build()`/sequence_v2.py's
+effect here because routine.py's `FrozenRoutine.build()`/sequence.py's
 `_walk_block` dispatch to `_walk_group` (bound.py) for a step whose own
 `.shared` is non-empty, exactly as bound.py's own top-level `build()` already
 did for a standalone KernelBuilder; `fuse_accum_buffers` composes `get_src`
@@ -33,10 +33,10 @@ applies to that one and to the three other steps' own ITER.
 rake_compress_accum/pointer_jump_push_step's repeat count (`logn+1` rounds
 for rake_compress, `rounds` - already rounded to even - for
 pointer_jump_push) is a SequenceBuilder loop with a plain int `max_times`
-(sequence_v2.py's loop(body, max_times, until=None) - `until` omitted, runs
+(sequence.py's loop(body, max_times, until=None) - `until` omitted, runs
 to completion): no device readback decides the trip count here, unlike
 depression routing's own use of the same loop() for a host-evaluated
-predicate, but sequence_v2.py's own module docstring documents the plain-int
+predicate, but sequence.py's own module docstring documents the plain-int
 form as fully supported on its own terms. Chosen over unrolling N repeated
 compose()s of the same kernel (../ops/_closure_blocks.py's build_scan_routine
 idiom for its own log-depth passes): a scan pass's kernel body differs every
@@ -64,7 +64,7 @@ Author: B.G (08/2026)
 """
 
 from ..core.context.builder import HelperBuilder, KernelBuilder
-from ..core.context.sequence_v2 import SequenceBuilder
+from ..core.context.sequence import SequenceBuilder
 from ._closure_shared import _tensor_annotation
 
 
@@ -156,7 +156,7 @@ def build_atomic(*, backend: str, backend_mod, n_flat: int):
     )
 
 
-def build_rake_compress(*, backend: str, backend_mod, grid, logn: int):
+def build_rake_compress(*, backend: str, backend_mod, n_neighbours: int, logn: int):
     """
     SequenceBuilder for the rake-and-compress accumulation, plus the
     KernelBuilders it is made of - see the module docstring for the
@@ -190,7 +190,7 @@ def build_rake_compress(*, backend: str, backend_mod, grid, logn: int):
     Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
-    NN = grid["N_NEIGHBOURS"].get()
+    NN = n_neighbours
 
     get_src, update_src = build_ping_pong_helpers()
 

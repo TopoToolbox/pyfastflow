@@ -56,7 +56,10 @@ itself is never touched, only a python dict entry.
 Author: B.G (08/2026)
 """
 
+import ast
 import inspect
+import textwrap
+from functools import lru_cache
 from typing import Any, Callable
 
 from .bound import Address, BindError, _Bound, format_address, parse_address
@@ -64,6 +67,43 @@ from .ctx import CTX_PARAM_NAME
 from .slot import SlotKind
 
 _LEGAL_PARAM_ACCESSORS = ("get", "set_node")
+
+
+@lru_cache(maxsize=256)
+def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
+    """
+    Return (source_text, ast) for a template. A python def is introspected; a
+    raw string (CUDA source) is kept verbatim and has no AST. The source
+    returned as `source_text` is `inspect.getsource`'s own indentation
+    (whatever the def's nesting produced); the source parsed into `tree` is
+    dedented first, so a nested def's indented body parses instead of
+    raising an IndentationError - a no-op for a module-level def, which is
+    already at column 0. A def with no recoverable source at all (a lambda,
+    an exec'd function) still comes back with `tree = None`.
+
+    Cached because compile_closure.py's `_compile_dropping_ctx` asks once per
+    template to recover its AST, and a miss costs an inspect.getsource plus a
+    parse. The tree handed back is shared by every caller of this function
+    against that template: treat it as read-only.
+
+    The cache key is the template object itself, so the bound size matters -
+    unbounded, it would pin every dynamically generated template and every CUDA
+    source string for the life of the process. An eviction only costs one
+    re-parse.
+
+    Author: B.G (07/2026)
+    """
+    if isinstance(template, str):
+        return template, None
+    try:
+        source = inspect.getsource(template)
+    except (OSError, TypeError):
+        return None, None
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        tree = None
+    return source, tree
 
 
 class CompileError(Exception):

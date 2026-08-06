@@ -410,7 +410,7 @@ def _kernel(template, *, data=(), params=(), helpers=None):
 
 def build_scan_routine(backend: str, backend_mod, n: int, work_size: int):
     """
-    The Blelloch up-sweep/down-sweep FrozenRoutine (routine_v2.py) over a
+    The Blelloch up-sweep/down-sweep FrozenRoutine (routine.py) over a
     size-`work_size` work buffer: copy-in, log2(work_size) up-sweep steps,
     zero the root, log2(work_size) down-sweep steps, convert to inclusive and
     copy out. Every step is a separate composed FrozenKernel under its own
@@ -428,7 +428,7 @@ def build_scan_routine(backend: str, backend_mod, n: int, work_size: int):
 
     Author: B.G (08/2026)
     """
-    from ..core.context.routine_v2 import RoutineBuilder
+    from ..core.context.routine import RoutineBuilder
 
     T = _tensor_annotation(backend_mod, backend)
 

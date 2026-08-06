@@ -3,7 +3,7 @@ Taichi/Quadrants (closure) block templates behind make_depressions/
 make_depression_solver: copy_field, both basin labelling variants,
 saddlesort, both carve variants, jump reroute, and the depression counter -
 on the new builder/frozen/bound/routine/sequence stack (../core/context/
-builder.py, frozen.py, bound.py, routine_v2.py, sequence_v2.py).
+builder.py, frozen.py, bound.py, routine.py, sequence.py).
 
 Split out of a single _closure_blocks.py that used to hold every flow
 algorithm - see _closure_receivers.py/_closure_accum.py/
@@ -40,9 +40,9 @@ this factory takes no pool and reads no Parameter for it, consistent with
 bare FrozenGroup's absent bound values.
 
 A fixed, build-time-constant repeat (propagate_basin_iter's `logn+1` rounds
-inside vanilla basin labelling) is unrolled as `logn+1` distinct routine_v2
+inside vanilla basin labelling) is unrolled as `logn+1` distinct routine
 compose() names for the SAME propagate_basin_iter FrozenKernel - the
-instancing idiom routine_v2.py's own module docstring documents ("composing
+instancing idiom routine.py's own module docstring documents ("composing
 the same FrozenKernel object under two different step names... two
 independently bindable slot sets") - not a SequenceBuilder loop: unlike
 rake_compress_accum's own host-invisible bump, there is no per-round host
@@ -56,7 +56,7 @@ Author: B.G (08/2026)
 """
 
 from ..core.context.builder import KernelBuilder
-from ..core.context.routine_v2 import RoutineBuilder
+from ..core.context.routine import RoutineBuilder
 from ._closure_shared import _tensor_annotation
 
 
@@ -65,7 +65,7 @@ def build_copy_field(*, backend: str, backend_mod):
     dst[i] = src[i] over a whole flat buffer - the generic copy used
     everywhere a depression pass needs one buffer snapshotted into another
     (rec -> rec_jump, rec_work -> rec, ...), reused across every routine that
-    needs it (composed under a distinct name at each use site - routine_v2.py's
+    needs it (composed under a distinct name at each use site - routine.py's
     instancing) rather than rebuilt per call site.
 
     Author: B.G (08/2026)
@@ -132,7 +132,7 @@ def build_propagate_basin_final(*, backend: str, backend_mod):
 
 def build_basin_labelling_vanilla(*, backend: str, backend_mod, grid, copy_field, logn: int):
     """
-    RoutineBuilder (routine_v2) for vanilla basin labelling: basin_id_init(bid);
+    RoutineBuilder (routine) for vanilla basin labelling: basin_id_init(bid);
     copy_field(rec -> rec_jump); logn+1 unrolled propagate_basin_iter(rec_jump)
     rounds (composed under "propagate_iter_0".."propagate_iter_{logn}" - see
     the module docstring for the unroll-vs-loop choice); propagate_basin_final
@@ -212,7 +212,7 @@ def build_basin_labelling_optimized(*, backend: str, backend_mod, grid, n_flat: 
 
 def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
     """
-    RoutineBuilder (routine_v2) for the six saddlesort passes: border/z_prime
+    RoutineBuilder (routine) for the six saddlesort passes: border/z_prime
     detection, saddle/outlet/saddlenode init, bitpacked atomic-min saddle
     search, saddlenode identification, bitpacked atomic-min outlet search,
     basin-graph 2-cycle break. Shared unchanged by both `method`s.
@@ -385,7 +385,7 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
 
 def build_reroute_carve_vanilla(*, backend: str, backend_mod, bitpack, copy_field, logn: int):
     """
-    RoutineBuilder (routine_v2) for carve+vanilla reroute: init_reroute_carve
+    RoutineBuilder (routine) for carve+vanilla reroute: init_reroute_carve
     (tag, tag_alt, basin_saddlenode); copy_field(rec_work -> rec);
     copy_field(rec_work -> rec_jump); logn+1 unrolled iteration_reroute_carve
     (tag, tag_alt, rec, rec_work, bid) rounds; finalise_reroute_carve(rec,

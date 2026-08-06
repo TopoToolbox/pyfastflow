@@ -1,244 +1,380 @@
 """
-A Sequence is a host-driven ordering of blocks - kernels, whole Routines,
-and plain python callbacks - sharing one bag, with a loop whose trip count
-and stopping condition are decided on the host while it runs.
+SequenceBuilder / FrozenSequence / BoundSequence / CompiledSequence: the
+host-driven layer above Routine (routine.py) - an ordered list of blocks
+(kernel, whole routine, host block) plus one loop whose trip count and break
+are evaluated on the host. Same build -> freeze -> bind -> compile lifecycle
+as everything else in this package. Named `sequence` for the same reason
+routine.py is - `sequence.py` already names the pre-1d implementation this
+replaces, kept untouched until Phase 3.
 
 What this is for
------------------
-A Routine (routine.py) is device-only and linear: a fixed list of steps, no
-python between them, nothing about how many times anything runs decided at
-run time. That is what lets it fuse into one generated kernel on the closure
-backends and replay as one captured graph on cupy, and it is the right shape
-for the inner passes of an algorithm.
+------------------
+A Routine is device-only and linear - fixed steps, no python between them,
+nothing about repeat count decided at run time. That is the wrong shape for
+an outer pass whose trip count is not known until the device has been asked -
+depression routing reads a pass count back from the device and either goes
+round again or stops. A Sequence runs blocks in order, calls host code
+between them, and loops with a host-evaluated predicate; `Parameter.read()`
+(parameter.py) underpins every such predicate, and it synchronizes - the
+layer's whole cost model, paid at block boundaries, never inside a block.
 
-It is the wrong shape for the outer pass of one. Depression routing runs
-label/saddlesort/reroute, reads a depression count back from the device,
-and either goes round again or stops - a trip count that is not known until
-the device has been asked, and a break that depends on a value only the host
-can branch on. A Sequence is that layer and nothing more: it runs blocks in
-order, calls host code between them, and loops with a host-evaluated
-predicate.
+Composition vs. order
+-----------------------
+Unlike RoutineBuilder, composing a block here (`compose(name, frozen)`) does
+not by itself place it in execution order - a name may be composed once and
+then referenced from `step(name)` and/or from inside `loop(...)`'s body more
+than once (the old sequence.py's `zero_ndep` callback, called once before a
+loop and again every iteration, is exactly this shape). `step(name)` appends
+`name` to the top-level order; `loop(body, max_times, until=None)` appends one
+loop entry whose `body` is a sequence of already-composed names, run in order,
+`max_times` times, stopping early when `until` returns True.
 
-    sb = TaichiSequenceBuilder()
-    sb.add_data("rec", rec_h.data)
-    sb.bind_bag(shared_bag)
-    sb.add_routine(label_builder, data_handle_ref=("rec",))
-    sb.add_loop(
-        body=[
-            routine_step(pass_builder, data_handle_ref=("rec",)),
-            host_step(lambda bag: bag.stats.ndep.read()),
-        ],
-        max_times=lambda bag: ceil(log2(max(2, bag.stats.ndep.read()))) + 2,
-        until=lambda bag: bag.stats.ndep.read() == 0,
-    )
-    seq = sb.compile()
-    seq()
+`max_times`/`until` are each either a plain value (an int for `max_times`,
+`None` for `until`, meaning "run to completion") or the *name* of an
+already-composed host block (host_block.py) - a FrozenHostBlock, never a bare
+python callable, since a name is the only handle this layer's addressing
+scheme has to bind that block's own Parameters through. That host block's
+compiled, zero-argument callable is invoked once per check; its return value
+is coerced with `int()` for `max_times`, `bool()` for `until`.
 
-Blocks
--------
-Four kinds, all recorded in the order added:
+compose() accepts a FrozenKernel, a FrozenRoutine (routine.py) or a
+FrozenHostBlock (host_block.py); a FrozenHelper raises, matching
+RoutineBuilder.compose() - a device helper has no standalone host-callable
+form on its own.
 
-- a kernel (add_kernel / kernel_step): one KernelBuilder, compiled and
-  launched with the data names given, exactly as a Routine step is;
-- a Routine (add_routine / routine_step): a whole RoutineBuilder, compiled
-  independently and called as one block. This is the one that matters. An
-  inner Routine keeps whatever its own backend gives it - a fused generated
-  kernel on Taichi/Quadrants, its own captured CUDA graph on cupy - so a
-  loop over it replays that graph per iteration and pays the host sync only
-  at block boundaries, not per kernel;
-- host code (add_host / host_step): a plain callable, called with the bag,
-  free to read Parameters with read() and write them with set(); or a
-  HostHelperBuilder (compile.py), a Need-declaring recipe compiled at this
-  Sequence's own compile() time into a plain function with its bound Needs
-  already spliced into its globals, then called with no arguments - see
-  add_host's own docstring for both shapes;
-- a loop (add_loop): a body of the three above, run under a host-evaluated
-  trip count and predicate.
-
-`max_times` is evaluated once, on entry to the loop: an int, or a callable
-taking the bag and returning one. The body then runs that many times, and
-`until` - a callable taking the bag, returning a bool, optional - is
-evaluated after each iteration, stopping the loop when it returns True.
-`max_times <= 0` runs the body zero times; that is a correct answer, not an
-error, and it is what "the device reports nothing to do" looks like on
-entry.
-
-Deliberately absent: conditionals, nested loops, sub-Sequence reuse, and a
-`check_every` stride on the predicate. Nested add_loop raises. None of them
-have a caller yet, and each of them is a semantics decision better made
-against real code than guessed at here.
-
-Cost model
+Addressing
 -----------
-Every host callback and every predicate evaluation is a point where the host
-must have the device's answer, so `Parameter.read()` synchronizes (see
-parameter.py, Parameter.read). One `until` per iteration is one sync per
-iteration. That is the price of the layer, and the reason the inner passes
-belong in a Routine where no such point exists: the sync is paid at block
-boundaries, never inside a block.
+`build()` walks every composed block's own tree under that block's compose()
+name: bound.py's `_walk` directly for a FrozenKernel or FrozenHostBlock (both
+real `_Frozen` objects), and, for a FrozenRoutine, one more level of
+recursion through its own `.composed` steps - so a routine composed under
+`saddlesort` and internally stepping `label`/`sort` reaches
+`saddlesort.label.*`/`saddlesort.sort.*`, exactly the address a standalone
+Routine's own `build()` would have minted, with the sequence-level compose()
+name prefixed on top.
 
-Contract
----------
-One bag for the whole Sequence, given to bind_bag(); every block, including
-every block in a loop body, is rebound against it at compile time.
-check_handles (bag.py) runs first, across every block's bindings as
-authored, so two blocks disagreeing about what a name means is caught before
-rebinding would silently make them agree. Each inner RoutineBuilder is bound
-to that same bag and then does its own validation when it compiles, net-swap
--identity included - which matters more here than in a standalone Routine,
-since a Sequence may run it an unknown number of times.
+Compiling
+----------
+`BoundSequence.compile(backend, **kwargs)` checks this sequence's own unmet
+slots first, then compiles each composed name at most once (cached by name,
+since one composed block may be referenced from several places in order),
+decomposing exactly as BoundRoutine.compile() does: a fresh bound object from
+that block's own `.build()`, filled from this BoundSequence's current values
+at that block's addresses, then that object's own `.compile()` - a
+FrozenHostBlock's ignoring `backend` (host_block.py), everything else taking
+it. The result, CompiledSequence, is an ordered list of zero-argument
+callables (blocks already resolved to their own compiled form) plus loop
+entries carrying their own body/max_times/until, evaluated on the host at
+call time exactly as sequence.py's own `Sequence.__call__`/`_run_loop` did.
 
-SequenceBuilder.bind(bag), unrelated to bind_bag() above, is the additive,
-Need-matching (need.py) counterpart described in routine.py's module
-docstring for RoutineBuilder.bind - it fans `bag` out to every block's own
-builder (a kernel's kernel_builder, a Routine block's whole RoutineBuilder,
-loop bodies included) and lets each fill in whichever of its own declared
-Needs match by name, leaving everything else untouched.
+Per-block launch config
+--------------------------
+`compose(name, frozen, launch=None)` accepts the same optional launch-kwargs
+override `RoutineBuilder.compose()` does (routine.py) - a dict merged over
+this sequence's own `compile(backend, **kwargs)` call, `{**kwargs, **launch}`,
+for that one composed block only. Composing a whole FrozenRoutine under `name`
+with a `launch` override hands that merged dict to the routine's own
+`compile()` as *its* default - which the routine's own per-step `launch`
+overrides then apply on top of, exactly as they would against any other
+default.
 
-What host code may and may not do, between blocks:
+`CompiledSequence.swap(addr, buf)` routes `name.*` to the matching compiled
+block's own `.swap()` (CompiledKernel.swap / CompiledRoutine.swap); raises if
+that block has nothing to swap (a host block has no DATA of its own - see
+host_block.py).
 
-- set() on a scalar or field Parameter is legal, and is the point of this
-  layer: the write lands in the storage every compiled block already reads,
-  including a captured graph's, so the next block sees it.
-- set() on a const Parameter raises, as everywhere else. A Sequence holds
-  already-compiled Routines and kernels with that literal baked in, so there
-  is no in-place remedy: rebuild the Sequence.
-- destroy(), or anything else returning a handle's buffer to the pool,
-  invalidates storage - and, on cupy, pointers already baked into a captured
-  graph - that compiled blocks still point at. Forbidden mid-Sequence. This
-  is documented and not detected, the same way routine.py documents it.
-- a host callback or a predicate must not add or remove blocks. A compiled
-  Sequence is inert, like every other compiled object here; its block list
-  is fixed at compile().
-
-There is no whole-Sequence graph capture and there will not be one: a loop
-whose trip count is read back from the device is not expressible as a single
-graph. Capture lives inside the blocks, where it belongs.
-
-add_data(name, handle, need=...) may attach a kind=DATA Need (need.py) to a
-sequence-local name, exactly as RoutineBuilder.add_data does (see routine.py's
-module docstring for the full reasoning) - independent of any one block's
-reference to it. compile() checks it against whatever handle the name
-currently holds, and cross-checks any kernel block's own kernel_builder.data_
-needs against the same handle, both before any block compiles; a compiled
-Sequence itself never takes call-time data arguments (see Sequence.__call__),
-so, unlike a Routine, there is nothing left to re-validate on every call - the
-one compile()-time check is this layer's whole cost for it. A name given no
-Need behaves exactly as it always has.
-
-Author: B.G (07/2026)
+Author: B.G (08/2026)
 """
 
-from abc import ABC, abstractmethod
-from typing import Any, Callable
+from typing import Any
 
-from .bag import Bag, check_handles
-from .compile import CompileBuilder, HostHelperBuilder
-from .need import Kind, Need
-from .routine import RoutineBuilder, _flatten_bindings, _template_label
+from ..pool.base import new_uid
+from .bound import Address, BindError, _Bound, _walk, _walk_group, format_address, parse_address
+from .compile_shared import CompileError, check_unmet
+from .frozen import FrozenBuilderError, FrozenHelper, FrozenKernel
+from .host_block import BoundHostBlock, FrozenHostBlock
+from .routine import BoundRoutine, FrozenRoutine
 
 
-class _Block:
+class SequenceBuilderError(Exception):
     """
-    One recorded block of a Sequence, as authored: its kind ("kernel",
-    "routine", "host" or "loop") and the arguments that kind carries.
+    Raised by the SequenceBuilder build phase: a name reused or unknown, an
+    attempt to compose an unsupported frozen type, a malformed loop, or a
+    mutation after freeze().
 
-    Built by the module-level kernel_step/routine_step/host_step helpers and
-    by SequenceBuilder's add_* methods, which are the same thing with an
-    append. Inert - compile() reads it and builds a callable from it.
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
 
-    __slots__ = ("kind", "builder", "data_handle_ref", "grid", "block", "fn", "body", "max_times", "until")
 
-    def __init__(
-        self,
-        kind: str,
-        *,
-        builder: Any = None,
-        data_handle_ref: tuple = (),
-        grid: Any = None,
-        block: Any = None,
-        fn: Any = None,
-        body: tuple = (),
-        max_times: Any = None,
-        until: Any = None,
-    ):
-        self.kind = kind
-        self.builder = builder
-        self.data_handle_ref = data_handle_ref
-        self.grid = grid
-        self.block = block
-        self.fn = fn
-        self.body = body
-        self.max_times = max_times
-        self.until = until
+def _walk_leaf(prefix: Address, frozen: Any, table: dict) -> None:
+    """
+    `_walk` a single frozen object (FrozenKernel or FrozenHostBlock),
+    honouring its own top-level `.shared` (`_Builder.share()`, builder.py)
+    exactly as bound.py's own top-level `build()` does for a standalone
+    object - dispatching to `_walk_group` rather than plain `_walk` when it
+    has any - so a block composed with its own share() declarations
+    collapses identically whether built standalone or as part of a
+    sequence/routine.
 
-    def label(self) -> str:
+    Author: B.G (08/2026)
+    """
+    if frozen.shared:
+        _walk_group(prefix, frozen, table, {}, frozenset())
+    else:
+        _walk(prefix, frozen, table)
+
+
+def _walk_block(prefix: Address, frozen: Any, table: dict) -> None:
+    """
+    Populate `table` with every PARAM/DATA leaf reachable from `frozen`, at
+    its full path under `prefix` - dispatching on which of the three
+    supported block kinds `frozen` is. See the module docstring's
+    "Addressing" section.
+
+    Author: B.G (08/2026)
+    """
+    if isinstance(frozen, FrozenRoutine):
+        for name, step_frozen in frozen.composed.items():
+            _walk_leaf(prefix + (name,), step_frozen, table)
+    else:
+        _walk_leaf(prefix, frozen, table)
+
+
+class SequenceBuilder:
+    """
+    Collects a set of named blocks and an ordered list of steps/loops over
+    them, and freeze()s them into a FrozenSequence. See the module docstring.
+
+    Author: B.G (08/2026)
+    """
+
+    def __init__(self):
+        self._uid = new_uid()
+        self._composed: dict[str, Any] = {}
+        self._launch: dict[str, dict] = {}
+        self._order: list[tuple] = []
+        self._frozen = False
+
+    @property
+    def uid(self) -> int:
+        """Process-wide identity assigned at construction. See Parameter.uid (parameter.py)."""
+        return self._uid
+
+    def _check_mutable(self) -> None:
+        if self._frozen:
+            raise FrozenBuilderError(
+                f"SequenceBuilder(uid={self._uid}) has already been freeze()-ed and is frozen - "
+                f"build a new SequenceBuilder instead of reusing this one"
+            )
+
+    def _require_composed(self, name: str) -> Any:
+        if name not in self._composed:
+            raise SequenceBuilderError(f"{name!r} is not composed on this sequence - call compose({name!r}, ...) first")
+        return self._composed[name]
+
+    def compose(self, name: str, frozen: Any, *, launch: "dict | None" = None) -> "SequenceBuilder":
         """
-        A short human-readable name for this block, for error messages.
+        Register `frozen` (a FrozenKernel, FrozenRoutine or FrozenHostBlock)
+        under `name`, without placing it in execution order - see step()/
+        loop() for that, and the module docstring for why the two are
+        separate calls here (unlike RoutineBuilder.compose()).
 
-        Author: B.G (07/2026)
+        `launch`, optional, is a dict of compile()-kwargs overriding this
+        sequence's own compile()-level default for this block only - see the
+        module docstring's "Per-block launch config" section. Ignored for a
+        FrozenHostBlock (BoundHostBlock.compile() takes no backend-specific
+        kwargs), accepted here regardless so a caller need not special-case
+        which kind of block it is composing.
+
+        Author: B.G (08/2026)
         """
-        if self.kind == "kernel":
-            return f"kernel:{_template_label(self.builder.template)}"
-        if self.kind == "routine":
-            return f"routine:{type(self.builder).__name__}"
-        if self.kind == "host":
-            if isinstance(self.fn, HostHelperBuilder):
-                return f"host:{_template_label(self.fn.template)}"
-            return f"host:{getattr(self.fn, '__name__', repr(self.fn)[:40])}"
-        return "loop"
+        self._check_mutable()
+        if isinstance(frozen, FrozenHelper):
+            raise TypeError(
+                f"compose({name!r}, ...): got a FrozenHelper, not a FrozenKernel/FrozenRoutine/"
+                f"FrozenHostBlock - a helper has no standalone host-callable form. Compose it "
+                f"into a KernelBuilder first."
+            )
+        if not isinstance(frozen, (FrozenKernel, FrozenRoutine, FrozenHostBlock)):
+            raise TypeError(
+                f"compose({name!r}, ...): expected a FrozenKernel, FrozenRoutine or "
+                f"FrozenHostBlock, got {type(frozen).__name__}"
+            )
+        if name in self._composed:
+            raise SequenceBuilderError(f"'{name}' is already composed on this sequence")
+        self._composed[name] = frozen
+        self._launch[name] = dict(launch) if launch else {}
+        return self
+
+    def step(self, name: str) -> "SequenceBuilder":
+        """
+        Append a top-level step launching the block composed under `name`.
+
+        Author: B.G (08/2026)
+        """
+        self._check_mutable()
+        self._require_composed(name)
+        self._order.append(("step", name))
+        return self
+
+    def loop(self, body, max_times, until: "str | None" = None) -> "SequenceBuilder":
+        """
+        Append a loop running the composed blocks named in `body`, in order,
+        `max_times` times, stopping early once `until` reports True. See the
+        module docstring for the accepted shapes of `max_times`/`until`.
+
+        Author: B.G (08/2026)
+        """
+        self._check_mutable()
+        body = tuple(body)
+        if not body:
+            raise SequenceBuilderError("loop: body is empty")
+        for name in body:
+            self._require_composed(name)
+        if isinstance(max_times, str):
+            frozen = self._require_composed(max_times)
+            if not isinstance(frozen, FrozenHostBlock):
+                raise TypeError(f"loop: max_times={max_times!r} must name a host block, got {type(frozen).__name__}")
+        elif not isinstance(max_times, int):
+            raise TypeError("loop: max_times must be an int or the name of a composed host block")
+        if until is not None:
+            if not isinstance(until, str):
+                raise TypeError("loop: until must be None or the name of a composed host block")
+            frozen = self._require_composed(until)
+            if not isinstance(frozen, FrozenHostBlock):
+                raise TypeError(f"loop: until={until!r} must name a host block, got {type(frozen).__name__}")
+        self._order.append(("loop", body, max_times, until))
+        return self
+
+    def freeze(self) -> "FrozenSequence":
+        """
+        Close out the build phase: freeze this builder and return the
+        resulting FrozenSequence. Raises if no step()/loop() was ever
+        recorded.
+
+        Author: B.G (08/2026)
+        """
+        self._check_mutable()
+        if not self._order:
+            raise SequenceBuilderError("freeze: sequence has no steps - call step()/loop() at least once")
+        self._frozen = True
+        return FrozenSequence(self._composed, self._order, self._launch)
 
 
-def kernel_step(kernel_builder: CompileBuilder, data_handle_ref: tuple = (), *, grid=None, block=None) -> _Block:
+class FrozenSequence:
     """
-    A kernel block, for use in an add_loop() body. The same block
-    add_kernel() appends, as a value rather than an append.
+    The frozen result of a SequenceBuilder's freeze(): an immutable
+    {name: block} composition, each block's own launch-kwargs override, plus
+    the ordered step/loop list. See the module docstring.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
-    return _Block("kernel", builder=kernel_builder, data_handle_ref=tuple(data_handle_ref), grid=grid, block=block)
+
+    def __init__(self, composed: dict, order: list, launch: "dict | None" = None):
+        self._uid = new_uid()
+        self._composed = dict(composed)
+        self._launch = dict(launch) if launch else {}
+        self._order = list(order)
+
+    @property
+    def uid(self) -> int:
+        """Process-wide identity assigned at construction. See Parameter.uid (parameter.py)."""
+        return self._uid
+
+    @property
+    def composed(self) -> dict:
+        """{name: FrozenKernel|FrozenRoutine|FrozenHostBlock}, read-only copy."""
+        return dict(self._composed)
+
+    @property
+    def launch(self) -> dict:
+        """{name: launch-kwargs override dict}, read-only copy. See compose()'s `launch=`."""
+        return dict(self._launch)
+
+    @property
+    def order(self) -> list:
+        """The ordered step/loop list, read-only copy."""
+        return list(self._order)
+
+    def build(self) -> "BoundSequence":
+        """
+        Walk every composed block's own tree (_walk_block, prefixed with its
+        compose() name) and return a fresh BoundSequence. See the module
+        docstring's "Addressing" section.
+
+        Author: B.G (08/2026)
+        """
+        table: dict[Address, Any] = {}
+        for name, frozen in self._composed.items():
+            _walk_block((name,), frozen, table)
+        return BoundSequence(self, table)
+
+    def __repr__(self) -> str:
+        return f"FrozenSequence(uid={self._uid}, blocks={sorted(self._composed)})"
 
 
-def routine_step(routine_builder: RoutineBuilder, data_handle_ref: tuple = ()) -> _Block:
+class BoundSequence(_Bound):
     """
-    A Routine block, for use in an add_loop() body. The same block
-    add_routine() appends, as a value rather than an append.
+    The bound result of build()-ing a FrozenSequence - bind()/wire()/
+    inspect() work exactly as on a BoundKernel (_Bound, bound.py), over the
+    sequence's whole `name.*` address space. See the module docstring's
+    "Compiling" section for compile().
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
-    return _Block("routine", builder=routine_builder, data_handle_ref=tuple(data_handle_ref))
+
+    def compile(self, backend: str, **kwargs) -> "CompiledSequence":
+        """
+        See the module docstring's "Compiling" section.
+
+        Author: B.G (08/2026)
+        """
+        check_unmet(self)
+        frozen: FrozenSequence = self._frozen
+        compiled_blocks: dict[str, Any] = {}
+
+        def _compile_name(name: str) -> Any:
+            if name in compiled_blocks:
+                return compiled_blocks[name]
+            child = frozen.composed[name]
+            child_bound = child.build()
+            for local_addr in child_bound.addresses():
+                val = self.value_at((name,) + local_addr)
+                if val is not None:
+                    child_bound.bind(local_addr, val)
+            block_kwargs = {**kwargs, **frozen.launch.get(name, {})}
+            compiled = child_bound.compile() if isinstance(child, FrozenHostBlock) else child_bound.compile(backend, **block_kwargs)
+            compiled_blocks[name] = compiled
+            return compiled
+
+        entries: list[_SeqEntry] = []
+        for item in frozen.order:
+            if item[0] == "step":
+                _, name = item
+                entries.append(_SeqEntry("run", run=_compile_name(name)))
+            else:
+                _, body, max_times, until = item
+                body_compiled = tuple(_compile_name(n) for n in body)
+                mt = max_times if isinstance(max_times, int) else _compile_name(max_times)
+                un = None if until is None else _compile_name(until)
+                entries.append(_SeqEntry("loop", body=body_compiled, max_times=mt, until=un))
+
+        return CompiledSequence(entries, compiled_blocks)
 
 
-def host_step(fn: "Callable[[Bag], Any] | HostHelperBuilder") -> _Block:
+class _SeqEntry:
     """
-    A host-code block, for use in an add_loop() body. The same block
-    add_host() appends, as a value rather than an append. See add_host's
-    docstring for the two accepted shapes of `fn`.
+    One entry of a CompiledSequence: a "run" entry wraps a single already-
+    resolved zero-argument callable; a "loop" entry carries its own compiled
+    body, max_times and until (each itself a plain value or a zero-argument
+    callable). Not constructed directly outside BoundSequence.compile().
 
-    Author: B.G (07/2026)
-    """
-    return _Block("host", fn=fn)
-
-
-class _CompiledBlock:
-    """
-    One block of a compiled Sequence, reduced to a callable of no arguments
-    plus the loop control a "loop" block carries.
-
-    A kernel or Routine block's callable already has its data handles bound
-    in; a host block's is the callback with the bag applied; a loop block
-    holds its body's compiled blocks and the (max_times, until) it was built
-    with.
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
 
     __slots__ = ("kind", "run", "body", "max_times", "until")
 
-    def __init__(self, kind: str, run=None, body: tuple = (), max_times=None, until=None):
+    def __init__(self, kind: str, run: Any = None, body: tuple = (), max_times: Any = None, until: Any = None):
         self.kind = kind
         self.run = run
         self.body = body
@@ -246,568 +382,79 @@ class _CompiledBlock:
         self.until = until
 
 
-class Sequence:
+class CompiledSequence:
     """
-    A compiled Sequence: an ordered list of blocks, ready to run.
+    An immutable, ordered list of resolved blocks and host-evaluated loops,
+    ready to run. See the module docstring.
 
-    Inert, like every other compiled object in this package. Calling it runs
-    every block in order; a loop block evaluates its trip count once on
-    entry, runs its body that many times, and stops early when its `until`
-    returns True. Nothing about the Sequence's own state changes across
-    calls, so calling it twice runs the same blocks against whatever the bag
-    and its storage hold at the time of each call.
+    `last_trip_counts` reports how many body iterations each loop entry took
+    on the most recent call, in the order the loop entries appear.
 
-    `last_trip_counts` reports how many body iterations each loop block
-    actually took on the most recent call, in the order the loop blocks
-    appear - a Sequence exists precisely because that number is not known
-    until it runs, so it is worth reporting rather than reconstructing.
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
 
-    def __init__(self, blocks: list[_CompiledBlock], bag: Bag):
-        self._blocks = blocks
-        self._bag = bag
+    def __init__(self, entries: list, compiled_blocks: dict):
+        self._entries = entries
+        self._compiled_blocks = compiled_blocks
         self._last_trip_counts: tuple = ()
 
     @property
-    def bag(self) -> Bag:
-        """
-        The one bag every block of this Sequence was rebound against.
-
-        Author: B.G (07/2026)
-        """
-        return self._bag
-
-    @property
     def last_trip_counts(self) -> tuple:
-        """
-        Body iterations taken by each loop block on the most recent call, in
-        block order. Empty before the first call.
-
-        Author: B.G (07/2026)
-        """
+        """Body iterations taken by each loop entry on the most recent call, in entry order."""
         return self._last_trip_counts
 
-    def __call__(self) -> None:
+    def swap(self, addr: "Address | str", buf: Any) -> "CompiledSequence":
         """
-        Run every block in order. Takes no arguments: a Sequence's data
-        handles are fixed at compile time, unlike a Routine's, because a
-        loop body and a host callback both hold references a call-time
-        override could not reach.
+        Re-point one composed block's DATA address at `buf` - routes
+        `name.*` to that block's own compiled `.swap()`. Raises if that
+        block has nothing to swap (a compiled host block is a plain
+        callable with no data addresses of its own).
 
-        Author: B.G (07/2026)
+        Author: B.G (08/2026)
         """
+        a = parse_address(addr) if isinstance(addr, str) else tuple(addr)
+        if not a:
+            raise BindError("swap: address must not be empty")
+        name, local = a[0], a[1:]
+        if name not in self._compiled_blocks:
+            raise BindError(
+                f"swap: {format_address(a)!r} - no such composed block {name!r} "
+                f"(blocks: {sorted(self._compiled_blocks)})"
+            )
+        target = self._compiled_blocks[name]
+        if not hasattr(target, "swap"):
+            raise BindError(f"swap: {format_address(a)!r} - block {name!r} has no data to swap (it is a host block)")
+        target.swap(local, buf)
+        return self
+
+    def __call__(self) -> None:
+        """Run every entry in order - see the module docstring's cost-model paragraph."""
         trips: list[int] = []
-        for block in self._blocks:
-            if block.kind == "loop":
-                trips.append(self._run_loop(block))
+        for entry in self._entries:
+            if entry.kind == "loop":
+                trips.append(self._run_loop(entry))
             else:
-                block.run()
+                entry.run()
         self._last_trip_counts = tuple(trips)
 
-    def _run_loop(self, block: _CompiledBlock) -> int:
+    def _run_loop(self, entry: _SeqEntry) -> int:
         """
-        Run one loop block: evaluate `max_times` once on entry, run the body
-        that many times, evaluating `until` after each iteration and stopping
-        when it returns True. Returns the number of iterations actually run.
+        Evaluate `max_times` once on entry, run the body that many times,
+        evaluating `until` after each iteration and stopping when it returns
+        True. Returns the number of iterations actually run.
 
-        Author: B.G (07/2026)
+        Author: B.G (08/2026)
         """
-        max_times = block.max_times
-        times = int(max_times(self._bag)) if callable(max_times) else int(max_times)
+        max_times = entry.max_times
+        times = int(max_times()) if callable(max_times) else int(max_times)
         taken = 0
         for _ in range(max(0, times)):
-            for inner in block.body:
-                inner.run()
+            for inner in entry.body:
+                inner()
             taken += 1
-            if block.until is not None and block.until(self._bag):
+            if entry.until is not None and bool(entry.until()):
                 break
         return taken
 
-
-class SequenceBuilder(ABC):
-    """
-    Collects data names, a shared bag, and an ordered list of blocks, and
-    compiles them into a Sequence.
-
-    add_data(name, handle) registers a sequence-local name for a data handle,
-    exactly as RoutineBuilder.add_data does. add_kernel/add_routine/add_host
-    append one block each; add_loop appends a loop over a body built from the
-    module-level kernel_step/routine_step/host_step helpers. bind_bag(bag)
-    sets the one bag every block - and every inner RoutineBuilder - is bound
-    against at compile time.
-
-    There is no add_swap here. A Routine needs one because it never returns
-    to python and so cannot swap buffers itself; a Sequence returns to python
-    between every block, where a host callback can do whatever relabeling is
-    wanted directly.
-
-    Author: B.G (07/2026)
-    """
-
-    def __init__(self):
-        self._data: dict[str, Any] = {}
-        self._data_needs: dict[str, Need] = {}
-        self._blocks: list[_Block] = []
-        self._bag: "Bag | None" = None
-
-    def add_data(self, name: str, handle: Any, need: "Need | None" = None) -> "SequenceBuilder":
-        """
-        Register `handle` under sequence-local `name`, for a kernel or
-        Routine block's data_handle_ref to refer to.
-
-        `need`, if given, must be a kind=DATA Need (need.py) - it declares
-        this name's own dtype contract; checked immediately against `handle`
-        if `handle` is not None, otherwise deferred to compile() (which
-        raises naming this name if it is still None by then). See the
-        module docstring's paragraph on this. A name given no `need` behaves
-        exactly as it always has.
-
-        Author: B.G (07/2026)
-        """
-        if name in self._data:
-            raise KeyError(f"add_data: '{name}' is already registered")
-        if need is not None:
-            if need.kind is not Kind.DATA:
-                raise TypeError(f"add_data: '{name}' need must be kind=Kind.DATA, got {need.kind.value}")
-            self._data_needs[name] = need
-            if handle is not None:
-                need.bind(handle)
-        self._data[name] = handle
-        return self
-
-    def bind_bag(self, bag: "Bag") -> "SequenceBuilder":
-        """
-        Set the one bag every block is bound against at compile time.
-
-        Author: B.G (07/2026)
-        """
-        self._bag = bag
-        return self
-
-    def bind(self, bag: "Bag") -> "SequenceBuilder":
-        """
-        Fan `bag` out to every block added so far - a kernel block's own
-        kernel_builder.bind(bag) (compile.py), a Routine block's nested
-        RoutineBuilder.bind(bag) (routine.py, which itself fans further out
-        to that routine's own steps), loop bodies included via
-        _flat_blocks(). A host block has no Needs of its own and is skipped.
-
-        The Sequence-level counterpart to RoutineBuilder.bind: additive,
-        Need-matching, unrelated to bind_bag()/_validate()'s rebind of
-        kernel blocks and bind_bag() of nested RoutineBuilders - see
-        RoutineBuilder.bind's own docstring for why this needs no
-        check_handles-equivalent guard the way that path does. Call it more
-        than once, with different bags, to fill in Needs left unmet by an
-        earlier call.
-
-        Author: B.G (08/2026)
-        """
-        for _, block in self._flat_blocks():
-            if block.kind in ("kernel", "routine"):
-                block.builder.bind(bag)
-        return self
-
-    @property
-    def needs(self) -> dict[str, Need]:
-        """
-        Every Need declared by any block's own builder, keyed by name - a
-        kernel block's kernel_builder, a Routine block's whole RoutineBuilder
-        (itself derived the same way, from its own steps - see routine.py),
-        and now a host block's HostHelperBuilder, if it is one (a plain
-        callable host block declares none). Loop bodies are included via
-        _flat_blocks(). Not separately bookkept here - walked fresh every
-        time this is read; see RoutineBuilder.needs for what happens when two
-        blocks declare distinct Needs under the same name.
-
-        Author: B.G (08/2026)
-        """
-        out: dict[str, Need] = {}
-        for _, block in self._flat_blocks():
-            if block.kind in ("kernel", "routine"):
-                out.update(block.builder.needs)
-            elif block.kind == "host" and isinstance(block.fn, HostHelperBuilder):
-                out.update(block.fn.needs)
-        return out
-
-    def unmet_needs(self) -> list[Need]:
-        """
-        Every currently-unbound Need reachable from any block's own builder -
-        kernel, routine and (when it is a HostHelperBuilder) host blocks,
-        loop bodies included via _flat_blocks() - flattened exactly as
-        CompileBuilder.unmet_needs() flattens through a bound HELPER need
-        (compile.py). No separate Need bookkeeping at this layer.
-
-        Author: B.G (08/2026)
-        """
-        unmet: list[Need] = []
-        for _, block in self._flat_blocks():
-            if block.kind in ("kernel", "routine"):
-                unmet.extend(block.builder.unmet_needs())
-            elif block.kind == "host" and isinstance(block.fn, HostHelperBuilder):
-                unmet.extend(block.fn.unmet_needs())
-        return unmet
-
-    def add_kernel(
-        self,
-        kernel_builder: CompileBuilder,
-        data_handle_ref: tuple = (),
-        *,
-        grid=None,
-        block=None,
-    ) -> "SequenceBuilder":
-        """
-        Append a block launching `kernel_builder`'s compiled kernel with the
-        data handles named in `data_handle_ref`, mapped positionally onto the
-        template's own declared data arguments. `grid`/`block` are accepted
-        on every backend but only meaningful on cupy.
-
-        Author: B.G (07/2026)
-        """
-        self._blocks.append(kernel_step(kernel_builder, data_handle_ref, grid=grid, block=block))
-        return self
-
-    def add_routine(self, routine_builder: RoutineBuilder, data_handle_ref: tuple = ()) -> "SequenceBuilder":
-        """
-        Append a block running a whole Routine, compiled independently from
-        `routine_builder` at this Sequence's compile() time.
-
-        `data_handle_ref` names the data handles to call it with, mapped
-        positionally onto the compiled Routine's own `data_names`; leave it
-        empty to let the Routine use the defaults its own add_data() calls
-        gave it, which is the usual case. A non-empty ref is an override at
-        every call, and a captured cupy Routine rejects overrides outright
-        (see cupy_backend.py, _CapturedRoutine) - compile that routine with
-        captured=False if it needs them, or leave the ref empty.
-
-        Author: B.G (07/2026)
-        """
-        self._blocks.append(routine_step(routine_builder, data_handle_ref))
-        return self
-
-    def add_host(self, fn: "Callable[[Bag], Any] | HostHelperBuilder") -> "SequenceBuilder":
-        """
-        Append a host-code block. Two shapes of `fn` are accepted:
-
-        - a plain callable, called as `fn(bag)` with the Sequence's bag, its
-          return value discarded - the original, untracked shape, reading
-          Parameters with read() and writing them with set() straight off
-          the bag it is handed.
-        - a HostHelperBuilder (compile.py): a Need-declaring recipe, compiled
-          at this Sequence's own compile() time into a plain function with
-          its bound Needs already spliced into its globals, and then called
-          with no arguments - a host callback that declares what it needs
-          instead of reaching for the raw bag.
-
-        Author: B.G (07/2026)
-        """
-        self._blocks.append(host_step(fn))
-        return self
-
-    def add_loop(self, body, max_times, until: Callable[[Bag], bool] | None = None) -> "SequenceBuilder":
-        """
-        Append a loop over `body`, a non-empty sequence of blocks built with
-        kernel_step/routine_step/host_step.
-
-        `max_times` is evaluated once on entry to the loop: an int, or a
-        callable taking the bag and returning one. The body runs that many
-        times; `until`, if given, is a callable taking the bag and returning
-        a bool, evaluated after each iteration, and stops the loop when it
-        returns True. A `max_times` of zero or less runs the body zero times.
-
-        A loop block inside `body` raises: nested loops are out of scope.
-
-        Author: B.G (07/2026)
-        """
-        body = tuple(body)
-        if not body:
-            raise ValueError("add_loop: body is empty")
-        for i, entry in enumerate(body):
-            if not isinstance(entry, _Block):
-                raise TypeError(
-                    f"add_loop: body[{i}] is {type(entry).__name__}, expected a block from "
-                    f"kernel_step()/routine_step()/host_step()"
-                )
-            if entry.kind == "loop":
-                raise ValueError("add_loop: nested loops are not supported")
-        if until is not None and not callable(until):
-            raise TypeError("add_loop: until must be a callable taking the bag and returning a bool")
-        if not callable(max_times) and not isinstance(max_times, int):
-            raise TypeError("add_loop: max_times must be an int or a callable taking the bag")
-        self._blocks.append(_Block("loop", body=body, max_times=max_times, until=until))
-        return self
-
-    @abstractmethod
-    def _data_arity(self, kernel_builder: CompileBuilder) -> int:
-        """
-        The number of data arguments `kernel_builder`'s ingested template
-        declares, for a kernel block's arity check.
-
-        Author: B.G (07/2026)
-        """
-        ...
-
-    @abstractmethod
-    def _make_caller(self, compiled_kernel, grid, block):
-        """
-        A callable(*data_args) that launches `compiled_kernel` the way this
-        backend requires.
-
-        Author: B.G (07/2026)
-        """
-        ...
-
-    def _routine_compile_kwargs(self) -> dict:
-        """
-        Extra kwargs for a Routine block's own builder.compile() call, one
-        per distinct RoutineBuilder identity (see _compile_block's
-        routine_cache). Empty on Taichi/Quadrants - fused compile() has no
-        such knob, and no need for one: fusion generates one kernel per
-        Routine, no per-step real launch happens at compile time at all, so
-        there is nothing here for a later block to see, correctly or not.
-
-        CupySequenceBuilder overrides this to pass restore=False - see
-        CupyRoutineBuilder.compile()'s `restore` parameter and
-        _snapshot_data/_restore_data below for why.
-
-        Author: B.G (07/2026)
-        """
-        return {}
-
-    def _snapshot_data(self):
-        """
-        An opaque, backend-defined snapshot of every add_data() buffer this
-        Sequence reaches, taken once before any block compiles - paired with
-        _restore_data, taken once after every block (loop bodies included)
-        has compiled. No-op (returns None) except on cupy.
-
-        Why this exists: a captured cupy Routine's compile() warms up with a
-        real launch, computing real values into its buffers - by design,
-        see CupyRoutineBuilder.compile()'s docstring point 1. Two Routine
-        blocks in the same Sequence with a real data dependency between them
-        (block B reads what block A's real output is meant to be, e.g.
-        depression routing's saddlesort reading label_basins' `bid`) need
-        that real value from A still in the buffer when B's own warmup runs
-        - which means restoring after every individual block's compile(),
-        independently, is wrong: it erases A's real output before B's
-        warmup ever sees it, leaving B's warmup to run on whatever the
-        buffer held before A ran at all (uninitialised/pool-recycled
-        garbage on a fresh build - proven to reach illegal array indices and
-        crash, not just compute a wrong answer). One snapshot before
-        anything compiles, one restore after everything has, lets each
-        block's warmup see the previous block's genuine output while still
-        leaving the Sequence's compile() side-effect-free overall, matching
-        every other compile() in this package.
-
-        Author: B.G (07/2026)
-        """
-        return None
-
-    def _restore_data(self, snapshot) -> None:
-        """
-        Undo _snapshot_data's effect. No-op when `snapshot` is None (every
-        backend but cupy, or a Sequence that registered no data at all).
-
-        Author: B.G (07/2026)
-        """
-
-    def _flat_blocks(self) -> list[tuple[str, _Block]]:
-        """
-        Every block of this Sequence paired with a path naming where it sits,
-        loop bodies flattened in place - so validation and compilation walk
-        one list and a loop's body is checked exactly like a top-level block.
-
-        Author: B.G (07/2026)
-        """
-        flat: list[tuple[str, _Block]] = []
-        for i, block in enumerate(self._blocks):
-            if block.kind == "loop":
-                for j, inner in enumerate(block.body):
-                    flat.append((f"block{i}.body{j}", inner))
-            else:
-                flat.append((f"block{i}", block))
-        return flat
-
-    def _validate(self) -> None:
-        """
-        Everything checked before any block is compiled.
-
-        check_handles (bag.py) runs first, across every block's bindings as
-        authored - a kernel block contributes its own, a Routine block one
-        entry per step - so two blocks disagreeing about what one name means
-        is caught before rebinding makes them agree. Kernel blocks are then
-        rebound against the bag given to bind_bag(), and every inner
-        RoutineBuilder is bound to that same bag, leaving each Routine's own
-        validation (net swap identity included) to run when it compiles.
-        Data names are checked against add_data(), and kernel arities against
-        the template's declared data arguments.
-
-        Author: B.G (07/2026)
-        """
-        if self._bag is None:
-            raise ValueError("compile: no bag bound - call bind_bag() first")
-        if not self._blocks:
-            raise ValueError("compile: sequence has no blocks")
-
-        flat = self._flat_blocks()
-
-        units: dict[str, dict[str, Any]] = {}
-        for path, block in flat:
-            if block.kind == "kernel":
-                units[f"{path}:{block.label()}"] = _flatten_bindings(block.builder.bindings)
-            elif block.kind == "routine":
-                for k, step in enumerate(block.builder._steps):
-                    label = f"{path}:step{k}:{_template_label(step.kernel_builder.template)}"
-                    units[label] = _flatten_bindings(step.kernel_builder.bindings)
-        check_handles(units)
-
-        for path, block in flat:
-            if block.kind == "kernel":
-                unknown = [n for n in block.data_handle_ref if n not in self._data]
-                if unknown:
-                    raise KeyError(f"compile: {path} refers to data not registered via add_data: {sorted(unknown)}")
-                arity = self._data_arity(block.builder)
-                if arity != len(block.data_handle_ref):
-                    raise ValueError(
-                        f"compile: {path} template {_template_label(block.builder.template)!r} declares "
-                        f"{arity} data argument(s), data_handle_ref gives {len(block.data_handle_ref)}"
-                    )
-                try:
-                    block.builder.rebind(self._bag)
-                except KeyError as exc:
-                    raise KeyError(f"compile: {path} cannot be satisfied by the sequence's bag: {exc}") from exc
-            elif block.kind == "routine":
-                unknown = [n for n in block.data_handle_ref if n not in self._data]
-                if unknown:
-                    raise KeyError(f"compile: {path} refers to data not registered via add_data: {sorted(unknown)}")
-                block.builder.bind_bag(self._bag)
-            elif block.kind == "host":
-                if not isinstance(block.fn, HostHelperBuilder) and not callable(block.fn):
-                    raise TypeError(f"compile: {path} host block is not callable and not a HostHelperBuilder")
-
-        self._check_data_needs(flat)
-
-    def _check_data_needs(self, flat: list[tuple[str, _Block]]) -> None:
-        """
-        Validate every add_data()-declared Need (see need.py, and the module
-        docstring's paragraph on this) against the handle currently
-        registered for its name, and every kernel block's own
-        kernel_builder.data_needs - its own per-argument dtype contract, if
-        it declared any - against whatever handle its data_handle_ref
-        currently maps that argument onto. Both run here, at compile() time.
-
-        A name given a Need but never given a real handle raises here,
-        naming it - see RoutineBuilder._check_data_needs for why this is a
-        different question from Need.unmet_needs(). A Routine block's own
-        data contracts are entirely that Routine's own concern - checked
-        when block.builder.compile() runs, inside _compile_block - so only
-        kernel blocks are cross-checked here.
-
-        Author: B.G (08/2026)
-        """
-        missing = [name for name, need in self._data_needs.items() if self._data.get(name) is None]
-        if missing:
-            raise ValueError(
-                f"compile: data need(s) declared via add_data() but never given a handle: {sorted(missing)}"
-            )
-        for name, need in self._data_needs.items():
-            need.bind(self._data[name])
-
-        for path, block in flat:
-            if block.kind != "kernel":
-                continue
-            step_needs = block.builder.data_needs
-            if not step_needs:
-                continue
-            for name, step_need in zip(block.data_handle_ref, step_needs):
-                handle = self._data.get(name)
-                if handle is None:
-                    continue
-                try:
-                    step_need.bind(handle)
-                except (TypeError, ValueError) as exc:
-                    raise TypeError(
-                        f"compile: {path} data '{name}' violates its kernel_builder's own Need "
-                        f"contract: {exc}"
-                    ) from exc
-
-    def _compile_block(self, path: str, block: _Block, routine_cache: dict) -> _CompiledBlock:
-        """
-        Compile one non-loop block into a `_CompiledBlock` whose `run` takes
-        no arguments, its data handles already resolved.
-
-        A RoutineBuilder appearing in more than one place compiles once,
-        keyed on its identity, so a Routine used both before a loop and
-        inside it is not compiled twice - and, on cupy, not captured twice.
-
-        Author: B.G (07/2026)
-        """
-        if block.kind == "host":
-            fn = block.fn
-            if isinstance(fn, HostHelperBuilder):
-                compiled_fn = fn.compile()
-                return _CompiledBlock("host", run=lambda: compiled_fn())
-            bag = self._bag
-            return _CompiledBlock("host", run=lambda: fn(bag))
-
-        if block.kind == "kernel":
-            compiled = block.builder.compile()
-            caller = self._make_caller(compiled, block.grid, block.block)
-            args = tuple(self._data[name] for name in block.data_handle_ref)
-            return _CompiledBlock("kernel", run=lambda: caller(*args))
-
-        key = id(block.builder)
-        routine = routine_cache.get(key)
-        if routine is None:
-            routine = block.builder.compile(**self._routine_compile_kwargs())
-            routine_cache[key] = routine
-        if block.data_handle_ref:
-            if len(block.data_handle_ref) != len(routine.data_names):
-                raise ValueError(
-                    f"compile: {path} gives {len(block.data_handle_ref)} data name(s), the compiled "
-                    f"routine takes {len(routine.data_names)} matching data_names={routine.data_names}"
-                )
-            args = tuple(self._data[name] for name in block.data_handle_ref)
-            return _CompiledBlock("routine", run=lambda: routine(*args))
-        return _CompiledBlock("routine", run=routine)
-
-    def compile(self) -> Sequence:
-        """
-        Validate (see _validate) and compile every block, loop bodies
-        included, into a Sequence.
-
-        Each kernel block compiles to one kernel and each Routine block to a
-        whole Routine, compiled by its own builder with that backend's
-        defaults - fused on Taichi/Quadrants, graph-captured on cupy. A loop
-        body's blocks are compiled once, here, and re-run per iteration; the
-        loop's `max_times` and `until` are kept as given and evaluated on the
-        host while the Sequence runs.
-
-        _snapshot_data/_restore_data (cupy only - see their docstrings)
-        bracket the whole compile loop, not each block: every Routine
-        block's own compile() warms up for real and (via
-        _routine_compile_kwargs' restore=False) leaves that real output in
-        place for the next block, so data genuinely flows block to block
-        exactly as it would at runtime, and only the Sequence's own
-        snapshot, taken before any of this starts, is restored - once - at
-        the end.
-
-        Author: B.G (07/2026)
-        """
-        self._validate()
-
-        snapshot = self._snapshot_data()
-        routine_cache: dict[int, Any] = {}
-        compiled: list[_CompiledBlock] = []
-        for i, block in enumerate(self._blocks):
-            if block.kind == "loop":
-                body = tuple(
-                    self._compile_block(f"block{i}.body{j}", inner, routine_cache)
-                    for j, inner in enumerate(block.body)
-                )
-                compiled.append(_CompiledBlock("loop", body=body, max_times=block.max_times, until=block.until))
-            else:
-                compiled.append(self._compile_block(f"block{i}", block, routine_cache))
-        self._restore_data(snapshot)
-        return Sequence(compiled, self._bag)
+    def __repr__(self) -> str:
+        return f"CompiledSequence(entries={len(self._entries)})"

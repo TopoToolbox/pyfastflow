@@ -18,8 +18,8 @@ name regardless of what sits there.
 
 The fix used here is a source-level transform, not a globals trick:
 `_compile_dropping_ctx` takes the template's own AST (via `capture_template_
-meta`, compile.py's cached inspect.getsource + ast.parse - a free function,
-no Need/CompileBuilder coupling), deletes `ctx` from the FunctionDef's own
+meta`, compile_shared.py's cached inspect.getsource + ast.parse), deletes
+`ctx` from the FunctionDef's own
 parameter list, unparses the result, and `exec()`s it with `ctx` now bound in
 that exec's globals. The body is untouched - every `ctx.foo` reference in it
 still reads the name `ctx`, which now resolves via `LOAD_GLOBAL` since the
@@ -85,8 +85,14 @@ from typing import Any
 from ..pool.base import new_uid
 from .bk import make_closure_bk
 from .bound import Address, BoundKernel, format_address
-from .compile import capture_template_meta
-from .compile_shared import CompiledKernel, CompileError, check_data_signature, check_legal_accessors, check_unmet
+from .compile_shared import (
+    CompiledKernel,
+    CompileError,
+    capture_template_meta,
+    check_data_signature,
+    check_legal_accessors,
+    check_unmet,
+)
 from .ctx import CTX_PARAM_NAME
 from .frozen import FrozenGroup, _Frozen
 from .slot import SlotKind

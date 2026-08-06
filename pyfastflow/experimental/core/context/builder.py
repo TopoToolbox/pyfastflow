@@ -493,3 +493,44 @@ class GroupBuilder(_Builder):
             None, self._slots.copy(), dict(self._composed), Contract(frozenset()),
             split=self._split, shared=self._shared,
         )
+
+
+def find_param_paths(frozen: "_Frozen", leaf_name: str, prefix: tuple = ()) -> list:
+    """
+    Every relative dotted path, as a `"a.b.NAME"` string, under `frozen`'s own
+    composed subtree whose PARAM slot is literally named `leaf_name` - the
+    itemized list `share_leaf` hands to GroupBuilder.share(). Recurses through
+    `.composed` only (a HELPER slot with nothing composed raises earlier, at
+    that structure's own ingest()/build(), never reached here). Generic over
+    whether a composed node is itself a FrozenHelper or a nested FrozenGroup.
+
+    Shared by grid/noise/visu's own factories - see grid/__init__.py's module
+    docstring ("Build-phase sharing collapses the duplicate addresses") for
+    why this exists.
+
+    Author: B.G (08/2026)
+    """
+    paths = []
+    if leaf_name in frozen.slots.names(SlotKind.PARAM):
+        paths.append(".".join(prefix + (leaf_name,)))
+    for name, child in frozen.composed.items():
+        paths.extend(find_param_paths(child, leaf_name, prefix + (name,)))
+    return paths
+
+
+def share_leaf(group: "GroupBuilder", canonical: str) -> None:
+    """
+    Declare every occurrence of a PARAM slot named `canonical` anywhere in
+    `group`'s already-composed subtree as build-phase-shared with `group`'s
+    own top-level `canonical` slot. A no-op if `canonical` occurs nowhere in
+    the subtree (e.g. OUTLET_MASK when no block happens to reference it under
+    the current config) - share() itself requires at least one path, so this
+    only calls it when there is something to share.
+
+    Author: B.G (08/2026)
+    """
+    paths = []
+    for name, child in group.composed.items():
+        paths.extend(find_param_paths(child, canonical, (name,)))
+    if paths:
+        group.share(canonical, *paths)

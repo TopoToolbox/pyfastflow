@@ -3,7 +3,7 @@ HostBlockBuilder / FrozenHostBlock / BoundHostBlock: a leaf builder, in the
 same build -> freeze(ingest) -> bind -> compile family as KernelBuilder/
 HelperBuilder (builder.py/frozen.py/bound.py), for host-side python code that
 needs to read/write Parameters between device launches - the layer
-Sequence's (sequence_v2.py) loop control (`loop`'s `max_times`/`until`) and
+Sequence's (sequence.py) loop control (`loop`'s `max_times`/`until`) and
 inter-block bookkeeping (a depression solver zeroing a counter Parameter
 before each pass) run on.
 

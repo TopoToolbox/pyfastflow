@@ -68,17 +68,14 @@ def init_z_tmpl(ctx, z: ti.template()):
 
 
 init_bound = KernelBuilder().compose("noise", noise_group).wire_data("z").ingest(init_z_tmpl).build()
-init_bound.bind(("noise", "NX"), grid_params["NX"])
-init_bound.bind(("noise", "NY"), grid_params["NY"])
-for name, p in noise_params.items():
-    init_bound.bind(("noise", name), p)
+init_bound.bind_leaf(grid_params, prefix=("noise",))
+init_bound.bind_leaf(noise_params, prefix=("noise",))
 init_bound.bind("z", z.data)
 init_kernel = init_bound.compile("taichi")
 
 recv = make_receivers("taichi", grid_group, mode="steepest")
 recv_bound = recv["receivers"].build()
-for name in ("NX", "NY", "DX", "N_NEIGHBOURS"):
-    recv_bound.bind(name, grid_params[name])
+recv_bound.bind_leaf(grid_params)
 recv_bound.bind("z", z.data)
 recv_bound.bind("rec", rec.data)
 receivers_kernel = recv_bound.compile("taichi")

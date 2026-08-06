@@ -13,8 +13,7 @@ member it wants, binds its PARAM/DATA addresses, `.compile()`s:
     grid = make_grid_group("taichi", topology="D8")
     recv = make_receivers("taichi", grid, topology="D8", mode="steepest")
     bound = recv["receivers"].build()
-    for k, v in grid_params.items():
-        bound.bind(k, v)  # NX/NY/DX/N_NEIGHBOURS - see below
+    bound.bind_leaf(grid_params)  # NX/NY/DX/N_NEIGHBOURS - see below
     bound.bind("z", z_field)
     bound.bind("rec", rec_field)
     receivers_kernel = bound.compile("taichi")
@@ -74,25 +73,22 @@ by the same factor and weaken the randomisation rather than reproduce it.
 Reproducibility itself diverges from legacy (hash-based vs ti.random()'s
 counter-based PRNG) - only the selection distribution's shape is preserved.
 
-make_accumulation: the SFD downstream-accumulation Bag factory, built on the
-same core plus a `grid` Bag and a `source` Need (need.py) - a boundary
-contract, not a bare Parameter: the caller builds its own Parameter (any mode
-- const, scalar or field all work with no variant code, since every template
-reads `source.get(i)`) in its own script, wraps it in a
-`Need("source", kind=Kind.PARAM)`, `.bind()`s it to that Parameter, and hands
-the Need to make_accumulation already bound - make_accumulation raises
-immediately if `source` is not a Need, is not kind=Kind.PARAM, or is not yet
-bound. This is not a new deferral: every existing caller already builds the
-concrete Parameter before calling make_accumulation, so nothing about *when*
-a Parameter is built changes - only that the slot it fills is now inspectable
-(each returned Bag member's own `.unmet_needs()`) rather than swallowed
-invisibly by an internal `.bind()`.
+make_accumulation: the SFD downstream-accumulation factory, on the new
+builder/frozen/bound stack (see its own docstring below for the per-method
+details). `source` is bound directly, post-`.build()`, at the returned
+kernel's own `SOURCE` PARAM slot - any mode (const, scalar or field all work
+with no variant code, since every template reads `source.get(i)`) - there is
+no Need indirection anywhere in this stack (need.py is part of the
+pre-rewrite core only):
 
-    source = Need("source", kind=Kind.PARAM)
-    source.bind(source_p)
-    accum = make_accumulation("taichi", grid, source, method="atomic")
-    accum_kernel = accum.accum.compile()
-    accum_kernel(rec.data, q.data)
+    source_p = TaichiParameter("SOURCE", dtype=ti.f32, mode="const", value=1.0, pool=pool)
+    accum = make_accumulation("taichi", grid, method="atomic", n_flat=n_flat)
+    bound = accum["accum"].build()
+    bound.bind("SOURCE", source_p)
+    bound.bind("rec", rec.data)
+    bound.bind("q", q.data)
+    accum_kernel = bound.compile("taichi")
+    accum_kernel()
 
 `method`:
   - "atomic": on taichi/quadrants, one KernelBuilder ("accum", data args
@@ -108,7 +104,7 @@ invisibly by an internal `.bind()`.
     result (the walk gives up once its guard counter reaches n_flat) rather
     than hanging.
   - "rake_compress" (ported to the new builder/frozen/bound/sequence stack,
-    ../core/context/builder.py/frozen.py/bound.py/sequence_v2.py): a
+    ../core/context/builder.py/frozen.py/bound.py/sequence.py): a
     SequenceBuilder (see _closure_accum.py's/_cupy_accum.py's
     build_rake_compress) plus its constituent KernelBuilders, keyed
     "zero_init", "reset_iteration", "decrement_iteration", "q_init",
@@ -163,7 +159,7 @@ sequence here, so `last_trip_counts[0]` is the only entry, and is always the
 full requested count - unlike depression routing's own use of the same loop
 machinery, nothing here ever breaks out early via `until`).
 
-Why a SequenceBuilder loop rather than routine_v2.py's unroll-N-times idiom
+Why a SequenceBuilder loop rather than routine.py's unroll-N-times idiom
 (../ops/_closure_blocks.py's build_scan_routine, for its own log-depth
 passes): a scan pass's kernel body differs every round (`stride` baked in as
 a build-time constant), so unrolling costs nothing beyond the kernels
@@ -174,35 +170,30 @@ round count (`ceil(log2(n_flat))+2` rounds at 1024x1024 is ~22). This is a
 design choice this project's rewrite plan did not itself settle - flagged in
 the porting report rather than decided silently.
 
-`n_flat`, if not given, is read off `grid["NX"].get() * grid["NY"].get()` -
-this requires `grid` to be a `make_grid_parameters` dict (uppercase keys) with
-NX/NY in "const" mode (the make_grid_parameters default); pass `n_flat`
-explicitly for a grid built with scalar-mode dimensions, or when `grid` is a
-bare `make_grid_group` FrozenGroup, which carries no bound Parameter values to
-read at build time at all (see ../grid/__init__.py's own module docstring) -
-`_resolve_n_flat` raises immediately, naming this, rather than failing on a
-missing dict key. `rake_compress` also reads `grid["N_NEIGHBOURS"].get()` as a
-build-time python int (sizing the fixed per-node donor arrays), so `grid` must
-be the `make_grid_parameters` dict there regardless of whether `n_flat` was
-given explicitly; `pointer_jump_push` does not take `grid` at all.
+`n_flat` is REQUIRED for both, like `method="atomic"`'s own required `n_flat`
+- `grid` is a bare `make_grid_group` FrozenGroup with no bound Parameter
+values to read it off at build time (see ../grid/__init__.py's own module
+docstring), so there is no dict-fallback to read it from the way an
+old-stack Bag would have allowed. `rake_compress` also needs `n_neighbours`
+explicitly, for the same reason (sizing the fixed per-node donor arrays) -
+`pointer_jump_push` needs neither `grid` nor `n_neighbours` at all.
 
-make_depressions: the depression-handling Bag factory, porting
-../../flow/flow_reroute_kernels.py. Two orthogonal build flags:
+make_depressions: the depression-handling factory, on the new builder/frozen/
+bound stack, porting ../../flow/flow_reroute_kernels.py. Two orthogonal build
+flags:
 
-    ndep_need = Need("depression_counter_p", kind=Kind.PARAM, dtype=i32, modes={"scalar"})
-    ndep_need.bind(ndep_p)
-    deps = make_depressions("taichi", grid, ndep_need, method="vanilla", reroute="carve")
+    ndep_p = TaichiParameter("NDEP", dtype=ti.i32, mode="scalar", value=0, pool=pool)
+    deps = make_depressions("taichi", grid, ndep_p, method="vanilla", reroute="carve", n_flat=n_flat)
 
 `method` ("vanilla"|"optimized") picks how basins are labelled and, for
 reroute="carve", how the carve itself runs; `reroute` ("carve"|"jump") picks
 how a resolved basin's pit is reconnected to its outlet. All four
-combinations build. `depression_counter_p` is a `Need(kind=Kind.PARAM,
-dtype=i32, modes={"scalar"})`, already `.bind()`ed to a caller-allocated
-scalar i32 Parameter - the same boundary contract as make_accumulation's
-`source`/`iteration_p` (see `_require_param_need`); the underlying Parameter
-is not built here, the same way make_accumulation takes iteration_p rather
-than allocating it, since this factory takes no pool: every scratch buffer
-below is a caller-supplied data arg, never a bound field Parameter.
+combinations build. `depression_counter_p` is a bare caller-allocated scalar
+i32 Parameter, bound directly at the returned kernel's own `NDEP` PARAM
+slot, post-`.build()` - there is no Need indirection anywhere in this stack
+(need.py is part of the pre-rewrite core only); the underlying Parameter is
+not built here, since this factory takes no pool: every scratch buffer below
+is a caller-supplied data arg, never a bound field Parameter.
 
 Every buffer is n_flat-sized, since a per-basin array is indexed by basin id
 and basin id = pit index + 1 (bid/basin_saddlenode/outlet range over the
@@ -214,8 +205,8 @@ by Bag member:
                           directly as a raw field. cupy: (rec, ndep) - ndep_p
                           is only ever reached through $...$ get() spans
                           there, which registers it read-only in the
-                          constant block (see cupy_backend.py's
-                          _SpanParser._register_ptr), so the caller instead
+                          constant block (see compile_cupy.py's
+                          _register_ptr), so the caller instead
                           passes `ndep_p.get().data` positionally, same as
                           `rec` - see build_depression_counter in
                           _cupy_depressions.py. Either way the caller must
@@ -301,8 +292,7 @@ from importlib import import_module
 from ..core.context.bag import Bag
 from ..core.context.backends import backend_classes
 from ..core.context.host_block import HostBlockBuilder
-from ..core.context.need import Kind, Need
-from ..core.context.sequence_v2 import SequenceBuilder
+from ..core.context.sequence import SequenceBuilder
 from ..noise import make_hash_u32
 
 _MODES = frozenset({"steepest", "stochastic"})
@@ -330,29 +320,6 @@ def _blocks_for(backend: str, section: str):
     else:
         raise ValueError(f"unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")
     return import_module(f".{prefix}_{section}", __package__)
-
-
-def _kernel_cls(backend: str):
-    """
-    The KernelBuilder class for `backend` - not exposed by backend_classes(),
-    which only returns HelperBuilder (mirrors ../ops/__init__.py's
-    _kernel_cls).
-
-    Author: B.G (07/2026)
-    """
-    if backend == "taichi":
-        from ..core.context.taichi_backend import TaichiKernelBuilder
-
-        return TaichiKernelBuilder
-    if backend == "quadrants":
-        from ..core.context.quadrants_backend import QuadrantsKernelBuilder
-
-        return QuadrantsKernelBuilder
-    if backend == "cupy":
-        from ..core.context.cupy_backend import CupyKernelBuilder
-
-        return CupyKernelBuilder
-    raise ValueError(f"unknown backend {backend!r}")
 
 
 def make_receivers(
@@ -407,85 +374,6 @@ def make_receivers(
     )
 
 
-def _resolve_n_flat(grid, n_flat) -> int:
-    """
-    `n_flat` if given, else `grid["NX"].get() * grid["NY"].get()` - `grid`
-    for this fallback must be a `make_grid_parameters` dict (uppercase keys,
-    ../grid/__init__.py) with NX/NY bound const-mode; raises immediately,
-    naming why, if `grid` is not that shape at all (e.g. a bare
-    `make_grid_group` FrozenGroup, which carries no bound Parameter values to
-    read at build time) rather than failing on a missing/wrong-shaped key.
-
-    Author: B.G (08/2026)
-    """
-    if n_flat is not None:
-        return int(n_flat)
-    if not isinstance(grid, dict) or "NX" not in grid or "NY" not in grid:
-        raise ValueError(
-            "make_accumulation: n_flat must be given explicitly unless grid is a "
-            "make_grid_parameters dict (uppercase NX/NY keys) - a bare make_grid_group "
-            "FrozenGroup carries no bound values to read n_flat off"
-        )
-    nx = grid["NX"].get()
-    ny = grid["NY"].get()
-    if not isinstance(nx, int) or not isinstance(ny, int):
-        raise ValueError(
-            "make_accumulation: grid['NX']/grid['NY'] are not const-mode - pass n_flat explicitly"
-        )
-    return nx * ny
-
-
-def _resolve_nx_ny(grid) -> tuple:
-    """
-    (nx, ny) as plain python ints, read off a `make_grid_parameters` dict
-    (uppercase NX/NY keys) - raises if `grid` is not that shape, or if
-    NX/NY are not const-mode. Unlike _resolve_n_flat there is no override
-    argument: the row-length/row-count split (not just their product) is
-    load-bearing for make_fill_reconstruct's directional sweeps, so there is
-    nothing sensible to fall back to when it is unavailable.
-
-    Author: B.G (08/2026)
-    """
-    if not isinstance(grid, dict) or "NX" not in grid or "NY" not in grid:
-        raise ValueError(
-            "make_fill_reconstruct: grid must be a make_grid_parameters dict (uppercase "
-            "NX/NY keys) - a bare make_grid_group FrozenGroup carries no bound values to "
-            "read nx/ny off"
-        )
-    nx = grid["NX"].get()
-    ny = grid["NY"].get()
-    if not isinstance(nx, int) or not isinstance(ny, int):
-        raise ValueError(
-            "make_fill_reconstruct: grid['NX']/grid['NY'] are not const-mode - a fixed-shape "
-            "grid is required for the directional sweep kernels"
-        )
-    return nx, ny
-
-
-def _require_param_need(need_obj, label: str, *, factory: str = "make_accumulation") -> None:
-    """
-    Raise immediately and clearly unless `need_obj` is a `Need(kind=Kind.PARAM)`
-    already `.bind()`ed to a Parameter - the boundary check make_accumulation
-    runs on `source`/`iteration_p`, make_receivers on `seed_p` and
-    make_depressions on `depression_counter_p` before threading each into a
-    block module's build_* function (see the module docstring). TypeError for
-    anything that is not a Need at all (a bare Parameter passed by mistake);
-    ValueError for a Need of the wrong kind or one that is not yet bound.
-
-    Author: B.G (08/2026)
-    """
-    if not isinstance(need_obj, Need):
-        raise TypeError(
-            f"{factory}: {label} must be a Need(kind=Kind.PARAM), got "
-            f"{type(need_obj).__name__} - build a Need, .bind() it to your Parameter, "
-            "and pass that instead of the bare Parameter"
-        )
-    if need_obj.kind is not Kind.PARAM:
-        raise ValueError(f"{factory}: {label} must be kind=Kind.PARAM, got kind={need_obj.kind.value}")
-    if not need_obj.is_bound:
-        raise ValueError(f"{factory}: {label} is not bound yet - .bind() it to a Parameter before calling")
-
-
 def make_accumulation(
     backend: str,
     grid,
@@ -519,16 +407,20 @@ def make_accumulation(
 
     method="rake_compress"/"pointer_jump_push" (ported to the new builder/
     frozen/bound/sequence stack, ../core/context/builder.py/frozen.py/
-    bound.py/sequence_v2.py): `source`/`iteration_p` are accepted here for
+    bound.py/sequence.py): `source`/`iteration_p` are accepted here for
     call-site parity with method="persistent_mfd" but are unused and
     ignored for these two - there is no Need indirection anywhere in this
     stack; the returned SequenceBuilder wires bare `SOURCE`/`ITER` PARAM
     slots the caller binds directly, post-`.build()` - see the module
     docstring and _closure_accum.py's/_cupy_accum.py's own docstrings for
-    the exact addresses. `n_flat` defaults to grid.nx.get() * grid.ny.get()
-    (see _resolve_n_flat) - which requires `grid` to be an old-stack Bag
-    with bound Parameters, not a make_grid_group FrozenGroup; these methods
-    are not yet callable against the new grid at all.
+    the exact addresses. `n_flat` is REQUIRED for both, and `rake_compress`
+    additionally requires `n_neighbours` - `grid` is a bare `make_grid_group`
+    FrozenGroup with no bound Parameter values to read either off at build
+    time, the same reasoning method="atomic"'s own required `n_flat` already
+    establishes; `grid` itself is unused by both (neither ever composes it -
+    `rake_compress` only needs `n_neighbours` as a build-time int, never a
+    device HELPER call, so there is nothing here for a FrozenGroup to supply
+    that a plain int does not already cover).
 
     method="persistent_mfd" (ported to the new builder/frozen/bound stack,
     ../core/context/builder.py/frozen.py/bound.py, like atomic): `source`/
@@ -597,7 +489,7 @@ def make_accumulation(
 
     # rake_compress/pointer_jump_push (ported to the new builder/frozen/
     # bound/sequence stack - ../core/context/builder.py, frozen.py, bound.py,
-    # sequence_v2.py): `source`/`iteration_p` are no longer accepted here at
+    # sequence.py): `source`/`iteration_p` are no longer accepted here at
     # all - there is no Need indirection in this stack (see _closure_accum.py/
     # _cupy_accum.py's module docstrings). Both factories return a
     # SequenceBuilder wiring bare `SOURCE`/`ITER` PARAM slots the caller binds
@@ -605,17 +497,29 @@ def make_accumulation(
     # build_pointer_jump_push docstring enumerates, after `.build()` - exactly
     # like make_receivers' `rand_unit.SEED`.
     blocks = _blocks_for(backend, "accum")
-    n_flat_resolved = _resolve_n_flat(grid, n_flat)
+    if n_flat is None:
+        raise ValueError(
+            f"make_accumulation: method={method!r} requires n_flat explicitly - "
+            "grid is a bare FrozenGroup with no bound values to read it off"
+        )
+    n_flat_resolved = int(n_flat)
     closure = backend in ("taichi", "quadrants")
 
     logn = math.ceil(math.log2(n_flat_resolved)) + 1
 
     if method == "rake_compress":
+        if n_neighbours is None:
+            raise ValueError(
+                "make_accumulation: method='rake_compress' requires n_neighbours explicitly - "
+                "grid is a bare FrozenGroup with no bound values to read it off"
+            )
         if closure:
             backend_mod, _, _, _ = backend_classes(backend)
-            sb, kernels = blocks.build_rake_compress(backend=backend, backend_mod=backend_mod, grid=grid, logn=logn)
+            sb, kernels = blocks.build_rake_compress(
+                backend=backend, backend_mod=backend_mod, n_neighbours=int(n_neighbours), logn=logn,
+            )
         else:
-            sb, kernels = blocks.build_rake_compress(grid=grid, logn=logn, n_flat=n_flat_resolved)
+            sb, kernels = blocks.build_rake_compress(n_neighbours=int(n_neighbours), logn=logn, n_flat=n_flat_resolved)
     else:  # pointer_jump_push
         rounds = logn + 1
         if rounds % 2 != 0:
@@ -652,7 +556,7 @@ def make_depressions(
     Build one depression-handling dict of unbuilt FrozenKernel/FrozenRoutine
     structures for `method` "vanilla"|"optimized" x `reroute` "carve"|"jump" -
     on the new builder/frozen/bound/routine stack (../core/context/
-    builder.py, frozen.py, bound.py, routine_v2.py). Keys: "ndep_p" (the
+    builder.py, frozen.py, bound.py, routine.py). Keys: "ndep_p" (the
     caller's own Parameter, passed straight through), "copy_field",
     "depression_counter" (FrozenKernel, data args (rec, ndep) - `ndep` bound
     to `depression_counter_p.get().data`, reset with `.set(0)` before each
@@ -786,26 +690,6 @@ def make_depressions(
 # ---------------------------------------------------------------------------
 
 
-def _bind_by_leaf(bound, prefix: tuple, mapping: dict) -> None:
-    """
-    Bind every address in `bound` (a BoundSequence) whose path starts with
-    `prefix` and whose last segment (leaf name) is a key of `mapping`, to
-    that key's value - see make_depression_solver's own docstring for why a
-    leaf-name match, rather than an exact per-step address list, is what
-    actually copes with saddlesort/reroute/label_basins minting a different
-    number of routine steps per backend (cupy splits several closure-backend
-    single-kernel passes into multiple real launches - see
-    _cupy_depressions.py's module docstring) while every step's own data
-    argument names stay identical regardless.
-
-    Author: B.G (08/2026)
-    """
-    plen = len(prefix)
-    for addr in bound.addresses():
-        if addr[:plen] == prefix and addr[-1] in mapping:
-            bound.bind(addr, mapping[addr[-1]])
-
-
 def _bind_if_present(bound, addr: tuple, value) -> None:
     """Bind `addr` on `bound` iff it is one of its minted addresses - a no-op otherwise (this method/reroute combination never mints it)."""
     if addr in bound.addresses():
@@ -824,6 +708,18 @@ def _bind_grid_everywhere(bound, grid_params: dict) -> None:
     than a hand-typed address list (the exact set of "grid" occurrences
     varies by `method`/`reroute`/backend - see _closure_depressions.py's/
     _cupy_depressions.py's own build_* docstrings).
+
+    Not expressed via bound.py's own `bind_leaf`/`bind_pattern`: the match
+    here is "second-to-last segment is literally 'grid'", independent of
+    address depth (`label_basins.grid.NX` and, in principle,
+    some_step.some_helper.grid.NX alike) - `bind_leaf`'s `prefix` only
+    restricts by leading segments, and `bind_pattern`'s wildcard grammar
+    requires a fixed total address length, neither of which can express "the
+    second-to-last segment, whatever the leading depth". A plain unprefixed
+    `bind_leaf(grid_params)` would happen to give the same result today
+    (nothing outside a grid occurrence is ever named NX/NY/DX/N_NEIGHBOURS/
+    NODATA_MASK/OUTLET_MASK), but that is a property of what currently
+    exists, not something this function's own match should rely on.
 
     Author: B.G (08/2026)
     """
@@ -864,7 +760,7 @@ def make_depression_solver(
 ):
     """
     Compile the outer depression-resolution loop over a dict from
-    make_depressions, as a compiled Sequence (sequence_v2.py) - see the
+    make_depressions, as a compiled Sequence (sequence.py) - see the
     module docstring for its shape:
 
         zero_ndep(); depression_counter()
@@ -964,16 +860,16 @@ def make_depression_solver(
     # (a bare FrozenKernel on closure, a 3-step FrozenRoutine on cupy)
     # uniformly. copy_field's own generic "src"/"dst" leaves are ambiguous
     # across occurrences, so that one path is bound explicitly.
-    _bind_by_leaf(bound, ("label_basins",), {"rec": rec, "rec_jump": rec_jump, "bid": bid})
+    bound.bind_leaf({"rec": rec, "rec_jump": rec_jump, "bid": bid}, prefix=("label_basins",))
     _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "src"), rec)
     _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "dst"), rec_jump)
 
-    _bind_by_leaf(
-        bound, ("saddlesort",),
+    bound.bind_leaf(
         {
             "bid": bid, "z": z, "z_prime": z_prime, "is_border": is_border,
             "basin_saddle": basin_saddle, "basin_saddlenode": basin_saddlenode, "outlet": outlet,
         },
+        prefix=("saddlesort",),
     )
 
     if reroute == "carve" and method == "vanilla":
@@ -988,7 +884,7 @@ def make_depression_solver(
             "tag": tag, "tag_alt": tag_alt, "rec": rec_scratch, "rec_work": rec, "bid": bid,
             "saddlenode": basin_saddlenode, "outlet": outlet, "rerouted": rerouted, "rec_orig": rec_jump,
         }
-        _bind_by_leaf(bound, ("reroute",), leaf_map)
+        bound.bind_leaf(leaf_map, prefix=("reroute",))
         _bind_if_present(bound, ("reroute", "copy_recwork_to_rec", "src"), rec)
         _bind_if_present(bound, ("reroute", "copy_recwork_to_rec", "dst"), rec_scratch)
         _bind_if_present(bound, ("reroute", "copy_recwork_to_recjump", "src"), rec)
@@ -996,9 +892,9 @@ def make_depression_solver(
         _bind_if_present(bound, ("reroute", "copy_rec_to_recwork", "src"), rec_scratch)
         _bind_if_present(bound, ("reroute", "copy_rec_to_recwork", "dst"), rec)
     elif reroute == "carve":  # optimized
-        _bind_by_leaf(bound, ("reroute",), {"rec": rec, "basin_saddlenode": basin_saddlenode, "outlet": outlet})
+        bound.bind_leaf({"rec": rec, "basin_saddlenode": basin_saddlenode, "outlet": outlet}, prefix=("reroute",))
     else:  # jump
-        _bind_by_leaf(bound, ("reroute",), {"rec": rec, "outlet": outlet, "rerouted": rerouted})
+        bound.bind_leaf({"rec": rec, "outlet": outlet, "rerouted": rerouted}, prefix=("reroute",))
 
     _bind_grid_everywhere(bound, grid_params)
 
@@ -1096,7 +992,7 @@ def make_fill_reconstruct_solver(
 ):
     """
     Compile the reconstruction-fill outer loop over a dict from
-    make_fill_reconstruct, as a compiled Sequence (sequence_v2.py):
+    make_fill_reconstruct, as a compiled Sequence (sequence.py):
 
         init_filled; sweep_row_lr; sweep_row_rl; sweep_col_tb; sweep_col_bt;
         frontier_init -> counters[0]
@@ -1200,11 +1096,11 @@ def make_fill_reconstruct_solver(
 
     zpf = {"z": z, "filled": filled, "parent": parent}
     for step in ("init_filled", "sweep_row_lr", "sweep_row_rl", "sweep_col_tb", "sweep_col_bt"):
-        _bind_by_leaf(bound, (step,), zpf)
-    _bind_by_leaf(bound, ("frontier_init",), {"z": z, "filled": filled, "frontier": frontier, "counters": counters})
-    _bind_by_leaf(
-        bound, ("relax",),
+        bound.bind_leaf(zpf, prefix=(step,))
+    bound.bind_leaf({"z": z, "filled": filled, "frontier": frontier, "counters": counters}, prefix=("frontier_init",))
+    bound.bind_leaf(
         {"z": z, "filled": filled, "parent": parent, "frontier": frontier, "counters": counters, "queued_gen": queued_gen},
+        prefix=("relax",),
     )
     bound.bind(("relax", "active"), active_p.get().data)
     bound.bind(("relax", "P"), pass_p)

@@ -1,7 +1,7 @@
 """
 Standalone, re-runnable verification of make_accumulation, on the new
-builder/frozen/bound(/sequence_v2) stack (../core/context/builder.py,
-frozen.py, bound.py, sequence_v2.py), at a grid scale large enough for the
+builder/frozen/bound(/sequence) stack (../core/context/builder.py,
+frozen.py, bound.py, sequence.py), at a grid scale large enough for the
 three accumulation methods to visibly disagree at f32 precision.
 
 Why scale matters: with `source` = 1.0 per cell, `q` is literally drainage
@@ -31,7 +31,7 @@ so it's clear whether the graph exercised was actually deep or just wide.
 There is no fuse-check pass here (an earlier version of this script diffed
 a closure-backend Routine's `fused=True` vs `fused=False` compile for
 rake_compress/pointer_jump_push): both methods are now `SequenceBuilder`s
-(sequence_v2.py) - each composed step is always a separate real kernel
+(sequence.py) - each composed step is always a separate real kernel
 launch, there being no per-Sequence fusion mechanism the way the old
 `Routine.compile(fused=...)` had one. Nothing to diff.
 
@@ -146,14 +146,17 @@ def max_chain_depth(rec: np.ndarray) -> int:
 
 def _bind_pointer_jump_push(bound, closure, *, source_p, q, work, work2, q_work, rec):
     """
-    Explicit address-by-address binding for the pointer_jump_push Sequence -
-    see _closure_accum.py's/_cupy_accum.py's own build_pointer_jump_push
-    docstrings for the exact composed names/addresses. Cannot use leaf-name
-    binding here (unlike rake_compress, below): "step_a"/"step_b" (closure)
-    and "step_a_copy"/"step_a_core"/"step_b_copy"/"step_b_core" (cupy) all
-    reuse the identical leaf names `rec_curr`/`rec_next`/`q_curr`/`q_next`
-    for the ping-pong's two mirrored buffer assignments, so a leaf-name bind
-    would collapse both halves onto the same buffers and break the ping-pong.
+    Bind the pointer_jump_push Sequence - see _closure_accum.py's/
+    _cupy_accum.py's own build_pointer_jump_push docstrings for the exact
+    composed names/addresses. An unprefixed leaf-name bind (bind_leaf) would
+    be wrong here: "step_a"/"step_b" (closure) and "step_a_copy"/
+    "step_a_core"/"step_b_copy"/"step_b_core" (cupy) all reuse the identical
+    leaf names `rec_curr`/`rec_next`/`q_curr`/`q_next` for the ping-pong's
+    two mirrored buffer assignments, so an unscoped match would collapse
+    both halves onto the same buffers and break the ping-pong. Prefix-scoped
+    bind_leaf (one call per step name) resolves this cleanly instead -
+    `strict=True` on each call catches a typo'd leaf name against that
+    step's own actual address set.
 
     Author: B.G (08/2026)
     """
@@ -162,27 +165,25 @@ def _bind_pointer_jump_push(bound, closure, *, source_p, q, work, work2, q_work,
     bound.bind(("copy_rec_to_work", "rec"), rec.data)
     bound.bind(("copy_rec_to_work", "work"), work.data)
     if closure:
-        bound.bind(("step_a", "rec_curr"), work.data)
-        bound.bind(("step_a", "rec_next"), work2.data)
-        bound.bind(("step_a", "q_curr"), q.data)
-        bound.bind(("step_a", "q_next"), q_work.data)
-        bound.bind(("step_b", "rec_curr"), work2.data)
-        bound.bind(("step_b", "rec_next"), work.data)
-        bound.bind(("step_b", "q_curr"), q_work.data)
-        bound.bind(("step_b", "q_next"), q.data)
+        bound.bind_leaf(
+            {"rec_curr": work.data, "rec_next": work2.data, "q_curr": q.data, "q_next": q_work.data},
+            prefix=("step_a",), strict=True,
+        )
+        bound.bind_leaf(
+            {"rec_curr": work2.data, "rec_next": work.data, "q_curr": q_work.data, "q_next": q.data},
+            prefix=("step_b",), strict=True,
+        )
     else:
-        bound.bind(("step_a_copy", "q_curr"), q.data)
-        bound.bind(("step_a_copy", "q_next"), q_work.data)
-        bound.bind(("step_a_core", "rec_curr"), work.data)
-        bound.bind(("step_a_core", "rec_next"), work2.data)
-        bound.bind(("step_a_core", "q_curr"), q.data)
-        bound.bind(("step_a_core", "q_next"), q_work.data)
-        bound.bind(("step_b_copy", "q_curr"), q_work.data)
-        bound.bind(("step_b_copy", "q_next"), q.data)
-        bound.bind(("step_b_core", "rec_curr"), work2.data)
-        bound.bind(("step_b_core", "rec_next"), work.data)
-        bound.bind(("step_b_core", "q_curr"), q_work.data)
-        bound.bind(("step_b_core", "q_next"), q.data)
+        bound.bind_leaf({"q_curr": q.data, "q_next": q_work.data}, prefix=("step_a_copy",), strict=True)
+        bound.bind_leaf(
+            {"rec_curr": work.data, "rec_next": work2.data, "q_curr": q.data, "q_next": q_work.data},
+            prefix=("step_a_core",), strict=True,
+        )
+        bound.bind_leaf({"q_curr": q_work.data, "q_next": q.data}, prefix=("step_b_copy",), strict=True)
+        bound.bind_leaf(
+            {"rec_curr": work2.data, "rec_next": work.data, "q_curr": q_work.data, "q_next": q.data},
+            prefix=("step_b_core",), strict=True,
+        )
 
 
 def run(backend: str):
@@ -197,7 +198,7 @@ def run(backend: str):
 
     from ..core.context.backends import backend_classes
     from ..grid import make_grid_group, make_grid_parameters
-    from . import _bind_by_leaf, make_accumulation, make_receivers
+    from . import make_accumulation, make_receivers
 
     _, ParamCls, _, dtypes = backend_classes(backend)
     i32, f32 = dtypes["i32"], dtypes["f32"]
@@ -235,8 +236,7 @@ def run(backend: str):
 
     recv = make_receivers(backend, grid_group, topology="D8", mode="steepest")
     recv_bound = recv["receivers"].build()
-    for name in ("NX", "NY", "DX", "N_NEIGHBOURS"):
-        recv_bound.bind(name, grid_params[name])
+    recv_bound.bind_leaf(grid_params)
     recv_bound.bind("z", z.data)
     recv_bound.bind("rec", rec.data)
     recv_kernel = recv_bound.compile(backend, **launch)
@@ -271,7 +271,7 @@ def run(backend: str):
 
     def run_rake_compress(source_p):
         iteration_p = ParamCls("ITER", dtype=i32, mode="scalar", value=0, pool=pool)
-        accum = make_accumulation(backend, grid_params, method="rake_compress", n_flat=n)
+        accum = make_accumulation(backend, grid_group, method="rake_compress", n_flat=n, n_neighbours=nn)
         bound = accum.sequence.freeze().build()
 
         q = pool.get_data(f32, (n,))
@@ -282,12 +282,12 @@ def run(backend: str):
         q_alt = pool.get_data(f32, (n,))
         src = pool.get_data(i32, (n,))
 
-        _bind_by_leaf(bound, (), {
+        bound.bind_leaf({
             "rec": rec.data, "q": q.data, "donors": donors.data, "ndonors": ndonors.data,
             "donors_alt": donors_alt.data, "ndonors_alt": ndonors_alt.data,
             "q_alt": q_alt.data, "src": src.data,
         })
-        _bind_by_leaf(bound, (), {"SOURCE": source_p, "ITER": iteration_p})
+        bound.bind_leaf({"SOURCE": source_p, "ITER": iteration_p})
 
         bound.compile(backend, **launch)()
 
@@ -299,7 +299,7 @@ def run(backend: str):
         return got
 
     def run_pointer_jump_push(source_p):
-        accum = make_accumulation(backend, grid_params, method="pointer_jump_push", n_flat=n)
+        accum = make_accumulation(backend, grid_group, method="pointer_jump_push", n_flat=n)
         bound = accum.sequence.freeze().build()
 
         q = pool.get_data(f32, (n,))
@@ -544,8 +544,7 @@ def run_mfd_cupy():
     barrier.data[0] = 0
 
     accum_bound = accum["accum"].build()
-    for name, p in grid_params.items():
-        accum_bound.bind(("grid", name), p)
+    accum_bound.bind_leaf(grid_params, prefix=("grid",))
     accum_bound.bind("frontier0", frontier0.data)
     accum_bound.bind("frontier1", frontier1.data)
     accum_bound.bind("count", count.data)

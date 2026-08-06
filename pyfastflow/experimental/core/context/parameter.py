@@ -27,56 +27,55 @@ Parameter       One named, typed value. Its `mode` says where the value lives:
                 "const" (baked into the generated code, fixed at
                 construction), "scalar" (a single device cell, writable) or
                 "field" (a device array, one value per node, writable).
-HelperBuilder   The recipe for a device-side helper: a small routine callable
-                only from other device code (ti.func, qd.func, CUDA
-                __device__). Bind it into a kernel - flat or inside a Bag -
-                and the kernel's own compile() specializes it; there is no
-                standalone compiled Helper object to hold onto.
-Kernel          A compiled entry point - what the host launches (ti.kernel,
-                qd.kernel, CUDA __global__).
-Bag             A named collection of any of the above, mixed freely, so a
-                group travels as one object and is reached in-kernel by dotted
-                path: phys.dx.get(i), ops.neighbour(i).
+KernelBuilder   The recipe for a launchable kernel: PARAM/HELPER/DATA slots
+                declared (`.compose()`/`.wire_data()`), a template ingested
+                (`.ingest()`), then frozen (`.build()` -> FrozenKernel) and
+                bound (`.build()`/`.bind()` -> BoundKernel) before
+                `.compile(backend)` emits the real ti.kernel/qd.kernel/CUDA
+                __global__.
+HelperBuilder   Same recipe shape, for a device-side helper callable only
+                from other device code (ti.func, qd.func, CUDA __device__) -
+                composed into an enclosing kernel's tree rather than compiled
+                standalone.
+FrozenGroup     A pure-structure composite with no data of its own (e.g. a
+                grid's neighbour/distance helpers) - composed into a kernel's
+                tree the same way a FrozenHelper is, reached in-kernel by
+                dotted path: ctx.phys.dx.get(i), ctx.ops.neighbour(i).
 
-A "context" is any concrete class - GridContext, FlowContext, ... - that groups
-Parameters and registers Helpers. There is deliberately no base Context
-class: a context needing another context's parameters binds them explicitly,
-rather than reaching through a registry of stored connections.
+There is deliberately no stateful context class: a `make_*` factory returns a
+FrozenGroup (pure structure) plus, separately, the concrete Parameters a
+caller owns and binds itself - see grid/__init__.py's own module docstring
+for that structure/data split.
 
 Compiling something
 -------------------
-Templates are written once, generically, and specialized by a builder:
+A template is written once, generically, with `ctx` as its first parameter -
+the tree it composes from, PARAM/HELPER slots reached as `ctx.name.get(i)`/
+`ctx.name(...)` - and turned into something callable in three phases: a
+KernelBuilder declares its slots and composes children (`.wire_data()`,
+`.compose()`, `.ingest()`), `.build()` freezes that recipe into an inert
+FrozenKernel, and `.build()` again (this time on the frozen object, via
+`.build()`'s own BoundKernel) plus `.bind()` fills every slot with a concrete
+Parameter/helper/data buffer before `.compile(backend)` emits the real
+ti.kernel/qd.kernel/CUDA source:
 
-    kernel = (TaichiKernelBuilder()
-              .bind("phys", phys)        # a Bag of parameters
-              .bind("ops", ops)          # a Bag of HelperBuilders
-              .ingest(update_height)     # the template
-              .compile())
-    kernel(h_new, h_old)                 # bulk data passed at call time
+    kernel = KernelBuilder().compose("phys", phys_group).wire_data("h_new", "h_old").ingest(update_height)
+    bound = kernel.build()
+    bound.bind(("phys", "dx"), dx_p)
+    compiled = bound.compile("taichi")
+    compiled(h_new=h_new_field, h_old=h_old_field)   # bulk data passed at call time
 
-bind(name, obj) makes `obj` visible inside the template body under `name`.
-ingest() takes the template - a python def for Taichi/Quadrants, a CUDA source
-string for cupy. compile() returns a Kernel. Only the abstract HelperBuilder /
-KernelBuilder live here; the concrete Taichi*, Quadrants* and Cupy* builders
-sit alongside this module.
+See core/context/builder.py, frozen.py and bound.py for the three phases in
+full.
 
-A HelperBuilder bound anywhere in a KernelBuilder's bindings - directly under
-a name, or as a member of a bound Bag - is specialized as part of that
-kernel's compile(), against that same compile's bindings. This is what lets a
-helper reading a const Parameter pick up a different value after the const is
-swapped and the *kernel* is recompiled, with the helper's own builder never
-touched. Reaching the same HelperBuilder from two places in one kernel - bound
-flat and inside a Bag, or under two different names - specializes it once; the
-same specialized object is shared at both call sites. A HelperBuilder has no
-compiled form of its own to keep between compiles: it is a recipe, always
-specialized fresh as part of whatever kernel currently binds it.
-
-The builder is the recipe: its template and bindings can be inspected, and
-compile() may be called again after a bind() edit, each call producing a new,
-independent callable. Nothing about compile() consumes or mutates the
-builder - recompiling a builder that has not changed since its last compile()
-just repeats work for an equivalent result, which is pointless and best
-avoided, though harmless if it happens.
+A helper composed anywhere in a kernel's tree - directly or nested under
+another composed group - is specialized once as part of that kernel's own
+`.compile()`, against that same compile's bindings; reaching the same
+FrozenHelper from two addresses in one kernel still specializes it once
+(build-phase-shared via `.share()`) if the two occurrences were unified into
+one address to begin with, or twice if they were composed independently -
+either way there is no standalone compiled Helper object to hold onto
+outside of a particular kernel's compile.
 
 Data at call time, configuration at compile time
 ------------------------------------------------
@@ -133,11 +132,18 @@ Where things live
 This module defines Parameter and the modes it may take. The rest of the
 scheme described above is split by concern:
 
-  compile.py  Specializable/Kernel, the abstract HelperBuilder and
-              KernelBuilder, and resolve_binding - everything involved in
-              turning a template plus bindings into a compiled object.
-  bag.py      Bag and its operators (merge, extract, trim, replace, ...),
-              which know nothing of compilation.
+  builder.py  KernelBuilder/HelperBuilder/GroupBuilder - declaring slots and
+              composing children, the build phase.
+  frozen.py   FrozenKernel/FrozenHelper/FrozenGroup - the inert, immutable
+              recipe a builder's `.build()` produces.
+  bound.py    BoundKernel - filling a frozen recipe's slots with concrete
+              Parameters/helpers/data before compile().
+  compile_closure.py / compile_cupy.py / compile_shared.py
+              backend-specific and shared compile-phase logic, turning a
+              BoundKernel into the real callable.
+  bag.py      Bag and its operators (merge, extract, trim, replace, ...), a
+              lighter-weight named-collection convenience some factories
+              still return alongside the above, unrelated to compilation.
 
 Author: B.G (07/2026)
 """

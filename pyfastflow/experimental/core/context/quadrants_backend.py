@@ -1,15 +1,18 @@
 """
-Quadrants implementations of Parameter and the two builders.
+Quadrants implementation of Parameter.
 
-Templates are python defs, specialized by splicing bound objects into their
-globals before handing them to qd.func or qd.kernel - the mechanism in
+A Parameter's device view is a python def specialized by splicing bound
+objects into its globals before handing it to qd.func - the mechanism in
 _closure_backend.py, shared with Taichi.
 
-Two things differ from Taichi. Kernel templates may type their data arguments
-qd.Tensor, and one such template then accepts either a field- or ndarray-backed
-value at call time; Taichi has no equivalent. Field-mode Parameters, on the
-other hand, must be field-backed, because they reach device code as globals and
-Quadrants rejects an ndarray referenced as a global inside a func.
+The kernel/helper compile path (KernelBuilder/HelperBuilder -> FrozenKernel ->
+BoundKernel.compile("quadrants")) is compile_closure.py, which reaches this
+module only for `qd` itself, imported directly there. There, a kernel
+template may type its data arguments qd.Tensor to accept either a field- or
+ndarray-backed value at call time - Taichi has no equivalent. Field-mode
+Parameters, on the other hand, must be field-backed, because they reach
+device code as globals and Quadrants rejects an ndarray referenced as a
+global inside a func.
 
 Caching
 -------
@@ -32,13 +35,7 @@ Author: B.G (07/2026)
 
 import quadrants as qd
 
-from ._closure_backend import (
-    ClosureBackendParameter,
-    ClosureHelperBuilder,
-    ClosureKernelBuilder,
-    ClosureRoutineBuilder,
-    ClosureSequenceBuilder,
-)
+from ._closure_backend import ClosureBackendParameter
 
 
 class QuadrantsParameter(ClosureBackendParameter):
@@ -49,43 +46,3 @@ class QuadrantsParameter(ClosureBackendParameter):
     """
 
     _backend = qd
-
-
-class QuadrantsHelperBuilder(ClosureHelperBuilder):
-    """
-    Compiles a device helper with qd.func. Parameters bound into it must be
-    field-backed, since Quadrants rejects an ndarray referenced as a global.
-
-    Author: B.G (07/2026)
-    """
-
-    _backend = qd
-
-
-class QuadrantsKernelBuilder(ClosureKernelBuilder):
-    """
-    Compiles a launchable kernel with qd.kernel. Type the template's data
-    arguments qd.Tensor to accept field- or ndarray-backed values alike.
-
-    Author: B.G (07/2026)
-    """
-
-    _backend = qd
-
-
-class QuadrantsRoutineBuilder(ClosureRoutineBuilder):
-    """
-    Compiles an ordered sequence of Quadrants kernels sharing one bag into a
-    Routine.
-
-    Author: B.G (07/2026)
-    """
-
-
-class QuadrantsSequenceBuilder(ClosureSequenceBuilder):
-    """
-    Sequences Quadrants kernels, Routines and host code under host-driven
-    control.
-
-    Author: B.G (07/2026)
-    """

@@ -59,8 +59,9 @@ HELPER, shared by object identity, no address needed) and `GRID.DX.get(0)`,
 composing `grid` still mints `NX`/`NY`/`N_NEIGHBOURS` addresses nobody reads,
 twice over. This is exactly the case `share()` exists for: `make_hillshade_
 group` wires every name in `grid.slots.names(PARAM)` at its own top level as
-a canonical and `_share_leaf`s every occurrence found anywhere in its own
-composed subtree - the identical mechanism grid/__init__.py and
+a canonical and `share_leaf`s (core/context/builder.py) every occurrence
+found anywhere in its own composed subtree - the identical mechanism
+grid/__init__.py and
 noise/__init__.py already use, `share()`'s own path-walk resolving through a
 nested FrozenGroup exactly as it would through a FrozenHelper (see
 builder.py's `GroupBuilder.share()` - the walk checks `node.composed`/`node.
@@ -109,8 +110,8 @@ Author: B.G (08/2026)
 """
 
 from ..core.context.backends import backend_classes
-from ..core.context.builder import GroupBuilder, KernelBuilder
-from ..core.context.frozen import FrozenGroup, FrozenKernel, _Frozen
+from ..core.context.builder import GroupBuilder, KernelBuilder, share_leaf
+from ..core.context.frozen import FrozenGroup, FrozenKernel
 from ..core.context.slot import SlotKind
 
 _TOPOLOGIES = {"D4": 4, "D8": 8}
@@ -140,41 +141,6 @@ def _k_indices(topology: str):
     if topology == "D8":
         return {"k_top": 1, "k_left": 3, "k_right": 4, "k_bottom": 6}
     raise ValueError(f"make_hillshade_group: topology must be one of {sorted(_TOPOLOGIES)}, got {topology!r}")
-
-
-def _find_param_paths(frozen: _Frozen, leaf_name: str, prefix: tuple = ()) -> list:
-    """
-    Every relative dotted path, as a `"a.b.NAME"` string, under `frozen`'s
-    own composed subtree whose PARAM slot is literally named `leaf_name` -
-    see grid/__init__.py's own `_find_param_paths` (identical; generic over
-    whether a composed node is itself a FrozenHelper or a nested
-    FrozenGroup - see the module docstring's "Nested FrozenGroup-in-
-    FrozenGroup" section).
-
-    Author: B.G (08/2026)
-    """
-    paths = []
-    if leaf_name in frozen.slots.names(SlotKind.PARAM):
-        paths.append(".".join(prefix + (leaf_name,)))
-    for name, child in frozen.composed.items():
-        paths.extend(_find_param_paths(child, leaf_name, prefix + (name,)))
-    return paths
-
-
-def _share_leaf(group: GroupBuilder, canonical: str) -> None:
-    """
-    Declare every occurrence of a PARAM slot named `canonical` anywhere in
-    `group`'s already-composed subtree as build-phase-shared with `group`'s
-    own top-level `canonical` slot - see grid/__init__.py's own `_share_leaf`
-    (identical).
-
-    Author: B.G (08/2026)
-    """
-    paths = []
-    for name, child in group.composed.items():
-        paths.extend(_find_param_paths(child, canonical, (name,)))
-    if paths:
-        group.share(canonical, *paths)
 
 
 def make_hillshade_group(backend: str, grid: FrozenGroup, *, topology: str = "D8") -> FrozenGroup:
@@ -213,11 +179,11 @@ def make_hillshade_group(backend: str, grid: FrozenGroup, *, topology: str = "D8
 
     blocks.build_group(group, grid=grid, **k)
 
-    _share_leaf(group, "AZIMUTH")
-    _share_leaf(group, "ALTITUDE")
-    _share_leaf(group, "ZFACTOR")
+    share_leaf(group, "AZIMUTH")
+    share_leaf(group, "ALTITUDE")
+    share_leaf(group, "ZFACTOR")
     for name in grid_param_names:
-        _share_leaf(group, name)
+        share_leaf(group, name)
 
     return group.close()
 

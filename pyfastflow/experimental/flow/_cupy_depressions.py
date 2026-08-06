@@ -3,7 +3,7 @@ cupy (CUDA source) block templates behind make_depressions/
 make_depression_solver: the i64 atomic_min helper, copy_field, both basin
 labelling variants, saddlesort, both carve variants, jump reroute, and the
 depression counter - on the new builder/frozen/bound/routine stack (../core/
-context/builder.py, frozen.py, bound.py, routine_v2.py). Mirrors
+context/builder.py, frozen.py, bound.py, routine.py). Mirrors
 _closure_depressions.py step for step - same routine composition, same
 grid/bitpack occurrence-per-site shape - CUDA text instead of python defs.
 
@@ -39,7 +39,7 @@ _cupy_accum.py.
 
 A fixed, build-time-constant repeat (propagate_basin_iter's/
 iteration_reroute_carve's `logn+1` rounds) is unrolled as `logn+1` distinct
-routine_v2 compose() names for the SAME FrozenKernel - see
+routine compose() names for the SAME FrozenKernel - see
 _closure_depressions.py's module docstring for why (no per-round host
 readback, so nothing a SequenceBuilder loop would buy over a flat unroll).
 
@@ -47,7 +47,7 @@ Author: B.G (08/2026)
 """
 
 from ..core.context.builder import HelperBuilder, KernelBuilder
-from ..core.context.routine_v2 import RoutineBuilder
+from ..core.context.routine import RoutineBuilder
 from ..core.pool.base import new_uid
 
 
@@ -154,7 +154,7 @@ __global__ void {t}_propagate_basin_final(int* bid, const int* rec_jump) {{
 
 def build_basin_labelling_vanilla(*, grid, copy_field, n_flat: int, logn: int):
     """
-    RoutineBuilder (routine_v2) for vanilla basin labelling - see
+    RoutineBuilder (routine) for vanilla basin labelling - see
     _closure_depressions.py's own (identical step sequence and unroll
     choice). Every step here is already one launch (no cross-loop splitting
     needed for this variant - it has no per-round cross-thread ordering
@@ -184,7 +184,7 @@ def build_basin_labelling_vanilla(*, grid, copy_field, n_flat: int, logn: int):
 
 def build_basin_labelling_optimized(*, grid, n_flat: int):
     """
-    RoutineBuilder (routine_v2) for optimized basin labelling - the closure
+    RoutineBuilder (routine) for optimized basin labelling - the closure
     backends' single label_basins_walk launch split into three real
     launches (copy, path-halving, bid finalize), since the path-halving
     phase needs every thread's copy to have landed first, and the finalize
@@ -245,7 +245,7 @@ __global__ void {t}_walk_finalize(const int* rec_jump, int* bid) {{
 
 def build_saddlesort(*, grid, bitpack, n_flat: int):
     """
-    RoutineBuilder (routine_v2) for the six saddlesort passes - see
+    RoutineBuilder (routine) for the six saddlesort passes - see
     _closure_depressions.py's build_saddlesort for the step sequence.
     `bitpack` is the FrozenGroup ops.make_bitpack_group returns
     (`$ctx.bitpack.pack(...)$`/`.unpack_value`/`.unpack_index`); each
@@ -438,7 +438,7 @@ __global__ void {t}_break_cycle(const int* bid, long long* outlet, long long* ba
 
 def build_reroute_carve_vanilla(*, bitpack, copy_field, n_flat: int, logn: int):
     """
-    RoutineBuilder (routine_v2) for carve+vanilla reroute - see
+    RoutineBuilder (routine) for carve+vanilla reroute - see
     _closure_depressions.py's build_reroute_carve_vanilla for the buffer
     roles (`rec_jump` here is finalise's original, unjumped snapshot, not
     the pointer-jumped result - same note applies). init_reroute_carve,
@@ -633,7 +633,7 @@ __global__ void {t}_carve_basins_serial(int* rec, const int* basin_saddlenode, c
 
 def build_reroute_jump(*, bitpack, n_flat: int):
     """
-    RoutineBuilder (routine_v2) for reroute_jump - split into a reset launch
+    RoutineBuilder (routine) for reroute_jump - split into a reset launch
     and the jump launch itself, since the jump phase writes
     `rerouted[i - 1]` from thread `i`, a cell a *different* thread's reset
     zeroed. The closure backends keep this as one two-loop kernel.
