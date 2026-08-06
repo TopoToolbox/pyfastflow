@@ -187,36 +187,37 @@ def check_all(rec: np.ndarray, nx: int, ny: int, can_out: np.ndarray) -> dict:
     return out
 
 
-def _label_only_sequence(backend, deps, method, closure, n_flat, rec, rec_jump, bid):
+def _label_only_sequence(backend, deps, grid_params, n_flat, rec, rec_jump, bid):
     """
-    A Sequence whose only block is `deps`'s basin-labelling block, so the two
-    labelling implementations can be run over one and the same receiver graph
-    and diffed.
+    A compiled Sequence (sequence_v2.py) whose only block is `deps`'s
+    basin-labelling block, so the two labelling implementations can be run
+    over one and the same receiver graph and diffed.
 
-    It is assembled from make_depression_solver's own private pieces -
-    _sequence_cls, _union_bag, _fill_routine_data - rather than a copy of
-    them, so what is measured here is the labelling block as the solver
-    itself drives it: same bag, same registered data handles, same
-    Kernel-or-Routine dispatch.
+    Reuses flow/__init__.py's own private `_bind_by_leaf`/`_bind_grid_everywhere`
+    - the same leaf-name binding make_depression_solver uses for its own
+    "label_basins" block - so what is measured here is the labelling block
+    exactly as the solver itself drives it, not a re-implementation of the
+    binding logic.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
-    from ..core.context.routine import RoutineBuilder
-    from . import _fill_routine_data, _sequence_cls, _union_bag
+    from ..core.context.sequence_v2 import SequenceBuilder
+    from . import _bind_by_leaf, _bind_grid_everywhere, _bind_if_present
 
-    SequenceCls = _sequence_cls(backend)
-    sb = SequenceCls() if closure else SequenceCls(grid=((n_flat + BLOCK - 1) // BLOCK,), block=(BLOCK,))
-    sb.bind_bag(_union_bag(deps, {"ndep": deps.ndep}))
-    sb.add_data("rec", rec)
-    sb.add_data("rec_jump", rec_jump)
-    sb.add_data("bid", bid)
-    label = deps.label_basins
-    if isinstance(label, RoutineBuilder):
-        _fill_routine_data(label, {"rec": rec, "bid": bid, "rec_jump": rec_jump}, "label_basins")
-        sb.add_routine(label)
-    else:
-        sb.add_kernel(label, ("rec", "rec_jump", "bid"))
-    return sb.compile()
+    sb = SequenceBuilder()
+    sb.compose("label_basins", deps["label_basins"])
+    sb.step("label_basins")
+    frozen = sb.freeze()
+    bound = frozen.build()
+
+    _bind_by_leaf(bound, ("label_basins",), {"rec": rec, "rec_jump": rec_jump, "bid": bid})
+    _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "src"), rec)
+    _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "dst"), rec_jump)
+    _bind_grid_everywhere(bound, grid_params)
+
+    if backend == "cupy":
+        return bound.compile(backend, grid=((n_flat + BLOCK - 1) // BLOCK,), block=(BLOCK,))
+    return bound.compile(backend)
 
 
 def run(backend: str):
@@ -225,33 +226,30 @@ def run(backend: str):
     return (n_flat, rows) - one row per (terrain, method, reroute) plus the
     vanilla-vs-optimized diff rows.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     if backend == "taichi":
         import taichi as ti
         ti.init(arch=ti.gpu)
-        from ..core.context.taichi_backend import TaichiParameter
-        from ..core.pool.taichi_pool import TaichiPool
-        Param, Pool = TaichiParameter, TaichiPool
-        i32, i64, f32, u8 = ti.i32, ti.i64, ti.f32, ti.u8
     elif backend == "quadrants":
         import quadrants as qd
         qd.init(arch=qd.gpu)
-        from ..core.context.quadrants_backend import QuadrantsParameter
-        from ..core.pool.quadrants_pool import QuadrantsPool
-        Param, Pool = QuadrantsParameter, QuadrantsPool
-        i32, i64, f32, u8 = qd.i32, qd.i64, qd.f32, qd.u8
-    elif backend == "cupy":
-        from ..core.context.cupy_backend import CupyParameter
-        from ..core.pool.cupy_pool import CupyPool
-        Param, Pool = CupyParameter, CupyPool
-        i32, i64, f32, u8 = np.int32, np.int64, np.float32, np.uint8
-    else:
+    elif backend != "cupy":
         raise ValueError(f"unknown backend {backend!r}")
 
-    from ..core.context.need import Kind, Need
-    from ..grid import make_grid
+    from ..core.context.backends import backend_classes
+    from ..grid import make_grid_group, make_grid_parameters
     from . import make_depression_solver, make_depressions, make_receivers
+
+    _, ParamCls, _, dtypes = backend_classes(backend)
+    i32, i64, f32, u8 = dtypes["i32"], dtypes["i64"], dtypes["f32"], dtypes["u8"]
+
+    if backend == "taichi":
+        from ..core.pool.taichi_pool import TaichiPool as PoolCls
+    elif backend == "quadrants":
+        from ..core.pool.quadrants_pool import QuadrantsPool as PoolCls
+    else:
+        from ..core.pool.cupy_pool import CupyPool as PoolCls
 
     closure = backend in ("taichi", "quadrants")
     nx = ny = SIDE
@@ -259,16 +257,14 @@ def run(backend: str):
     can_out = edge_mask(nx, ny)
 
     def upload(handle, arr):
-        if closure:
-            handle.data.from_numpy(arr)
-        else:
-            handle.data.set(arr)
+        handle.from_numpy(arr)
 
     def download(handle):
-        return handle.data.to_numpy() if closure else handle.data.get()
+        return handle.to_numpy()
 
-    pool = Pool()
-    grid = make_grid(backend, pool, nx, ny, DX, topology="D8", boundary="normal", outlet="edge")
+    pool = PoolCls()
+    grid = make_grid_group(backend, topology="D8", boundary="normal", outlet="edge")
+    grid_params = make_grid_parameters(backend, pool, nx, ny, DX, topology="D8", outlet="edge")
 
     z = pool.get_data(f32, (n,))
     rec = pool.get_data(i32, (n,))
@@ -284,13 +280,16 @@ def run(backend: str):
     tag_alt = pool.get_data(u8, (n,))
     rerouted = pool.get_data(u8, (n,))
 
-    ndep_p = Param("NDEP", dtype=i32, mode="scalar", value=0, pool=pool)
-    ndep_need = Need("depression_counter_p", kind=Kind.PARAM, dtype=i32, modes={"scalar"})
-    ndep_need.bind(ndep_p)
+    ndep_p = ParamCls("NDEP", dtype=i32, mode="scalar", value=0, pool=pool)
 
-    recv = make_receivers(backend, grid)
-    recv_kernel = recv.receivers.compile()
-    launch = {"grid": ((n + BLOCK - 1) // BLOCK,), "block": (BLOCK,)} if not closure else {}
+    recv = make_receivers(backend, grid, topology="D8", mode="steepest")
+    recv_bound = recv["receivers"].build()
+    for name in ("NX", "NY", "DX", "N_NEIGHBOURS"):
+        recv_bound.bind(name, grid_params[name])
+    recv_bound.bind("z", z.data)
+    recv_bound.bind("rec", rec.data)
+    recv_launch = {"grid": ((n + BLOCK - 1) // BLOCK,), "block": (BLOCK,)} if not closure else {}
+    recv_kernel = recv_bound.compile(backend)
 
     buffers = dict(
         rec=rec.data, z=z.data, bid=bid.data, rec_jump=rec_jump.data, z_prime=z_prime.data,
@@ -302,13 +301,13 @@ def run(backend: str):
     solvers = {}
     labellers = {}
     for method, reroute in COMBOS:
-        deps = make_depressions(backend, grid, ndep_need, method=method, reroute=reroute, n_flat=n)
+        deps = make_depressions(backend, grid, ndep_p, method=method, reroute=reroute, n_flat=n)
         solvers[(method, reroute)] = make_depression_solver(
-            backend, deps, method=method, reroute=reroute, n_flat=n, block_size=BLOCK, **buffers
+            backend, deps, grid_params, method=method, reroute=reroute, n_flat=n, block_size=BLOCK, **buffers
         )
         if reroute == "carve":
             labellers[method] = _label_only_sequence(
-                backend, deps, method, closure, n, rec.data, rec_jump.data, bid.data
+                backend, deps, grid_params, n, rec.data, rec_jump.data, bid.data
             )
 
     terrains = (
@@ -319,10 +318,7 @@ def run(backend: str):
     rows = []
     for terrain_name, z_np in terrains:
         upload(z, z_np)
-        if closure:
-            recv_kernel(z.data, rec.data)
-        else:
-            recv_kernel(z.data, rec.data, **launch)
+        recv_kernel(**recv_launch)
         rec0 = download(rec).astype(np.int64)
         entry_pits = count_pits(rec0, can_out)
 

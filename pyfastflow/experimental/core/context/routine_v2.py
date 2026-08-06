@@ -82,7 +82,7 @@ Author: B.G (08/2026)
 from typing import Any
 
 from ..pool.base import new_uid
-from .bound import Address, BindError, _Bound, _walk, format_address, parse_address
+from .bound import Address, BindError, _Bound, _walk, _walk_group, format_address, parse_address
 from .compile_shared import CompileError, check_unmet
 from .frozen import FrozenBuilderError, FrozenHelper, FrozenKernel
 
@@ -208,11 +208,22 @@ class FrozenRoutine:
         with that step's own name) and return a fresh BoundRoutine. See the
         module docstring's "Addressing" section.
 
+        A step's own `.shared` (`_Builder.share()`, builder.py) is honoured
+        exactly as bound.py's own top-level `build()` honours it for a
+        standalone FrozenKernel - dispatching to `_walk_group` rather than
+        plain `_walk` - so a step composed with its own share() declarations
+        collapses identically whether it is built standalone or as one step
+        of a routine.
+
         Author: B.G (08/2026)
         """
         table: dict[Address, Any] = {}
         for name in self._order:
-            _walk((name,), self._composed[name], table)
+            step = self._composed[name]
+            if step.shared:
+                _walk_group((name,), step, table, {}, frozenset())
+            else:
+                _walk((name,), step, table)
         return BoundRoutine(self, table)
 
     def __repr__(self) -> str:

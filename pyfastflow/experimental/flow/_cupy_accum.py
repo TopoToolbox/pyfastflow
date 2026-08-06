@@ -1,62 +1,63 @@
 """
 cupy (CUDA source) block templates behind make_accumulation: the ping-pong
 src helpers, and the three accumulation methods ("atomic", "rake_compress",
-"pointer_jump_push").
+"pointer_jump_push"), on the new builder/frozen/bound/sequence stack
+(../core/context/builder.py, frozen.py, bound.py, sequence_v2.py).
 
 Split out of a single _cupy_blocks.py that used to hold every flow algorithm
 - see _cupy_receivers.py/_cupy_depressions.py/_cupy_reconstruct.py for the
-others. build_rake_compress/build_pointer_jump_push build a
-CupyRoutineBuilder; cupy has no source fusion (see cupy_backend.py) -
-captured=True (the default) launches every step once, for real, then replays
-the same launch sequence off a CUDA graph, so the barrier every round needs
-between steps is just the ordinary stream ordering CUDA already gives
-consecutive launches; there is nothing here equivalent to the closure
-backend's fused-vs-split() choice.
+others. Mirrors _closure_accum.py's build_rake_compress/build_pointer_jump_push
+step-for-step - see that module's docstring for the loop-vs-unroll design
+choice and the two-address pointer_jump_push ping-pong shape, both identical
+here. Every span reaching a PARAM is spelled `$ctx.NAME.get(...)$`/
+`$ctx.NAME.set_node(...)$` in full, every span reaching a composed HELPER is
+spelled `$ctx.name(args)$` - see compile_cupy.py's module docstring: a
+composed helper's own C name is derived from its address and renamed at
+compile time, so (unlike a kernel's own `extern "C" __global__` name) the
+name chosen for it in this file's own source text is never seen by a
+caller and needs no per-build uid tag. A `__global__` kernel's own name does
+still need one (`new_uid()`), since it is a real launch entry point, not a
+composed device function - matching _cupy_receivers.py's build_atomic.
 
-Author: B.G (07/2026)
+Unlike closure, cupy has no source fusion (see cupy_backend.py) and no
+grid-wide barrier a single `__global__` can rely on - every ordering
+dependency a round needs is a real, separate kernel launch, exactly as
+_cupy_receivers.py/build_atomic's own two-launch q_init/accum split already
+establishes for this same reason.
+
+Author: B.G (08/2026)
 """
 
-from ..core.context.backends import helper_need
-from ..core.context.builder import KernelBuilder
-from ..core.context.need import Kind, Need
+from ..core.context.builder import HelperBuilder, KernelBuilder
+from ..core.context.sequence_v2 import SequenceBuilder
 from ..core.pool.base import new_uid
 
 
-def build_ping_pong_helpers(HelperCls, *, iteration_need: Need):
+def build_ping_pong_helpers():
     """
-    get_src(src, tid)/update_src(src, tid, flip) HelperBuilders - same
-    sign/magnitude encoding as pyfastflow/general_algorithms/pingpong.py's
-    getSrc/updateSrc, reading `iteration_need` internally instead of taking
-    iteration as a call argument.
+    get_src(src, tid)/update_src(src, tid, flip) HelperBuilders - see
+    _closure_accum.py's build_ping_pong_helpers for the sign/magnitude
+    encoding and the ITER-sharing note (both apply identically here).
 
-    `iteration_need` is the caller's already-bound `Need("iteration_p",
-    kind=Kind.PARAM)` (see make_accumulation) - a fresh, internally-named
-    `Need("ITER", ...)`, matching what these templates' bodies actually
-    reference, is bound here to the same underlying Parameter and declared
-    on both helpers via `.need()`.
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
-    t = f"pp{new_uid()}"
-    iter_need = Need("ITER", kind=Kind.PARAM, dtype=iteration_need.dtype, modes=iteration_need.modes)
-    iter_need.bind(iteration_need.value)
-    get_src = HelperCls(strict_needs=True).need(iter_need).ingest(
-        f"""
-__device__ int {t}_get_src(const int* src, int tid) {{
+    get_src = HelperBuilder().wire_param("ITER").ingest(
+        """
+__device__ int pf_get_src(const int* src, int tid) {
     int entry = src[tid];
-    int it = $ITER.get(0)$;
+    int it = $ctx.ITER.get(0)$;
     int flip = entry < 0;
     if (abs(entry) == (it + 1)) flip = !flip;
     return flip;
-}}
+}
 """
     )
-    update_src = HelperCls(strict_needs=True).need(iter_need).ingest(
-        f"""
-__device__ void {t}_update_src(int* src, int tid, int flip) {{
-    int it = $ITER.get(0)$;
+    update_src = HelperBuilder().wire_param("ITER").ingest(
+        """
+__device__ void pf_update_src(int* src, int tid, int flip) {
+    int it = $ctx.ITER.get(0)$;
     src[tid] = (flip ? 1 : -1) * (it + 1);
-}}
+}
 """
     )
     return get_src, update_src
@@ -134,57 +135,48 @@ extern "C" __global__ void {t}_accum_downstream_atomic(const int* rec, float* q)
     return {"q_init": q_init, "accum": accum}
 
 
-def build_rake_compress(
-    RoutineBuilderCls,
-    KernelCls,
-    HelperCls,
-    *,
-    grid,
-    source: Need,
-    iteration_p: Need,
-    logn: int,
-    n_flat: int,
-):
+def build_rake_compress(*, grid, logn: int, n_flat: int):
     """
-    CupyRoutineBuilder for the rake-and-compress accumulation, plus the
-    KernelBuilders it is made of - see _closure_accum.py's
-    build_rake_compress for the step sequence and the iteration off-by-one.
+    SequenceBuilder for the rake-and-compress accumulation, plus the
+    KernelBuilders it is made of - see _closure_accum.py's build_rake_compress
+    for the step sequence and the loop-vs-unroll design choice.
 
-    The routine's default launch grid/block is sized for `n_flat` threads -
-    every step here reads/writes an n_flat-sized index space except the
-    single-thread iteration bookkeeping steps, which override grid=(1,)/
-    block=(1,) at add_kernel time.
+    Unlike the closure backends, the ITER bump is a separate composed step
+    ("bump_iteration", not folded into rake_compress_accum's own body): a
+    single CUDA `__global__` has no guarantee that a second top-level loop
+    runs strictly after the first the way two consecutive Taichi/Quadrants
+    `for` loops do, so the loop body here is `["rake_step",
+    "bump_iteration"]`, two real launches per round, mirroring build_atomic's
+    own closure/cupy split for the same reason. Composed names: "zero_init",
+    "reset_iteration", "q_init", "receivers_to_donors", "rake_step" (the
+    rake_compress_accum kernel), "bump_iteration", "decrement_iteration",
+    "fuse_accum_buffers". PARAM addresses needing the same bound Parameter:
+    "q_init.SOURCE" (SOURCE); "reset_iteration.ITER", "rake_step.ITER" (its
+    own `share("ITER", "get_src.ITER", "update_src.ITER")` collapses its two
+    composed helpers' own ITER occurrences into this one address),
+    "bump_iteration.ITER", "decrement_iteration.ITER",
+    "fuse_accum_buffers.get_src.ITER" (ITER - five addresses; one fewer than
+    the closure backend's four plus the extra "bump_iteration.ITER" this
+    backend needs in place of the closure's folded-in bump).
 
-    `source`/`iteration_p` are the caller's already-bound `Need("source",
-    kind=Kind.PARAM)`/`Need("iteration_p", kind=Kind.PARAM)` (see
-    make_accumulation) - fresh, internally-named `Need("source", ...)`/
-    `Need("ITER", ...)`, matching what these templates' bodies actually
-    reference, are bound here to the same underlying Parameters and declared
-    on every KernelBuilder/HelperBuilder that needs them via `.need()`.
-    Every KernelBuilder/HelperBuilder is constructed strict_needs=True;
-    `_GETSRC`/`_UPDATESRC` go through helper_need. The returned RoutineBuilder
-    is never given a bind_bag() bag: every step's own dependencies are
-    already fully resolved via Need by the time it is built, so there is
-    nothing left for a routine-level bag to supply (see routine.py,
-    RoutineBuilder._validate).
+    Every kernel here launches over an n_flat-sized index space except the
+    single-thread iteration bookkeeping steps ("reset_iteration",
+    "bump_iteration", "decrement_iteration"), composed with their own
+    `launch={"grid": 1, "block": 1}` override (sequence_v2.py's
+    compose(..., launch=...)) - the sequence-level `compile(backend,
+    grid=..., block=...)` call the caller eventually makes supplies the
+    n_flat-sized default every other step falls back to.
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
-    NN = grid.n_neighbours.get()
-    block_size = 256
-    default_grid, default_block = ((n_flat + block_size - 1) // block_size,), (block_size,)
-
-    source_need = Need("source", kind=Kind.PARAM, dtype=source.dtype, modes=source.modes)
-    source_need.bind(source.value)
-    iter_need = Need("ITER", kind=Kind.PARAM, dtype=iteration_p.dtype, modes=iteration_p.modes)
-    iter_need.bind(iteration_p.value)
-
-    get_src, update_src = build_ping_pong_helpers(HelperCls, iteration_need=iteration_p)
+    NN = grid["N_NEIGHBOURS"].get()
     t = f"pr{new_uid()}"
 
-    zero_init = KernelCls(strict_needs=True).ingest(
+    get_src, update_src = build_ping_pong_helpers()
+
+    zero_init = KernelBuilder().wire_data("ndonors").wire_data("ndonors_alt").wire_data("src").ingest(
         f"""
-__global__ void {t}_zero_init(int* ndonors, int* ndonors_alt, int* src) {{
+extern "C" __global__ void {t}_zero_init(int* ndonors, int* ndonors_alt, int* src) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
     ndonors[i] = 0;
@@ -193,41 +185,47 @@ __global__ void {t}_zero_init(int* ndonors, int* ndonors_alt, int* src) {{
 }}
 """
     )
-    reset_iteration = KernelCls(strict_needs=True).need(iter_need).ingest(
+    reset_iteration = KernelBuilder().wire_param("ITER").ingest(
         f"""
-__global__ void {t}_reset_iteration() {{
-    $ITER.set_node(0, 0)$;
+extern "C" __global__ void {t}_reset_iteration() {{
+    $ctx.ITER.set_node(0, 0)$;
 }}
 """
     )
-    bump_iteration = KernelCls(strict_needs=True).need(iter_need).ingest(
+    decrement_iteration = KernelBuilder().wire_param("ITER").ingest(
         f"""
-__global__ void {t}_bump_iteration() {{
-    int cur = $ITER.get(0)$;
-    $ITER.set_node(0, cur + 1)$;
+extern "C" __global__ void {t}_decrement_iteration() {{
+    int cur = $ctx.ITER.get(0)$;
+    $ctx.ITER.set_node(0, cur - 1)$;
 }}
 """
     )
-    decrement_iteration = KernelCls(strict_needs=True).need(iter_need).ingest(
+    # Unlike the closure backends (rake_compress_accum's own second
+    # top-level `for` loop bumps ITER, ordered after the rake pass as a
+    # separate offloaded task for free), cupy has no such guarantee inside
+    # one `__global__` - a genuinely separate, single-thread launch is
+    # required after every rake pass, mirroring the closure/cupy split
+    # build_atomic already has for its own barrier reason.
+    bump_iteration = KernelBuilder().wire_param("ITER").ingest(
         f"""
-__global__ void {t}_decrement_iteration() {{
-    int cur = $ITER.get(0)$;
-    $ITER.set_node(0, cur - 1)$;
+extern "C" __global__ void {t}_bump_iteration() {{
+    int cur = $ctx.ITER.get(0)$;
+    $ctx.ITER.set_node(0, cur + 1)$;
 }}
 """
     )
-    q_init = KernelCls(strict_needs=True).need(source_need).ingest(
+    q_init = KernelBuilder().wire_param("SOURCE").wire_data("q").ingest(
         f"""
-__global__ void {t}_q_init(float* q) {{
+extern "C" __global__ void {t}_q_init(float* q) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
-    q[i] = $source.get(i)$;
+    q[i] = $ctx.SOURCE.get(i)$;
 }}
 """
     )
-    receivers_to_donors = KernelCls(strict_needs=True).ingest(
+    receivers_to_donors = KernelBuilder().wire_data("rec").wire_data("donors").wire_data("ndonors").ingest(
         f"""
-__global__ void {t}_receivers_to_donors(const int* rec, int* donors, int* ndonors) {{
+extern "C" __global__ void {t}_receivers_to_donors(const int* rec, int* donors, int* ndonors) {{
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= {n_flat}) return;
     int rcv = rec[tid];
@@ -238,21 +236,21 @@ __global__ void {t}_receivers_to_donors(const int* rec, int* donors, int* ndonor
 }}
 """
     )
-    getsrc_need = helper_need("_GETSRC", get_src)
-    updatesrc_need = helper_need("_UPDATESRC", update_src)
     rake_compress_accum = (
-        KernelCls(strict_needs=True)
-        .need(getsrc_need)
-        .bind("_GETSRC", getsrc_need.value)
-        .need(updatesrc_need)
-        .bind("_UPDATESRC", updatesrc_need.value)
+        KernelBuilder()
+        .wire_param("ITER")
+        .compose("get_src", get_src)
+        .compose("update_src", update_src)
+        .share("ITER", "get_src.ITER", "update_src.ITER")
+        .wire_data("donors").wire_data("ndonors").wire_data("q").wire_data("src")
+        .wire_data("donors_alt").wire_data("ndonors_alt").wire_data("q_alt")
         .ingest(
             f"""
-__global__ void {t}_rake_compress_accum(int* donors, int* ndonors, float* q, int* src,
+extern "C" __global__ void {t}_rake_compress_accum(int* donors, int* ndonors, float* q, int* src,
                                          int* donors_alt, int* ndonors_alt, float* q_alt) {{
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= {n_flat}) return;
-    int flip = $_GETSRC(src, tid)$;
+    int flip = $ctx.get_src(src, tid)$;
 
     int worked = 0;
     int todo = flip ? ndonors_alt[tid] : ndonors[tid];
@@ -268,7 +266,7 @@ __global__ void {t}_rake_compress_accum(int* donors, int* ndonors, float* q, int
         }}
         int did = donors_local[i];
 
-        int flip_donor = $_GETSRC(src, did)$;
+        int flip_donor = $ctx.get_src(src, did)$;
         int ndnr_val = flip_donor ? ndonors_alt[did] : ndonors[did];
 
         if (ndnr_val <= 1) {{
@@ -308,19 +306,22 @@ __global__ void {t}_rake_compress_accum(int* donors, int* ndonors, float* q, int
                 if (j < todo) donors_alt[base + j] = donors_local[j];
             }}
         }}
-        $_UPDATESRC(src, tid, flip)$;
+        $ctx.update_src(src, tid, flip)$;
     }}
 }}
 """
         )
     )
     fuse_accum_buffers = (
-        KernelCls(strict_needs=True).need(helper_need("_GETSRC", get_src)).bind("_GETSRC", get_src).ingest(
-        f"""
-__global__ void {t}_fuse_accum_buffers(float* q, int* src, float* q_alt) {{
+        KernelBuilder()
+        .compose("get_src", get_src)
+        .wire_data("q").wire_data("src").wire_data("q_alt")
+        .ingest(
+            f"""
+extern "C" __global__ void {t}_fuse_accum_buffers(float* q, int* src, float* q_alt) {{
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= {n_flat}) return;
-    if ($_GETSRC(src, tid)$) {{
+    if ($ctx.get_src(src, tid)$) {{
         q[tid] = q_alt[tid];
     }}
 }}
@@ -339,99 +340,84 @@ __global__ void {t}_fuse_accum_buffers(float* q, int* src, float* q_alt) {{
         "fuse_accum_buffers": fuse_accum_buffers,
     }
 
-    rb = RoutineBuilderCls(grid=default_grid, block=default_block)
-    # No bind_bag() call: "_GETSRC"/"_UPDATESRC" are bound to
-    # rake_compress_accum/fuse_accum_buffers' own already-bound helper_need
-    # at construction time; "ITER"/"source" arrive via .need() alone,
-    # resolved directly by each step's own compile() - nothing left for a
-    # routine-level bag to supply (see routine.py, RoutineBuilder._validate).
-    for name in ("rec", "q", "donors", "ndonors", "donors_alt", "ndonors_alt", "q_alt", "src"):
-        rb.add_data(name, None)
+    single = {"grid": 1, "block": 1}
+    sb = SequenceBuilder()
+    sb.compose("zero_init", zero_init)
+    sb.compose("reset_iteration", reset_iteration, launch=single)
+    sb.compose("q_init", q_init)
+    sb.compose("receivers_to_donors", receivers_to_donors)
+    sb.compose("rake_step", rake_compress_accum)
+    sb.compose("bump_iteration", bump_iteration, launch=single)
+    sb.compose("decrement_iteration", decrement_iteration, launch=single)
+    sb.compose("fuse_accum_buffers", fuse_accum_buffers)
 
-    single_grid, single_block = (1,), (1,)
+    sb.step("zero_init")
+    sb.step("reset_iteration")
+    sb.step("q_init")
+    sb.step("receivers_to_donors")
+    sb.loop(body=["rake_step", "bump_iteration"], max_times=logn + 1)
+    sb.step("decrement_iteration")
+    sb.step("fuse_accum_buffers")
 
-    rb.add_kernel(zero_init, data_handle_ref=("ndonors", "ndonors_alt", "src"))
-    rb.add_kernel(reset_iteration, data_handle_ref=(), grid=single_grid, block=single_block)
-    rb.add_kernel(q_init, data_handle_ref=("q",))
-    rb.add_kernel(receivers_to_donors, data_handle_ref=("rec", "donors", "ndonors"))
-    rb.begin_repeat(times=logn + 1)
-    rb.add_kernel(rake_compress_accum, data_handle_ref=("donors", "ndonors", "q", "src", "donors_alt", "ndonors_alt", "q_alt"))
-    rb.add_kernel(bump_iteration, data_handle_ref=(), grid=single_grid, block=single_block)
-    rb.end_repeat()
-    rb.add_kernel(decrement_iteration, data_handle_ref=(), grid=single_grid, block=single_block)
-    rb.add_kernel(fuse_accum_buffers, data_handle_ref=("q", "src", "q_alt"))
-
-    return rb, kernels
+    return sb, kernels
 
 
-def build_pointer_jump_push(
-    RoutineBuilderCls,
-    KernelCls,
-    *,
-    source: Need,
-    rounds: int,
-    n_flat: int,
-):
+def build_pointer_jump_push(*, rounds: int, n_flat: int):
     """
-    CupyRoutineBuilder for the pointer-jump-push accumulation, plus the
+    SequenceBuilder for the pointer-jump-push accumulation, plus the
     KernelBuilders it is made of - see _closure_accum.py's
-    build_pointer_jump_push for the step sequence and retirement rule.
+    build_pointer_jump_push for the step sequence, retirement rule and the
+    two-address ping-pong shape (identical composed names/addresses here).
 
-    The routine's default launch grid/block is sized for `n_flat` threads -
-    every step here reads/writes an n_flat-sized index space.
+    Unlike the closure backend's single accum_pointer_jump_push_step (two
+    consecutive top-level `for` loops give the copy-then-push barrier for
+    free), cupy needs two separate `__global__` launches per occurrence
+    (step_copy, step_core) - a `__syncthreads()` only orders threads within
+    one block, and a push may target an index owned by a thread in a
+    different block, so only a real launch boundary guarantees the q_next
+    copy has landed everywhere before any atomicAdd into it (mirrors
+    _cupy_receivers.py's build_atomic q_init/accum split for the same
+    reason). Each occurrence therefore composes two names, not one: "step_a"
+    is ("step_a_copy", "step_a_core") and "step_b" is ("step_b_copy",
+    "step_b_core"), both pairs referenced together in the loop body so a
+    round is always copy-then-core, for both directions.
 
-    `source` is the caller's already-bound `Need("source", kind=Kind.PARAM)`
-    (see make_accumulation) - a fresh, internally-named `Need("source", ...)`
-    is bound here to the same underlying Parameter and declared on q_init via
-    `.need()`. Every KernelBuilder is constructed strict_needs=True.
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     t = f"pj{new_uid()}"
-    block_size = 256
-    default_grid, default_block = ((n_flat + block_size - 1) // block_size,), (block_size,)
-
-    source_need = Need("source", kind=Kind.PARAM, dtype=source.dtype, modes=source.modes)
-    source_need.bind(source.value)
-
-    q_init = KernelCls(strict_needs=True).need(source_need).ingest(
+    q_init = KernelBuilder().wire_param("SOURCE").wire_data("q").ingest(
         f"""
-__global__ void {t}_q_init(float* q) {{
+extern "C" __global__ void {t}_q_init(float* q) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
-    q[i] = $source.get(i)$;
+    q[i] = $ctx.SOURCE.get(i)$;
 }}
 """
     )
-    copy_rec_to_work = KernelCls(strict_needs=True).ingest(
+    copy_rec_to_work = KernelBuilder().wire_data("rec").wire_data("work").ingest(
         f"""
-__global__ void {t}_copy_rec_to_work(const int* rec, int* work) {{
+extern "C" __global__ void {t}_copy_rec_to_work(const int* rec, int* work) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
     work[i] = rec[i];
 }}
 """
     )
-    # Two separate __global__ launches, not one kernel with a __syncthreads():
-    # __syncthreads() only orders threads within one block, but a thread's
-    # atomic_add into q_next[parent] may target an index owned by a thread
-    # in a different block - only a real launch boundary (implicit grid-wide
-    # barrier between two kernel launches on the same stream) guarantees the
-    # copy into q_next has landed everywhere before any push into it, the
-    # same guarantee two consecutive top-level for-loops in one Taichi/
-    # Quadrants kernel give for free (see _closure_accum.py's equivalent).
-    step_copy = KernelCls(strict_needs=True).ingest(
+    step_copy = KernelBuilder().wire_data("q_curr").wire_data("q_next").ingest(
         f"""
-__global__ void {t}_step_copy(const float* q_curr, float* q_next) {{
+extern "C" __global__ void {t}_step_copy(const float* q_curr, float* q_next) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
     q_next[i] = q_curr[i];
 }}
 """
     )
-    step_core = KernelCls(strict_needs=True).ingest(
-        f"""
-__global__ void {t}_step_core(const int* rec_curr, int* rec_next, const float* q_curr, float* q_next) {{
+    step_core = (
+        KernelBuilder()
+        .wire_data("rec_curr").wire_data("rec_next").wire_data("q_curr").wire_data("q_next")
+        .ingest(
+            f"""
+extern "C" __global__ void {t}_step_core(const int* rec_curr, int* rec_next, const float* q_curr, float* q_next) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
     int parent = rec_curr[i];
@@ -446,6 +432,7 @@ __global__ void {t}_step_core(const int* rec_curr, int* rec_next, const float* q
     }}
 }}
 """
+        )
     )
 
     kernels = {
@@ -455,22 +442,19 @@ __global__ void {t}_step_core(const int* rec_curr, int* rec_next, const float* q
         "accum_pointer_jump_push_step_core": step_core,
     }
 
-    rb = RoutineBuilderCls(grid=default_grid, block=default_block)
-    # No bind_bag() call: "source" arrives via .need() alone, resolved
-    # directly by q_init's own compile(); no step here binds anything else -
-    # see build_rake_compress's own equivalent note above.
-    for name in ("rec", "work", "work2", "q", "q_work"):
-        rb.add_data(name, None)
+    sb = SequenceBuilder()
+    sb.compose("q_init", q_init)
+    sb.compose("copy_rec_to_work", copy_rec_to_work)
+    sb.compose("step_a_copy", step_copy)
+    sb.compose("step_a_core", step_core)
+    sb.compose("step_b_copy", step_copy)
+    sb.compose("step_b_core", step_core)
 
-    rb.add_kernel(q_init, data_handle_ref=("q",))
-    rb.add_kernel(copy_rec_to_work, data_handle_ref=("rec", "work"))
-    rb.begin_repeat(times=rounds)
-    rb.add_kernel(step_copy, data_handle_ref=("q", "q_work"))
-    rb.add_kernel(step_core, data_handle_ref=("work", "work2", "q", "q_work"))
-    rb.add_swap("work", "work2")
-    rb.add_swap("q", "q_work")
-    rb.end_repeat()
+    sb.step("q_init")
+    sb.step("copy_rec_to_work")
+    sb.loop(
+        body=["step_a_copy", "step_a_core", "step_b_copy", "step_b_core"],
+        max_times=rounds // 2,
+    )
 
-    return rb, kernels
-
-
+    return sb, kernels

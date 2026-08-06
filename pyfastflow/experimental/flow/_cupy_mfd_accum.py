@@ -1,6 +1,8 @@
 """
 cupy-only persistent-kernel MFD accumulation ("persistent_mfd" method of
-make_accumulation).
+make_accumulation), on the new builder/frozen/bound stack (../core/context/
+builder.py, frozen.py, bound.py) - see make_accumulation's own docstring for
+the call-site contract.
 
 No Taichi/Quadrants counterpart, and there never should be one: the
 mechanism is a hand-rolled, monotonic grid-wide barrier (a global atomic
@@ -16,29 +18,29 @@ staging): each level, every resident thread of a fixed, small grid pulls
 node indices from `frontier[p]` (size `count[p]`, grid-stride loop). For
 node u, the receiver mask `dirs[u]` (bit k set == direction k, this grid's
 own D8 numbering) picks which of `mfd_w[u*NN + k]` weights to atomic-add
-`accum[u]` into `accum[neighbour]` (`neighbour_raw(u, k)` - the grid's own
-raw neighbour arithmetic, trusted the same way the mask itself is trusted
-to have only ever set bits for directions the topology already validated).
-A `__threadfence()` publishes every one of those writes before any thread
-decrements `indegree[neighbour]`; a decrement that lands the count exactly
-on zero stages that neighbour into a per-block shared buffer (`s_buf`,
-capacity `fr_stage`), spilling to a direct `atomicAdd` into `count[1-p]`
-past that capacity. After the grid-stride loop, each block flushes its
-staged cells into `frontier[1-p]` through one reserved contiguous range
-(one `atomicAdd` per block, not per cell), fences again, then every block
-increments the global `barrier` counter and spins until it reads
-`(level+1) * gridDim.x` - the point every block has published everything
-for this level - before moving on. The loop exits once `count[p]`, reloaded
-through a volatile pointer each iteration (not just once, and not just via
-the atomics' own side effects - nothing else in this kernel forces that
-reload), is zero.
+`accum[u]` into `accum[neighbour]` (`ctx.grid.neighbour_raw(u, k)` - the
+grid's own raw neighbour arithmetic, trusted the same way the mask itself is
+trusted to have only ever set bits for directions the topology already
+validated). A `__threadfence()` publishes every one of those writes before
+any thread decrements `indegree[neighbour]`; a decrement that lands the
+count exactly on zero stages that neighbour into a per-block shared buffer
+(`s_buf`, capacity `fr_stage`), spilling to a direct `atomicAdd` into
+`count[1-p]` past that capacity. After the grid-stride loop, each block
+flushes its staged cells into `frontier[1-p]` through one reserved
+contiguous range (one `atomicAdd` per block, not per cell), fences again,
+then every block increments the global `barrier` counter and spins until it
+reads `(level+1) * gridDim.x` - the point every block has published
+everything for this level - before moving on. The loop exits once
+`count[p]`, reloaded through a volatile pointer each iteration (not just
+once, and not just via the atomics' own side effects - nothing else in this
+kernel forces that reload), is zero.
 
-`accum` is seeded through a `source` Need (any Parameter mode) by a separate
-`q_init` kernel, not hardcoded to 1.0: the persistent kernel's very first
-level reads `accum[u]` for every cell already in the initial frontier
-before any atomic_add has landed on it, so that seed must be a prior, real,
-finished launch - the same reasoning `_cupy_accum.py`'s `build_atomic`
-splits `q_init`/`accum` on.
+`accum` is seeded through a `SOURCE` PARAM slot (any mode - a caller binds a
+Parameter there after `.build()`) by a separate `q_init` kernel, not
+hardcoded to 1.0: the persistent kernel's very first level reads `accum[u]`
+for every cell already in the initial frontier before any atomic_add has
+landed on it, so that seed must be a prior, real, finished launch - the same
+reasoning `_cupy_accum.py`'s `build_atomic` splits `q_init`/`accum` on.
 
 `dirs`, `mfd_w`, `indegree`, `frontier0`, `frontier1`, `count`, `barrier`
 are all caller-supplied data args, exactly like `rec` is for the SFD
@@ -49,17 +51,28 @@ ping-pong frontier sizes) and `barrier` is 1 uint32; initializing them
 (`count[p] = n0` from the ready-cell count, `count[1-p] = 0`,
 `barrier[0] = 0`, `frontier[p][:n0] = <ready cell indices>`) is the
 caller's job before every call - see `init_frontier_mfd` below for the
-host-side compaction step, kept as a plain function rather than a Bag
+host-side compaction step, kept as a plain function rather than a builder
 member since it is pure host/cupy indexing, not a kernel.
+
+`n_neighbours` (D4=4/D8=8) is a required build-time python int, not read off
+`grid` the way the pre-port script read it from a bound Parameter: this
+factory's `grid` is a bare `make_grid_group` FrozenGroup (structure only, no
+bound Parameter values - see ../grid/__init__.py's own module docstring), so
+there is no build-time value to read off it, the same reason
+make_accumulation's own `method="atomic"` requires `n_flat` explicitly under
+this stack. Baking it in as `{NN}` (rather than reading it at runtime via
+`ctx.grid.N_NEIGHBOURS.get(0)`, the pattern every other ported flow block
+uses) preserves the pre-port script's `#pragma unroll` on the two per-node
+direction loops - deliberately kept, not dropped for uniformity with those
+other blocks, since this is the one hot loop in the package still doing a
+fully unrolled fixed-trip-count neighbour walk.
 
 Author: B.G (08/2026)
 """
 
-import numpy as np
 import cupy as cp
 
-from ..core.context.backends import helper_need
-from ..core.context.need import Kind, Need
+from ..core.context.builder import KernelBuilder
 from ..core.pool.base import new_uid
 
 
@@ -82,7 +95,7 @@ def init_frontier_mfd(indegree_data, frontier_data) -> int:
     """
     Host-side frontier compaction: writes the flat indices of every cell
     with indegree 0 into the front of `frontier_data` (a raw cupy ndarray,
-    e.g. a CupyDataHandle's `.data`) and returns how many there were - the
+    e.g. a DataHandle's `.data`) and returns how many there were - the
     `count[p]` the caller must then store before the first launch.
 
     Plain cupy indexing, not a kernel: `cp.nonzero` has no equivalent
@@ -99,83 +112,59 @@ def init_frontier_mfd(indegree_data, frontier_data) -> int:
 
 
 def build_persistent_mfd(
-    KernelCls,
     *,
     grid,
-    source: Need,
     n_flat: int,
+    n_neighbours: int,
     fr_stage: int = 2048,
 ):
     """
-    Two KernelBuilders: "q_init" (data arg (accum,), ordinary grid-stride
-    over n_flat: accum[i] = source.get(i)) and "accum" (data args
-    (frontier0, frontier1, count, barrier, dirs, mfd_w, accum, indegree),
-    the persistent kernel described in the module docstring). Both are bare
-    KernelBuilders, not a Routine - "q_init" is one ordinary n_flat-sized
-    launch, "accum" is one persistent launch on
-    `persistent_grid_block(...)`'s dims; there is no per-round host loop
-    for a Routine to sequence, unlike rake_compress/pointer_jump_push.
-
-    `source` is the caller's already-bound `Need("source", kind=Kind.PARAM)`
-    (see make_accumulation) - a fresh, internally-named `Need("source", ...)`
-    is bound here to the same underlying Parameter and declared on "q_init"
-    via `.need()`, alongside its own kind=DATA `accum` need below.
+    Two FrozenKernels (new builder/frozen/bound stack): "q_init" (data arg
+    (accum,), ordinary grid-stride over n_flat: accum[i] = SOURCE.get(i))
+    and "accum" (data args (frontier0, frontier1, count, barrier, dirs,
+    mfd_w, accum, indegree), the persistent kernel described in the module
+    docstring). Both are bare FrozenKernels, not a Sequence - "q_init" is
+    one ordinary n_flat-sized launch, "accum" is one persistent launch on
+    `persistent_grid_block(...)`'s dims; there is no per-round host loop to
+    sequence, unlike rake_compress/pointer_jump_push. A caller `.build()`s
+    each, binds "q_init"'s `SOURCE` PARAM slot and "accum"'s composed
+    `grid`, then `.compile("cupy", grid=..., block=...)`s each with its own
+    launch dims (n_flat-sized for "q_init",
+    `persistent_grid_block(blocks_per_sm=..., threads=...)` for "accum").
 
     `fr_stage` sizes the per-block shared staging buffer (`s_buf`) baked
     into "accum"'s generated source as a compile-time array length - a
     smaller value uses less shared memory per block at the cost of more
     direct-scatter spills past capacity.
 
-    Every data argument is declared as a kind=DATA Need (see need.py) with
-    its expected dtype, so each real call's positional argument is
-    dtype-checked at the point it is passed rather than trusted silently -
-    the declared contract this whole module's caller-supplied-buffer
-    convention was always implicitly relying on, now enforced. The two
-    KernelBuilders still return data args in exactly the same names/order/
-    count as before, and a caller passing correctly-dtyped buffers (as every
-    existing caller already does) sees no behavioural difference at all.
-
-    Both KernelBuilders are constructed strict_needs=True; "accum"'s
-    `neighbour_raw=grid.neighbour_raw` bind goes through helper_need,
-    mirroring every other converted flow block module.
-
     Author: B.G (08/2026)
     """
-    NN = grid.n_neighbours.get()
+    NN = int(n_neighbours)
     t = f"pm{new_uid()}"
 
-    source_need = Need("source", kind=Kind.PARAM, dtype=source.dtype, modes=source.modes)
-    source_need.bind(source.value)
-    q_init_accum_need = Need("accum", kind=Kind.DATA, dtype=np.float32)
-    q_init = KernelCls(strict_needs=True).need(source_need, q_init_accum_need).ingest(
-        f"""
-__global__ void {t}_q_init(float* accum) {{
+    q_init = (
+        KernelBuilder()
+        .wire_param("SOURCE")
+        .wire_data("accum")
+        .ingest(
+            f"""
+extern "C" __global__ void {t}_q_init(float* accum) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
-    accum[i] = $source.get(i)$;
+    accum[i] = $ctx.SOURCE.get(i)$;
 }}
 """
+        )
     )
 
-    accum_data_needs = (
-        Need("frontier0", kind=Kind.DATA, dtype=np.int32),
-        Need("frontier1", kind=Kind.DATA, dtype=np.int32),
-        Need("count", kind=Kind.DATA, dtype=np.int32),
-        Need("barrier", kind=Kind.DATA, dtype=np.uint32),
-        Need("dirs", kind=Kind.DATA, dtype=np.uint8),
-        Need("mfd_w", kind=Kind.DATA, dtype=np.float32),
-        Need("accum", kind=Kind.DATA, dtype=np.float32),
-        Need("indegree", kind=Kind.DATA, dtype=np.int32),
-    )
-    neighbour_raw_need = helper_need("neighbour_raw", grid.neighbour_raw)
     accum = (
-        KernelCls(strict_needs=True)
-        .need(neighbour_raw_need)
-        .bind("neighbour_raw", neighbour_raw_need.value)
-        .need(*accum_data_needs)
+        KernelBuilder()
+        .compose("grid", grid)
+        .wire_data("frontier0").wire_data("frontier1").wire_data("count").wire_data("barrier")
+        .wire_data("dirs").wire_data("mfd_w").wire_data("accum").wire_data("indegree")
         .ingest(
-        f"""
-__global__ void {t}_persistent_mfd(
+            f"""
+extern "C" __global__ void {t}_persistent_mfd(
     int* __restrict__ frontier0, int* __restrict__ frontier1,
     int* __restrict__ count, unsigned int* __restrict__ barrier,
     const unsigned char* __restrict__ dirs, const float* __restrict__ mfd_w,
@@ -208,14 +197,14 @@ __global__ void {t}_persistent_mfd(
             #pragma unroll
             for (int k = 0; k < {NN}; k++) {{
                 if (!(mask & (1u << k))) continue;
-                int r = $neighbour_raw(u, k)$;
+                int r = $ctx.grid.neighbour_raw(u, k)$;
                 atomicAdd(&accum[r], au * mfd_w[base + k]);
             }}
             __threadfence();
             #pragma unroll
             for (int k = 0; k < {NN}; k++) {{
                 if (!(mask & (1u << k))) continue;
-                int r = $neighbour_raw(u, k)$;
+                int r = $ctx.grid.neighbour_raw(u, k)$;
                 int old = atomicAdd(&indegree[r], -1);
                 if (old == 1) {{
                     int sp = atomicAdd(&s_n, 1);

@@ -79,6 +79,11 @@ atomic's own per-node downstream accumulation into a DATA-typed `q` buffer -
 the same "genuinely concurrent write, so DATA not PARAM" shape reduce's
 `atomic_min`/`atomic_max` already cover, just the third of the three atomic
 ops Taichi/Quadrants both expose that this surface had not yet needed).
+Extended again for flow/'s rake-and-compress accumulation port (08/2026)
+with `Vector` (`ti.Vector`/`qd.Vector` - rake_compress_accum's own
+per-thread fixed-size local donor cache, `ctx.bk.Vector([-1] * NN)`, a
+plain pass-through with no oversized-literal or identity concern of its
+own, mirroring `grouped`).
 
 `abs`/`min`/`max` stay plain python builtins, as grid already established;
 `int()`/`float()` join them here rather than becoming `ctx.bk` members -
@@ -141,7 +146,7 @@ class BkError(Exception):
 _BK_METHOD_NAMES = (
     "sqrt", "atan2", "cos", "sin", "floor", "u32",
     "bit_cast", "select", "cast", "atomic_min", "atomic_max", "atomic_add", "i32", "i64", "f32",
-    "grouped",
+    "grouped", "Vector",
 )
 """Every name `ctx.bk` resolves - see the module docstring's "Surface" section."""
 
@@ -181,6 +186,7 @@ class ClosureBkNode:
             "i64": backend.i64,
             "f32": backend.f32,
             "grouped": backend.grouped,
+            "Vector": backend.Vector,
         }
 
     def __getattr__(self, name: str) -> Any:

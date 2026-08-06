@@ -89,7 +89,7 @@ Author: B.G (08/2026)
 from typing import Any
 
 from ..pool.base import new_uid
-from .bound import Address, BindError, _Bound, _walk, format_address, parse_address
+from .bound import Address, BindError, _Bound, _walk, _walk_group, format_address, parse_address
 from .compile_shared import CompileError, check_unmet
 from .frozen import FrozenBuilderError, FrozenHelper, FrozenKernel
 from .host_block import BoundHostBlock, FrozenHostBlock
@@ -106,6 +106,24 @@ class SequenceBuilderError(Exception):
     """
 
 
+def _walk_leaf(prefix: Address, frozen: Any, table: dict) -> None:
+    """
+    `_walk` a single frozen object (FrozenKernel or FrozenHostBlock),
+    honouring its own top-level `.shared` (`_Builder.share()`, builder.py)
+    exactly as bound.py's own top-level `build()` does for a standalone
+    object - dispatching to `_walk_group` rather than plain `_walk` when it
+    has any - so a block composed with its own share() declarations
+    collapses identically whether built standalone or as part of a
+    sequence/routine.
+
+    Author: B.G (08/2026)
+    """
+    if frozen.shared:
+        _walk_group(prefix, frozen, table, {}, frozenset())
+    else:
+        _walk(prefix, frozen, table)
+
+
 def _walk_block(prefix: Address, frozen: Any, table: dict) -> None:
     """
     Populate `table` with every PARAM/DATA leaf reachable from `frozen`, at
@@ -117,9 +135,9 @@ def _walk_block(prefix: Address, frozen: Any, table: dict) -> None:
     """
     if isinstance(frozen, FrozenRoutine):
         for name, step_frozen in frozen.composed.items():
-            _walk(prefix + (name,), step_frozen, table)
+            _walk_leaf(prefix + (name,), step_frozen, table)
     else:
-        _walk(prefix, frozen, table)
+        _walk_leaf(prefix, frozen, table)
 
 
 class SequenceBuilder:

@@ -1,16 +1,27 @@
 """
 Taichi/Quadrants (closure) block templates behind make_fill_reconstruct/
-make_fill_reconstruct_solver - see _cupy_reconstruct.py's own module
-docstring for the algorithm (ported from
+make_fill_reconstruct_solver, on the new builder/frozen/bound stack (../core/
+context/builder.py, frozen.py, bound.py) - see _cupy_reconstruct.py's own
+module docstring for the algorithm (ported from
 experimental/LM/fill_reconstruct_optimised.py) and for why frontier_a/
 frontier_b become one combined (2*n_flat,) buffer here, addressed by a
-`p % 2` parity computed from the bound `P` Parameter - identical reasoning
-on this backend, since a Sequence's kernel_step binds data once at compile
-time on every backend, not just cupy.
+`p % 2` parity computed from the bound `P` Parameter - identical reasoning on
+this backend, since a compiled Sequence step's data is bound once, at compile
+time, on every backend, not just cupy.
 
 Split out of a single _closure_blocks.py that used to hold every flow
 algorithm - see _closure_receivers.py/_closure_accum.py/
 _closure_depressions.py for the others.
+
+`P` is a plain wired PARAM slot (`wire_param`, any mode) on `relax` - a
+caller binds a Parameter there (mode "scalar", since the host bumps it
+between passes) after `.build()`, exactly like make_accumulation's `ITER`;
+there is no Need indirection anywhere in this stack. `grid` is the caller's
+FrozenGroup (../grid's make_grid_group result), composed under "grid" -
+`relax` reaches `ctx.grid.can_out`/`.neighbour`/`.N_NEIGHBOURS.get(0)`,
+`init_filled` reaches `ctx.grid.can_out` only - each its own independent
+occurrence (see _closure_depressions.py's module docstring for why these are
+never build-phase-collapsed across different KernelBuilders).
 
 Two closure-specific substitutions from the cupy version, both verified
 directly against this Taichi/Quadrants install before use here:
@@ -22,7 +33,7 @@ directly against this Taichi/Quadrants install before use here:
   (`c = NX - 2 - cc`); still a single serial nested loop per thread, same
   execution order as a real reverse range.
 - No `atomicExch` on Taichi (only Quadrants has `atomic_exchange`) - both
-  backends use `_BK.atomic_max(queued_gen[j], p)` instead, whose returned
+  backends use `ctx.bk.atomic_max(queued_gen[j], p)` instead, whose returned
   old value gives the identical "first writer this pass wins" dedup
   `atomicExch` does, because `p` only ever increases across passes: the
   first thread to touch queued_gen[j] this pass raises it from some
@@ -32,56 +43,58 @@ directly against this Taichi/Quadrants install before use here:
   -1-filled field, one atomic_max(..., p) per candidate, only the winner's
   returned old value differs from p) before relying on it here.
 
-Author: B.G (07/2026)
+Author: B.G (08/2026)
 """
 
-from ..core.context.backends import bag_need, helper_need, make_kernel, param_need
-from ..core.context.need import Kind, Need
+from ..core.context.builder import KernelBuilder
 from ._closure_shared import _tensor_annotation
 
 _POS_SENTINEL = 1.0e9
 
 
-def build_fill_reconstruct_init(KernelCls, *, backend, backend_mod, grid):
+def build_fill_reconstruct_init(*, backend: str, backend_mod, grid):
     """
-    init_filled KernelBuilder, data args (z, filled, parent) - see
-    _cupy_blocks.build_fill_reconstruct_init.
+    init_filled KernelBuilder, data args (z, filled, parent): on a can_out
+    node, filled[i] = z[i] and parent[i] = i (self-receiving, the base-level
+    convention); elsewhere filled[i] = +inf sentinel, parent[i] = -1 (never
+    yet claimed) - the seed state every sweep/relax pass decreases from.
+    Composes its own `grid` occurrence.
 
-    `_GRID=grid` goes through bag_need, declaring only `can_out`.
-    `strict_needs=True`.
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
 
-    def init_filled_template(z: T, filled: T, parent: T):
+    def init_filled_tmpl(ctx, z: T, filled: T, parent: T):
         for i in z:
-            if _GRID.can_out(i):
+            if ctx.grid.can_out(i):
                 filled[i] = z[i]
                 parent[i] = i
             else:
                 filled[i] = _POS_SENTINEL
                 parent[i] = -1
 
-    grid_contains = [Need("can_out", kind=Kind.HELPER)]
-    return make_kernel(
-        KernelCls, init_filled_template, strict_needs=True, _GRID=bag_need("_GRID", grid, contains=grid_contains)
+    return (
+        KernelBuilder().compose("grid", grid)
+        .wire_data("z").wire_data("filled").wire_data("parent")
+        .ingest(init_filled_tmpl)
     )
 
 
-def build_fill_reconstruct_sweeps(KernelCls, *, backend, backend_mod, nx: int, ny: int):
+def build_fill_reconstruct_sweeps(*, backend: str, backend_mod, nx: int, ny: int):
     """
-    Four KernelBuilders, each data args (z, filled, parent) - see
-    _cupy_blocks.build_fill_reconstruct_sweeps. Keyed "row_lr", "row_rl",
-    "col_tb", "col_bt".
+    Four KernelBuilders, each data args (z, filled, parent) - one raster
+    sweep per direction (row left-to-right, row right-to-left, column
+    top-to-bottom, column bottom-to-top), one thread per row/column walking
+    it serially - no atomics needed, since distinct rows/columns never touch
+    the same cell. Keyed "row_lr", "row_rl", "col_tb", "col_bt".
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
     NX = nx
     NY = ny
 
-    def sweep_row_lr_template(z: T, filled: T, parent: T):
+    def sweep_row_lr_tmpl(ctx, z: T, filled: T, parent: T):
         for r in range(NY):
             base = r * NX
             for c in range(1, NX):
@@ -92,7 +105,7 @@ def build_fill_reconstruct_sweeps(KernelCls, *, backend, backend_mod, nx: int, n
                     filled[i] = cand
                     parent[i] = left
 
-    def sweep_row_rl_template(z: T, filled: T, parent: T):
+    def sweep_row_rl_tmpl(ctx, z: T, filled: T, parent: T):
         for r in range(NY):
             base = r * NX
             for cc in range(NX - 1):
@@ -104,7 +117,7 @@ def build_fill_reconstruct_sweeps(KernelCls, *, backend, backend_mod, nx: int, n
                     filled[i] = cand
                     parent[i] = right
 
-    def sweep_col_tb_template(z: T, filled: T, parent: T):
+    def sweep_col_tb_tmpl(ctx, z: T, filled: T, parent: T):
         for c in range(NX):
             for r in range(1, NY):
                 i = r * NX + c
@@ -114,7 +127,7 @@ def build_fill_reconstruct_sweeps(KernelCls, *, backend, backend_mod, nx: int, n
                     filled[i] = cand
                     parent[i] = up
 
-    def sweep_col_bt_template(z: T, filled: T, parent: T):
+    def sweep_col_bt_tmpl(ctx, z: T, filled: T, parent: T):
         for c in range(NX):
             for rr in range(NY - 1):
                 r = NY - 2 - rr
@@ -125,78 +138,82 @@ def build_fill_reconstruct_sweeps(KernelCls, *, backend, backend_mod, nx: int, n
                     filled[i] = cand
                     parent[i] = down
 
+    def _kb(tmpl):
+        return KernelBuilder().wire_data("z").wire_data("filled").wire_data("parent").ingest(tmpl)
+
     return {
-        "row_lr": KernelCls(strict_needs=True).ingest(sweep_row_lr_template),
-        "row_rl": KernelCls(strict_needs=True).ingest(sweep_row_rl_template),
-        "col_tb": KernelCls(strict_needs=True).ingest(sweep_col_tb_template),
-        "col_bt": KernelCls(strict_needs=True).ingest(sweep_col_bt_template),
+        "row_lr": _kb(sweep_row_lr_tmpl),
+        "row_rl": _kb(sweep_row_rl_tmpl),
+        "col_tb": _kb(sweep_col_tb_tmpl),
+        "col_bt": _kb(sweep_col_bt_tmpl),
     }
 
 
-def build_fill_reconstruct_frontier_init(KernelCls, *, backend, backend_mod):
+def build_fill_reconstruct_frontier_init(*, backend: str, backend_mod):
     """
-    frontier_init KernelBuilder, data args (z, filled, frontier, counters) -
-    see _cupy_blocks.build_fill_reconstruct_frontier_init.
+    frontier_init KernelBuilder, data args (z, filled, frontier, counters):
+    every cell not yet sealed after the sweeps (filled[i] > z[i]) is pushed
+    into `frontier`'s first half (indices [0, n_flat)) and counted into
+    `counters[0]` - the seed frontier the relax loop's pass 0 reads.
 
-    `strict_needs=True`; `_BK` needs no bind at all - auto-injected (see
-    core/context/_closure_backend.py's module docstring).
-
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
 
-    def frontier_init_template(z: T, filled: T, frontier: T, counters: T):
+    def frontier_init_tmpl(ctx, z: T, filled: T, frontier: T, counters: T):
         for i in z:
             if filled[i] > z[i]:
-                pos = _BK.atomic_add(counters[0], 1)
+                pos = ctx.bk.atomic_add(counters[0], 1)
                 frontier[pos] = i
 
-    return KernelCls(strict_needs=True).ingest(frontier_init_template)
+    return KernelBuilder().wire_data("z").wire_data("filled").wire_data("frontier").wire_data("counters").ingest(
+        frontier_init_tmpl
+    )
 
 
-def build_fill_reconstruct_relax(KernelCls, *, backend, backend_mod, grid, pass_p: Need, n_flat: int):
+def build_fill_reconstruct_relax(*, backend: str, backend_mod, grid, n_flat: int):
     """
     relax KernelBuilder, data args (z, filled, parent, frontier, counters,
-    queued_gen) - see _cupy_blocks.build_fill_reconstruct_relax; the same
-    push-gate and combined-buffer-parity logic, without the cupy version's
-    neighbour-value caching (see that function's docstring for why dropping
-    it does not change correctness) - a top-level `for idx in range(count)`
-    with `count` read from `counters[p]` at kernel entry, confirmed to
-    compile and execute correctly with a runtime (not compile-time) bound on
-    this Taichi/Quadrants install before relying on it here.
+    queued_gen): one pass over the `counters[ctx.P.get(0)]`-sized input half
+    of `frontier`, relaxing each active cell against its neighbours and
+    pushing any neighbour whose candidate could still improve into the
+    output half, deduplicated per pass via `queued_gen` + atomic_max (see
+    the module docstring). See
+    ../../../experimental/LM/fill_reconstruct_optimised.py's module docstring
+    for the push-gate correctness argument.
 
-    `pass_p` is the caller's already-bound `Need("pass_p", kind=Kind.PARAM)`
-    (see make_fill_reconstruct) - a fresh, internally-named
-    `Need("_P", ...)`, matching this template's own `_P.get(0)` reference, is
-    bound here to the same underlying Parameter and declared on this
-    KernelBuilder via `.need()`. Read only here; bumping it between passes is
-    the caller's job, the same division of labour `iteration_p` has for
-    rake_compress. `_GRID=grid` goes through bag_need, declaring only
-    `n_neighbours`/`neighbour`. `strict_needs=True`; `_BK` needs no bind at
-    all - auto-injected.
+    `P` is this kernel's own wired PARAM slot (mode "scalar" - the host
+    bumps it between passes); composes its own `grid` occurrence.
 
-    Author: B.G (07/2026)
+    `active` is the raw backing field of a caller's scalar Parameter
+    (`active_p.get().data`, same "concurrently mutated is DATA by
+    definition" classification as `counters`/`queued_gen` - see
+    _closure_depressions.py's `build_depression_counter` for the identical
+    pattern with `ndep`) - every push into the output frontier half also
+    atomic-adds 1 into it, so a host block can read it back after this
+    kernel returns to know whether the next pass has any work
+    (make_fill_reconstruct_solver's early-stop `until`). The caller must
+    reset it to 0 (`.set(0)`) before each launch, same as `ndep`.
+
+    Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
     NFLAT = n_flat
 
-    p_need = Need("_P", kind=Kind.PARAM, dtype=pass_p.dtype, modes=pass_p.modes)
-    p_need.bind(pass_p.value)
-
-    def relax_template(z: T, filled: T, parent: T, frontier: T, counters: T, queued_gen: T):
-        p = _P.get(0)
+    def relax_tmpl(ctx, z: T, filled: T, parent: T, frontier: T, counters: T, queued_gen: T, active: T):
+        p = ctx.P.get(0)
         par = p % 2
         in_base = par * NFLAT
         out_base = (1 - par) * NFLAT
         count = counters[p]
         for idx in range(count):
             i = frontier[in_base + idx]
-            nk = _GRID.n_neighbours.get(0)
+            nk = ctx.grid.N_NEIGHBOURS.get(0)
 
             best = _POS_SENTINEL
             best_j = -1
             for k in range(nk):
-                j = _GRID.neighbour(i, k)
+                j = ctx.grid.neighbour(i, k)
                 if j != -1:
                     v = filled[j]
                     if v < best:
@@ -208,23 +225,19 @@ def build_fill_reconstruct_relax(KernelCls, *, backend, backend_mod, grid, pass_
                 filled[i] = candidate
                 parent[i] = best_j
                 for k in range(nk):
-                    j = _GRID.neighbour(i, k)
+                    j = ctx.grid.neighbour(i, k)
                     if j != -1:
                         cand_j = z[j] if z[j] > candidate else candidate
                         if cand_j < filled[j]:
-                            old = _BK.atomic_max(queued_gen[j], p)
+                            old = ctx.bk.atomic_max(queued_gen[j], p)
                             if old != p:
-                                pos = _BK.atomic_add(counters[p + 1], 1)
+                                pos = ctx.bk.atomic_add(counters[p + 1], 1)
                                 frontier[out_base + pos] = j
+                                ctx.bk.atomic_add(active[None], 1)
 
-    grid_contains = [
-        Need("n_neighbours", kind=Kind.PARAM, dtype=grid.n_neighbours.dtype, modes={grid.n_neighbours.mode}),
-        Need("neighbour", kind=Kind.HELPER),
-    ]
     return (
-        KernelCls(strict_needs=True)
-        .need(bag_need("_GRID", grid, contains=grid_contains))
-        .bind("_GRID", grid)
-        .need(p_need)
-        .ingest(relax_template)
+        KernelBuilder().wire_param("P").compose("grid", grid)
+        .wire_data("z").wire_data("filled").wire_data("parent")
+        .wire_data("frontier").wire_data("counters").wire_data("queued_gen").wire_data("active")
+        .ingest(relax_tmpl)
     )

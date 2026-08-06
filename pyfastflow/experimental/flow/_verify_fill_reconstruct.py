@@ -128,50 +128,44 @@ def run(backend: str):
     """
     Build the solver once, run it over two terrains, and return (n_flat, rows).
 
-    Author: B.G (07/2026)
+    Author: B.G (08/2026)
     """
     if backend == "taichi":
         import taichi as ti
         ti.init(arch=ti.gpu)
-        from ..core.context.taichi_backend import TaichiParameter
-        from ..core.pool.taichi_pool import TaichiPool
-        Param, Pool = TaichiParameter, TaichiPool
-        i32, f32 = ti.i32, ti.f32
     elif backend == "quadrants":
         import quadrants as qd
         qd.init(arch=qd.gpu)
-        from ..core.context.quadrants_backend import QuadrantsParameter
-        from ..core.pool.quadrants_pool import QuadrantsPool
-        Param, Pool = QuadrantsParameter, QuadrantsPool
-        i32, f32 = qd.i32, qd.f32
-    elif backend == "cupy":
-        from ..core.context.cupy_backend import CupyParameter
-        from ..core.pool.cupy_pool import CupyPool
-        Param, Pool = CupyParameter, CupyPool
-        i32, f32 = np.int32, np.float32
-    else:
+    elif backend != "cupy":
         raise ValueError(f"unknown backend {backend!r}")
 
-    from ..core.context.need import Kind, Need
-    from ..grid import make_grid
+    from ..core.context.backends import backend_classes
+    from ..grid import make_grid_group, make_grid_parameters
     from . import make_fill_reconstruct, make_fill_reconstruct_solver
 
-    closure = backend in ("taichi", "quadrants")
+    _, ParamCls, _, dtypes = backend_classes(backend)
+    i32, f32 = dtypes["i32"], dtypes["f32"]
+
+    if backend == "taichi":
+        from ..core.pool.taichi_pool import TaichiPool as PoolCls
+    elif backend == "quadrants":
+        from ..core.pool.quadrants_pool import QuadrantsPool as PoolCls
+    else:
+        from ..core.pool.cupy_pool import CupyPool as PoolCls
+
     nx = ny = SIDE
     n = nx * ny
     can_out = edge_mask(nx, ny)
 
     def upload(handle, arr):
-        if closure:
-            handle.data.from_numpy(arr)
-        else:
-            handle.data.set(arr)
+        handle.from_numpy(arr)
 
     def download(handle):
-        return handle.data.to_numpy() if closure else handle.data.get()
+        return handle.to_numpy()
 
-    pool = Pool()
-    grid = make_grid(backend, pool, nx, ny, DX, topology="D8", boundary="normal", outlet="edge")
+    pool = PoolCls()
+    grid_group = make_grid_group(backend, topology="D8", boundary="normal", outlet="edge")
+    grid_params = make_grid_parameters(backend, pool, nx, ny, DX, topology="D8", outlet="edge")
 
     z = pool.get_data(f32, (n,))
     filled = pool.get_data(f32, (n,))
@@ -179,19 +173,18 @@ def run(backend: str):
     frontier = pool.get_data(i32, (2 * n,))
     queued_gen = pool.get_data(i32, (n,))
 
-    pass_p = Param("PASS", dtype=i32, mode="scalar", value=0, pool=pool)
-    pass_need = Need("pass_p", kind=Kind.PARAM, dtype=i32, modes={"scalar"})
-    pass_need.bind(pass_p)
+    pass_p = ParamCls("PASS", dtype=i32, mode="scalar", value=0, pool=pool)
+    active_p = ParamCls("ACTIVE", dtype=i32, mode="scalar", value=0, pool=pool)
 
-    deps = make_fill_reconstruct(backend, grid, pass_need, n_flat=n)
+    deps = make_fill_reconstruct(backend, grid_group, nx=nx, ny=ny)
     max_passes = 4 * max(nx, ny)
     counters = pool.get_data(i32, (max_passes + 2,))
 
     solver = make_fill_reconstruct_solver(
-        backend, deps,
+        backend, deps, grid_params,
         z=z.data, filled=filled.data, parent=parent.data, frontier=frontier.data,
-        counters=counters.data, queued_gen=queued_gen.data,
-        n_flat=n, block_size=BLOCK, max_passes=max_passes,
+        counters=counters.data, queued_gen=queued_gen.data, pass_p=pass_p, active_p=active_p,
+        n_flat=n, nx=nx, ny=ny, block_size=BLOCK, max_passes=max_passes,
     )
 
     terrains = (
@@ -213,9 +206,11 @@ def run(backend: str):
 
         checks = check_all(filled_np, parent_np, z_np.astype(np.float64), ref, nx, ny, can_out)
         checks["passes"] = list(solver.last_trip_counts)
+        checks["active_final"] = int(active_p.read())
         rows.append((terrain_name, checks))
 
     pass_p.destroy()
+    active_p.destroy()
     for h in (z, filled, parent, frontier, queued_gen, counters):
         pool.release_data(h)
     return n, rows

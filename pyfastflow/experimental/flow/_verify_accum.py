@@ -1,7 +1,8 @@
 """
-Standalone, re-runnable verification of make_accumulation at a grid scale
-large enough for the three accumulation methods to visibly disagree at f32
-precision.
+Standalone, re-runnable verification of make_accumulation, on the new
+builder/frozen/bound(/sequence_v2) stack (../core/context/builder.py,
+frozen.py, bound.py, sequence_v2.py), at a grid scale large enough for the
+three accumulation methods to visibly disagree at f32 precision.
 
 Why scale matters: with `source` = 1.0 per cell, `q` is literally drainage
 area in cells, so the outlet accumulates a value close to n_flat. f32 has an
@@ -17,22 +18,22 @@ absolute against a maximum accumulated value of order 10) and was not
 actually stressing the three summation orders apart.
 
 What it checks, per backend (taichi/quadrants/cupy) and per method (atomic/
-rake_compress/pointer_jump_push): builds a 1024x1024 D8 grid (or the largest
-power-of-two-side grid that fits in free GPU memory - see MAX_SIDE_OVERRIDE
-below), runs make_receivers(mode="steepest") to get a real receiver graph,
-computes a numpy topological reference (summing along the same receiver
-chains, in float64), runs each accumulation method, and reports max absolute
-deviation, max relative deviation, AND the max accumulated value itself, so
-the deviations can be read against the scale they occur on. It also reports
-the receiver graph's maximum chain depth (root distance), computed by
-iterative path compression, so it's clear whether the graph exercised was
-actually deep or just wide.
+rake_compress/pointer_jump_push): builds a 1024x1024 D8 grid (`make_grid_group`
++ `make_grid_parameters`, ../grid/__init__.py), runs make_receivers(mode=
+"steepest") to get a real receiver graph, computes a numpy topological
+reference (summing along the same receiver chains, in float64), runs each
+accumulation method, and reports max absolute deviation, max relative
+deviation, AND the max accumulated value itself, so the deviations can be
+read against the scale they occur on. It also reports the receiver graph's
+maximum chain depth (root distance), computed by iterative path compression,
+so it's clear whether the graph exercised was actually deep or just wide.
 
-On taichi/quadrants, a "fuse-check" mode also compiles rake_compress's and
-pointer_jump_push's RoutineBuilder both fused=True and fused=False and diffs
-the two outputs directly - the nested-def templates these two routines are
-built from fuse via core/context/_closure_backend.py's
-capture_template_meta/_fuse_group. cupy has no fuse path and is skipped.
+There is no fuse-check pass here (an earlier version of this script diffed
+a closure-backend Routine's `fused=True` vs `fused=False` compile for
+rake_compress/pointer_jump_push): both methods are now `SequenceBuilder`s
+(sequence_v2.py) - each composed step is always a separate real kernel
+launch, there being no per-Sequence fusion mechanism the way the old
+`Routine.compile(fused=...)` had one. Nothing to diff.
 
 `source` mode coverage (const/scalar/field) is exercised on taichi only, to
 prove mode-agnosticism without tripling the run time; quadrants/cupy run
@@ -53,36 +54,21 @@ Run:
 Author: B.G (07/2026)
 """
 
-import math
 import sys
 from collections import deque
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-from pyfastflow.experimental.core.context.need import Kind, Need
-
 DX = 1.0
 SEED = 2024
-# Grid side length; make_accumulation's own n_flat default (grid.nx*grid.ny)
-# is used throughout. Override to a smaller power of two if this exhausts
-# free GPU memory - the rake-compress donor buffers are n_flat*n_neighbours
-# int32 each (two of them), the dominant cost.
+# Grid side length; n_flat is always passed to make_accumulation explicitly
+# throughout (the new stack's make_grid_group FrozenGroup carries no bound
+# values to default it off - see flow/__init__.py's _resolve_n_flat).
+# Override to a smaller power of two if this exhausts free GPU memory - the
+# rake-compress donor buffers are n_flat*n_neighbours int32 each (two of
+# them), the dominant cost.
 SIDE = 1024
-
-
-def _source_need(source_p) -> Need:
-    """
-    Wrap an already-built `source_p` Parameter in a fresh, bound
-    `Need("source", kind=Kind.PARAM)` - the boundary contract
-    make_accumulation now requires (see flow/__init__.py's module
-    docstring).
-
-    Author: B.G (08/2026)
-    """
-    n = Need("source", kind=Kind.PARAM)
-    n.bind(source_p)
-    return n
 
 
 def numpy_topological_accum(rec: np.ndarray, source: np.ndarray) -> np.ndarray:
@@ -158,89 +144,136 @@ def max_chain_depth(rec: np.ndarray) -> int:
     return int(depth.max())
 
 
+def _bind_pointer_jump_push(bound, closure, *, source_p, q, work, work2, q_work, rec):
+    """
+    Explicit address-by-address binding for the pointer_jump_push Sequence -
+    see _closure_accum.py's/_cupy_accum.py's own build_pointer_jump_push
+    docstrings for the exact composed names/addresses. Cannot use leaf-name
+    binding here (unlike rake_compress, below): "step_a"/"step_b" (closure)
+    and "step_a_copy"/"step_a_core"/"step_b_copy"/"step_b_core" (cupy) all
+    reuse the identical leaf names `rec_curr`/`rec_next`/`q_curr`/`q_next`
+    for the ping-pong's two mirrored buffer assignments, so a leaf-name bind
+    would collapse both halves onto the same buffers and break the ping-pong.
+
+    Author: B.G (08/2026)
+    """
+    bound.bind(("q_init", "SOURCE"), source_p)
+    bound.bind(("q_init", "q"), q.data)
+    bound.bind(("copy_rec_to_work", "rec"), rec.data)
+    bound.bind(("copy_rec_to_work", "work"), work.data)
+    if closure:
+        bound.bind(("step_a", "rec_curr"), work.data)
+        bound.bind(("step_a", "rec_next"), work2.data)
+        bound.bind(("step_a", "q_curr"), q.data)
+        bound.bind(("step_a", "q_next"), q_work.data)
+        bound.bind(("step_b", "rec_curr"), work2.data)
+        bound.bind(("step_b", "rec_next"), work.data)
+        bound.bind(("step_b", "q_curr"), q_work.data)
+        bound.bind(("step_b", "q_next"), q.data)
+    else:
+        bound.bind(("step_a_copy", "q_curr"), q.data)
+        bound.bind(("step_a_copy", "q_next"), q_work.data)
+        bound.bind(("step_a_core", "rec_curr"), work.data)
+        bound.bind(("step_a_core", "rec_next"), work2.data)
+        bound.bind(("step_a_core", "q_curr"), q.data)
+        bound.bind(("step_a_core", "q_next"), q_work.data)
+        bound.bind(("step_b_copy", "q_curr"), q_work.data)
+        bound.bind(("step_b_copy", "q_next"), q.data)
+        bound.bind(("step_b_core", "rec_curr"), work2.data)
+        bound.bind(("step_b_core", "rec_next"), work.data)
+        bound.bind(("step_b_core", "q_curr"), q_work.data)
+        bound.bind(("step_b_core", "q_next"), q.data)
+
+
 def run(backend: str):
     if backend == "taichi":
         import taichi as ti
         ti.init(arch=ti.gpu)
-        from pyfastflow.experimental.core.context.taichi_backend import TaichiParameter
-        from pyfastflow.experimental.core.pool.taichi_pool import TaichiPool
-        Param, Pool, i32, f32 = TaichiParameter, TaichiPool, ti.i32, ti.f32
     elif backend == "quadrants":
         import quadrants as qd
         qd.init(arch=qd.gpu)
-        from pyfastflow.experimental.core.context.quadrants_backend import QuadrantsParameter
-        from pyfastflow.experimental.core.pool.quadrants_pool import QuadrantsPool
-        Param, Pool, i32, f32 = QuadrantsParameter, QuadrantsPool, qd.i32, qd.f32
-    elif backend == "cupy":
-        from pyfastflow.experimental.core.context.cupy_backend import CupyParameter
-        from pyfastflow.experimental.core.pool.cupy_pool import CupyPool
-        Param, Pool, i32, f32 = CupyParameter, CupyPool, np.int32, np.float32
-    else:
+    elif backend != "cupy":
         raise ValueError(f"unknown backend {backend!r}")
 
-    from pyfastflow.experimental.grid import make_grid
-    from pyfastflow.experimental.flow import make_receivers, make_accumulation
+    from ..core.context.backends import backend_classes
+    from ..grid import make_grid_group, make_grid_parameters
+    from . import _bind_by_leaf, make_accumulation, make_receivers
 
+    _, ParamCls, _, dtypes = backend_classes(backend)
+    i32, f32 = dtypes["i32"], dtypes["f32"]
+
+    if backend == "taichi":
+        from ..core.pool.taichi_pool import TaichiPool as PoolCls
+    elif backend == "quadrants":
+        from ..core.pool.quadrants_pool import QuadrantsPool as PoolCls
+    else:
+        from ..core.pool.cupy_pool import CupyPool as PoolCls
+
+    closure = backend in ("taichi", "quadrants")
     nx = ny = SIDE
     n = nx * ny
     nn = 8  # D8
 
-    pool = Pool()
-    grid = make_grid(backend, pool, nx, ny, DX, topology="D8", boundary="normal", outlet="edge")
+    def upload(handle, arr):
+        handle.from_numpy(arr)
+
+    def download(handle):
+        return handle.to_numpy()
+
+    pool = PoolCls()
+    grid_group = make_grid_group(backend, topology="D8", boundary="normal", outlet="edge")
+    grid_params = make_grid_parameters(backend, pool, nx, ny, DX, topology="D8", outlet="edge")
 
     z_np = make_smooth_terrain(nx, ny, SEED)
     source_np = np.ones(n, dtype=np.float32)
 
     z = pool.get_data(f32, (n,))
     rec = pool.get_data(i32, (n,))
-    if backend == "cupy":
-        z.data.set(z_np)
-        launch_grid, launch_block = ((n + 255) // 256,), (256,)
-    else:
-        z.data.from_numpy(z_np)
+    upload(z, z_np)
 
-    recv = make_receivers(backend, grid)
-    recv_kernel = recv.receivers.compile()
-    if backend == "cupy":
-        recv_kernel(z.data, rec.data, grid=launch_grid, block=launch_block)
-        rec_np = rec.data.get().astype(np.int64)
-    else:
-        recv_kernel(z.data, rec.data)
-        rec_np = rec.data.to_numpy().astype(np.int64)
+    launch = {"grid": ((n + 255) // 256,), "block": (256,)} if not closure else {}
 
+    recv = make_receivers(backend, grid_group, topology="D8", mode="steepest")
+    recv_bound = recv["receivers"].build()
+    for name in ("NX", "NY", "DX", "N_NEIGHBOURS"):
+        recv_bound.bind(name, grid_params[name])
+    recv_bound.bind("z", z.data)
+    recv_bound.bind("rec", rec.data)
+    recv_kernel = recv_bound.compile(backend, **launch)
+    recv_kernel()
+
+    rec_np = download(rec).astype(np.int64)
     depth = max_chain_depth(rec_np)
     ref = numpy_topological_accum(rec_np, source_np)
     max_q_ref = float(ref.max())
 
-    def get_source_param(mode):
+    def make_source_param(mode, array):
         if mode in ("const", "scalar"):
-            return Param("SRC", dtype=f32, mode=mode, value=1.0, pool=pool)
-        p = Param("SRC", dtype=f32, mode="field", value=source_np, pool=pool, n_flat=n)
-        return p
+            return ParamCls("SRC", dtype=f32, mode=mode, value=1.0, pool=pool)
+        return ParamCls("SRC", dtype=f32, mode="field", value=array, pool=pool, n_flat=n)
 
-    def run_atomic(source_need):
-        accum = make_accumulation(backend, grid, source_need, method="atomic")
+    def run_atomic(source_p):
+        accum = make_accumulation(backend, grid_group, method="atomic", n_flat=n)
         q = pool.get_data(f32, (n,))
-        if backend == "cupy":
-            q_init_k = accum.q_init.compile()
-            accum_k = accum.accum.compile()
-            q_init_k(q.data, grid=launch_grid, block=launch_block)
-            accum_k(rec.data, q.data, grid=launch_grid, block=launch_block)
-            got = q.data.get().astype(np.float64)
-        else:
-            k = accum.accum.compile()
-            k(rec.data, q.data)
-            got = q.data.to_numpy().astype(np.float64)
+        if "q_init" in accum:
+            qb = accum["q_init"].build()
+            qb.bind("SOURCE", source_p)
+            qb.bind("q", q.data)
+            qb.compile(backend, **launch)()
+        ab = accum["accum"].build()
+        ab.bind("SOURCE", source_p)
+        ab.bind("rec", rec.data)
+        ab.bind("q", q.data)
+        ab.compile(backend, **launch)()
+        got = download(q).astype(np.float64)
         pool.release_data(q)
         return got
 
-    def run_rake_compress(source_need, fused=False):
-        iteration_p = Param("ITER", dtype=i32, mode="scalar", value=0, pool=pool)
-        iteration_need = Need("iteration_p", kind=Kind.PARAM, dtype=i32, modes={"scalar"})
-        iteration_need.bind(iteration_p)
-        accum = make_accumulation(
-            backend, grid, source_need, method="rake_compress", n_flat=n, iteration_p=iteration_need
-        )
+    def run_rake_compress(source_p):
+        iteration_p = ParamCls("ITER", dtype=i32, mode="scalar", value=0, pool=pool)
+        accum = make_accumulation(backend, grid_params, method="rake_compress", n_flat=n)
+        bound = accum.sequence.freeze().build()
+
         q = pool.get_data(f32, (n,))
         donors = pool.get_data(i32, (n * nn,))
         ndonors = pool.get_data(i32, (n,))
@@ -249,39 +282,38 @@ def run(backend: str):
         q_alt = pool.get_data(f32, (n,))
         src = pool.get_data(i32, (n,))
 
-        routine = accum.routine.compile(captured=False) if backend == "cupy" else accum.routine.compile(fused=fused)
-
-        names = routine.data_names
-        handles = {
+        _bind_by_leaf(bound, (), {
             "rec": rec.data, "q": q.data, "donors": donors.data, "ndonors": ndonors.data,
-            "donors_alt": donors_alt.data, "ndonors_alt": ndonors_alt.data, "q_alt": q_alt.data, "src": src.data,
-        }
-        args = tuple(handles[nm] for nm in names)
-        routine(*args)
+            "donors_alt": donors_alt.data, "ndonors_alt": ndonors_alt.data,
+            "q_alt": q_alt.data, "src": src.data,
+        })
+        _bind_by_leaf(bound, (), {"SOURCE": source_p, "ITER": iteration_p})
 
-        got = q.data.get().astype(np.float64) if backend == "cupy" else q.data.to_numpy().astype(np.float64)
+        bound.compile(backend, **launch)()
+
+        got = download(q).astype(np.float64)
 
         for h in (q, donors, ndonors, donors_alt, ndonors_alt, q_alt, src):
             pool.release_data(h)
         iteration_p.destroy()
         return got
 
-    def run_pointer_jump_push(source_need, fused=False):
-        accum = make_accumulation(backend, grid, source_need, method="pointer_jump_push", n_flat=n)
+    def run_pointer_jump_push(source_p):
+        accum = make_accumulation(backend, grid_params, method="pointer_jump_push", n_flat=n)
+        bound = accum.sequence.freeze().build()
+
         q = pool.get_data(f32, (n,))
         work = pool.get_data(i32, (n,))
         work2 = pool.get_data(i32, (n,))
         q_work = pool.get_data(f32, (n,))
 
-        routine = accum.routine.compile(captured=False) if backend == "cupy" else accum.routine.compile(fused=fused)
+        _bind_pointer_jump_push(
+            bound, closure, source_p=source_p, q=q, work=work, work2=work2, q_work=q_work, rec=rec,
+        )
 
-        names = routine.data_names
-        handles = {"rec": rec.data, "work": work.data, "work2": work2.data, "q": q.data, "q_work": q_work.data}
-        args = tuple(handles[nm] for nm in names)
-        routine(*args)
+        bound.compile(backend, **launch)()
 
-        got = q.data.get().astype(np.float64) if backend == "cupy" else q.data.to_numpy().astype(np.float64)
-
+        got = download(q).astype(np.float64)
         for h in (q, work, work2, q_work):
             pool.release_data(h)
         return got
@@ -289,11 +321,10 @@ def run(backend: str):
     modes = ["const", "scalar", "field"] if backend == "taichi" else ["field"]
     rows = []
     for mode in modes:
-        source_p = get_source_param(mode)
-        source_need = _source_need(source_p)
-        got_atomic = run_atomic(source_need)
-        got_rake = run_rake_compress(source_need)
-        got_pjp = run_pointer_jump_push(source_need)
+        source_p = make_source_param(mode, source_np)
+        got_atomic = run_atomic(source_p)
+        got_rake = run_rake_compress(source_p)
+        got_pjp = run_pointer_jump_push(source_p)
         source_p.destroy()
 
         for name, got in (("atomic", got_atomic), ("rake_compress", got_rake), ("pointer_jump_push", got_pjp)):
@@ -306,28 +337,6 @@ def run(backend: str):
         rows.append((mode, "atomic_vs_pjp", float(np.max(np.abs(got_atomic - got_pjp))),
                      float(np.max(np.abs(got_atomic - got_pjp) / np.maximum(np.abs(got_atomic), 1.0))), None))
 
-    # Nested-def templates fusing (core/context/_closure_backend.py's
-    # capture_template_meta/_fuse_group): compile() each RoutineBuilder both
-    # ways and diff element-wise. cupy has no fuse path (RoutineBuilder.compile
-    # raises on fused=True there), so this only runs on the two closure
-    # backends.
-    if backend != "cupy":
-        source_p = get_source_param("field")
-        source_need = _source_need(source_p)
-        got_rake_unfused = run_rake_compress(source_need, fused=False)
-        got_rake_fused = run_rake_compress(source_need, fused=True)
-        got_pjp_unfused = run_pointer_jump_push(source_need, fused=False)
-        got_pjp_fused = run_pointer_jump_push(source_need, fused=True)
-        source_p.destroy()
-        rows.append(("fuse-check", "rake_compress_fused_vs_unfused",
-                     float(np.max(np.abs(got_rake_fused - got_rake_unfused))),
-                     float(np.max(np.abs(got_rake_fused - got_rake_unfused) / np.maximum(np.abs(got_rake_unfused), 1.0))),
-                     None))
-        rows.append(("fuse-check", "pointer_jump_push_fused_vs_unfused",
-                     float(np.max(np.abs(got_pjp_fused - got_pjp_unfused))),
-                     float(np.max(np.abs(got_pjp_fused - got_pjp_unfused) / np.maximum(np.abs(got_pjp_unfused), 1.0))),
-                     None))
-
     # source=1.0 makes every partial sum an exact integer, and f32 represents
     # every integer up to 2**24 exactly regardless of summation order - so
     # the block above is expected to show 0.0 deviation everywhere as long as
@@ -339,11 +348,10 @@ def run(backend: str):
     rng2 = np.random.default_rng(SEED + 1)
     source_noninteger_np = (rng2.random(n).astype(np.float32) * 2.0 + 0.1)
     ref_noninteger = numpy_topological_accum(rec_np, source_noninteger_np)
-    source_p = Param("SRC", dtype=f32, mode="field", value=source_noninteger_np, pool=pool, n_flat=n)
-    source_need = _source_need(source_p)
-    got_atomic = run_atomic(source_need)
-    got_rake = run_rake_compress(source_need)
-    got_pjp = run_pointer_jump_push(source_need)
+    source_p = make_source_param("field", source_noninteger_np)
+    got_atomic = run_atomic(source_p)
+    got_rake = run_rake_compress(source_p)
+    got_pjp = run_pointer_jump_push(source_p)
     source_p.destroy()
     for name, got in (("atomic", got_atomic), ("rake_compress", got_rake), ("pointer_jump_push", got_pjp)):
         abs_diff = float(np.max(np.abs(got - ref_noninteger)))
@@ -368,9 +376,9 @@ def run(backend: str):
 # numpy rather than deriving it from a receivers factory. `_MFD_D8_DR`/
 # `_MFD_D8_DC` are the exact same 8 offsets, same k order, as grid's own
 # `_delta` table (_cupy_blocks.py's build_helpers) - the persistent kernel
-# calls `neighbour_raw(u, k)` on the real grid to resolve a set mask bit,
-# so the reference topology's own row/col arithmetic has to agree with the
-# grid's or the two would silently walk to different cells. Restricting
+# calls `ctx.grid.neighbour_raw(u, k)` on the real grid to resolve a set mask
+# bit, so the reference topology's own row/col arithmetic has to agree with
+# the grid's or the two would silently walk to different cells. Restricting
 # every candidate direction to a strictly-greater flat index (row-major)
 # makes the fabricated graph acyclic by construction - no priority-flood /
 # depression handling involved, this is a synthetic DAG, not a terrain.
@@ -387,8 +395,7 @@ def make_synthetic_mfd_topology(nx: int, ny: int, seed: int):
     Fabricate an acyclic MFD receiver mask (u8, one bitmask/cell) + dense
     per-direction weights (f32, 8/cell, unset directions left 0.0) over an
     nx*ny D8 grid with "normal" (non-wrapping) boundaries - the same
-    boundary convention _verify_accum.py's `make_grid(..., boundary="normal")`
-    calls build with elsewhere in this file.
+    boundary convention this file's `run()` builds with elsewhere.
 
     Every direction whose neighbour would fall outside [0, nx)x[0, ny) is
     dropped (mirrors what a real MFD topology builder's own bounds check
@@ -485,15 +492,15 @@ def run_mfd_cupy():
     MFD_SIDE x MFD_SIDE synthetic DAG (make_synthetic_mfd_topology), runs
     the persistent-kernel accumulation with a unit source, and compares
     against numpy_kahn_mfd_accum. Returns (n_flat, max_abs, max_rel, max_got,
-    max_ref).
+    max_ref, n_stuck).
 
     Author: B.G (08/2026)
     """
-    from pyfastflow.experimental.core.context.cupy_backend import CupyParameter
-    from pyfastflow.experimental.core.pool.cupy_pool import CupyPool
-    from pyfastflow.experimental.grid import make_grid
-    from pyfastflow.experimental.flow import make_accumulation
-    from pyfastflow.experimental.flow._cupy_mfd_accum import persistent_grid_block, init_frontier_mfd
+    from ..core.context.cupy_backend import CupyParameter
+    from ..core.pool.cupy_pool import CupyPool
+    from ..grid import make_grid_group, make_grid_parameters
+    from . import make_accumulation
+    from ._cupy_mfd_accum import init_frontier_mfd, persistent_grid_block
 
     Param, Pool, i32, f32 = CupyParameter, CupyPool, np.int32, np.float32
     nx = ny = MFD_SIDE
@@ -504,10 +511,10 @@ def run_mfd_cupy():
     source_np = np.ones(n, dtype=np.float32)
     ref = numpy_kahn_mfd_accum(dirs_np, mfd_w_np, indegree_np, source_np)
 
-    pool = CupyPool()
-    grid = make_grid("cupy", pool, nx, ny, DX, topology="D8", boundary="normal", outlet="edge")
+    pool = Pool()
+    grid_group = make_grid_group("cupy", topology="D8", boundary="normal", outlet="edge")
+    grid_params = make_grid_parameters("cupy", pool, nx, ny, DX, topology="D8", outlet="edge")
     source_p = Param("SRC", dtype=f32, mode="const", value=1.0, pool=pool)
-    source_need = _source_need(source_p)
 
     dirs = pool.get_data(np.dtype(np.uint8), (n,))
     mfd_w = pool.get_data(f32, (n * 8,))
@@ -522,24 +529,34 @@ def run_mfd_cupy():
     mfd_w.data.set(mfd_w_np)
     indegree.data.set(indegree_np.astype(np.int32))
 
-    accum = make_accumulation("cupy", grid, source_need, method="persistent_mfd", n_flat=n)
-    q_init_k = accum.q_init.compile()
-    accum_k = accum.accum.compile()
+    accum = make_accumulation("cupy", grid_group, method="persistent_mfd", n_flat=n, n_neighbours=8)
 
     launch_grid, launch_block = ((n + 255) // 256,), (256,)
-    q_init_k(accum_h.data, grid=launch_grid, block=launch_block)
+
+    q_init_bound = accum["q_init"].build()
+    q_init_bound.bind("SOURCE", source_p)
+    q_init_bound.bind("accum", accum_h.data)
+    q_init_bound.compile("cupy", grid=launch_grid, block=launch_block)()
 
     n0 = init_frontier_mfd(indegree.data, frontier0.data)
     count.data[0] = n0
     count.data[1] = 0
     barrier.data[0] = 0
 
+    accum_bound = accum["accum"].build()
+    for name, p in grid_params.items():
+        accum_bound.bind(("grid", name), p)
+    accum_bound.bind("frontier0", frontier0.data)
+    accum_bound.bind("frontier1", frontier1.data)
+    accum_bound.bind("count", count.data)
+    accum_bound.bind("barrier", barrier.data)
+    accum_bound.bind("dirs", dirs.data)
+    accum_bound.bind("mfd_w", mfd_w.data)
+    accum_bound.bind("accum", accum_h.data)
+    accum_bound.bind("indegree", indegree.data)
+
     p_grid, p_block = persistent_grid_block()
-    accum_k(
-        frontier0.data, frontier1.data, count.data, barrier.data,
-        dirs.data, mfd_w.data, accum_h.data, indegree.data,
-        grid=p_grid, block=p_block,
-    )
+    accum_bound.compile("cupy", grid=p_grid, block=p_block)()
 
     got = accum_h.data.get().astype(np.float64)
     n_stuck = int((indegree.data.get() > 0).sum())
