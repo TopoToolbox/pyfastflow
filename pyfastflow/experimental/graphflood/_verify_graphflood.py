@@ -57,7 +57,7 @@ def run(backend: str, fill_method: str) -> None:
     from . import make_graphflood
 
     _, ParamCls, _, dtypes = backend_classes(backend)
-    i32, f32 = dtypes["i32"], dtypes["f32"]
+    i32, i64, f32 = dtypes["i32"], dtypes["i64"], dtypes["f32"]
 
     if backend == "taichi":
         from ..core.pool.taichi_pool import TaichiPool as PoolCls
@@ -81,7 +81,12 @@ def run(backend: str, fill_method: str) -> None:
     z.from_numpy(z_np)
     h.from_numpy(np.zeros(n, dtype=np.float32))
 
-    source_p = ParamCls("SOURCE", dtype=f32, mode="const", value=RAIN, pool=pool)
+    # SOURCE is Q (m^3/s per cell): rain rate * cell area, not a bare rate -
+    # see apply_divergence's (Q_in - Qo)/area*dt (Qo is m^3/s). DX=1 here so
+    # this is currently a no-op, but stays explicit rather than relying on
+    # that (see graphflood_cli.py's own note - this exact omission was a
+    # real, DX-masked bug there).
+    source_p = ParamCls("SOURCE", dtype=f32, mode="const", value=RAIN * DX * DX, pool=pool)
     manning_p = ParamCls("MANNING", dtype=f32, mode="const", value=MANNING, pool=pool)
     expo_p = ParamCls("EXPO", dtype=f32, mode="const", value=EXPO, pool=pool)
     dt_p = ParamCls("DT", dtype=f32, mode="const", value=DT, pool=pool)
@@ -102,9 +107,9 @@ def run(backend: str, fill_method: str) -> None:
         rec_jump = pool.get_data(i32, (n,))
         z_prime = pool.get_data(f32, (n,))
         is_border = pool.get_data(i32, (n,))
-        basin_saddle = pool.get_data(i32, (n,))
+        basin_saddle = pool.get_data(i64, (n,))
         basin_saddlenode = pool.get_data(i32, (n,))
-        outlet_h = pool.get_data(i32, (n,))
+        outlet_h = pool.get_data(i64, (n,))
         rerouted = pool.get_data(i32, (n,))
         ndep_p = ParamCls("NDEP", dtype=i32, mode="scalar", value=0, pool=pool)
         extra = dict(

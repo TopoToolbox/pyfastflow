@@ -141,15 +141,27 @@ resolved, monotonic surface to split weights over, which reroute-only
 depression handling does not produce. Per step: make_surface -> reset
 counters/queued_gen -> fill_reconstruct_solver -> h_from_filled (all
 identical to kind="vanilla_sfd"'s fill_method="reconstruct" path - see
-"Filling on the surface" above), then this package's own MFD topology
-construction (_cupy_mfd_topology.py's build_mfd_topology - `dirs`/`mfd_w`/
-`indegree`, rebuilt from `filled` every step) feeding ../flow's
-`persistent_mfd` accumulation (_cupy_mfd_accum.py's build_persistent_mfd/
-persistent_grid_block/init_frontier_mfd) instead of the SFD accumulation
-kind="vanilla_sfd" uses, then the same compute_qo/apply_divergence core
-every kind uses. See GraphfloodVanillaMFD's own docstring for why `count`/
-`barrier` are re-seeded via a direct cupy host write every step rather than
-a compiled kernel.
+"Filling on the surface" above), then "reconstruct_epsilon"'s own
+self-scaling perturbation pass (_cupy_reconstruct_epsilon.py -
+`filled_eps = filled + dist`, `dist` a per-cell-ULP cumulative sum along
+`parent`, not a fixed constant - see that module's own docstring for why
+plain `filled` gives every cell inside a resolved, genuinely-flat
+depression zero outgoing MFD edges, stalling accumulation at the flat's
+boundary, why a *fixed* epsilon constant is itself wrong on real DEM data
+(too small relative to float32's ULP at real elevation magnitudes,
+silently swallowed by rounding), and why the ULP-based fix avoids that
+without touching _cupy_mfd_topology.py's own slope-based logic at all),
+then this package's
+own MFD topology construction (_cupy_mfd_topology.py's build_mfd_topology -
+`dirs`/`mfd_w`/`indegree`, built from `filled_eps`, not raw `filled`, every
+step) feeding ../flow's `persistent_mfd` accumulation
+(_cupy_mfd_accum.py's build_persistent_mfd/persistent_grid_block/
+init_frontier_mfd) instead of the SFD accumulation kind="vanilla_sfd"
+uses, then the same compute_qo/apply_divergence core every kind uses (fed
+the real, un-perturbed `h`/`filled` - only `dirs_weights`'s own elevation
+input is the epsilon-perturbed one). See GraphfloodVanillaMFD's own
+docstring for why `count`/`barrier` are re-seeded via a direct cupy host
+write every step rather than a compiled kernel.
 
 Scope of this cut
 --------------------
@@ -159,6 +171,8 @@ threaded through this factory's own signature, not done in this pass.
 
 Author: B.G (08/2026)
 """
+
+import math
 
 from ..core.context.backends import backend_classes
 from ..core.context.routine import RoutineBuilder
@@ -276,7 +290,11 @@ class GraphfloodVanillaMFD:
     """
     Host-orchestrated wrapper around kind="vanilla_mfd"'s per-step pieces -
     fill-by-reconstruction (shared with kind="vanilla_sfd"'s
-    fill_method="reconstruct"), this package's own MFD topology
+    fill_method="reconstruct"), "reconstruct_epsilon"'s hop-distance +
+    epsilon pass (_cupy_reconstruct_epsilon.py - see its own module
+    docstring for why plain `filled` breaks MFD topology across a flat
+    resolved depression, and why this fixes it without touching
+    _cupy_mfd_topology.py at all), this package's own MFD topology
     construction (_cupy_mfd_topology.py), ../flow's persistent_mfd
     accumulation (_cupy_mfd_accum.py) and the same compute_qo/
     apply_divergence core every kind uses - see make_graphflood's own
@@ -292,6 +310,7 @@ class GraphfloodVanillaMFD:
 
     def __init__(
         self, *, make_surface, reset_counters, reset_queued_gen, minima_solver, h_from_filled,
+        hops_init, hops_jump_fwd, hops_jump_bwd, apply_epsilon, hops_rounds,
         indegree_reset, dirs_weights, indegree_count, indegree, frontier0, count, barrier,
         init_frontier_mfd, q_init, accum, core,
     ):
@@ -300,6 +319,11 @@ class GraphfloodVanillaMFD:
         self._reset_queued_gen = reset_queued_gen
         self._minima_solver = minima_solver
         self._h_from_filled = h_from_filled
+        self._hops_init = hops_init
+        self._hops_jump_fwd = hops_jump_fwd
+        self._hops_jump_bwd = hops_jump_bwd
+        self._apply_epsilon = apply_epsilon
+        self._hops_rounds = hops_rounds
         self._indegree_reset = indegree_reset
         self._dirs_weights = dirs_weights
         self._indegree_count = indegree_count
@@ -319,6 +343,15 @@ class GraphfloodVanillaMFD:
         self._reset_queued_gen()
         self._minima_solver()
         self._h_from_filled()
+        self._hops_init()
+        # hops_rounds is always even (see make_graphflood's own computation),
+        # so alternating fwd/bwd this many times always ends back in the
+        # primary dist/anc buffers - see build_hops_jump's own docstring for
+        # why this ping-pong exists (in-place pointer-jumping races on `+=`).
+        for _ in range(self._hops_rounds // 2):
+            self._hops_jump_fwd()
+            self._hops_jump_bwd()
+        self._apply_epsilon()
         self._indegree_reset()
         self._dirs_weights()
         self._indegree_count()
@@ -393,6 +426,11 @@ def make_graphflood(
     frontier1=None,
     count=None,
     barrier=None,
+    dist=None,
+    anc=None,
+    dist2=None,
+    anc2=None,
+    filled_eps=None,
 ):
     """
     Build, bind and compile one GraphFlood timestep, returning a ready-to-
@@ -424,7 +462,14 @@ def make_graphflood(
     into SOURCE/MANNING/EXPO/DT/GF_MIN_INCREMENT (and BOUNDARY_H)
     respectively - rain, friction and timestep are all params, per the
     module docstring; nothing here hardcodes a value or a unit conversion
-    the caller cannot override.
+    the caller cannot override. `source_p` is Q **per cell** (m^3/s), not a
+    bare rate - apply_divergence's `(Q_in - Qo)/area*dt` compares it
+    directly against `Qo`, which compute_qo's friction law already produces
+    in m^3/s (build_friction_qo's own `* DX` term). A caller converting from
+    a rain rate (m/s or mm/h) must multiply by cell area (`DX**2`) before
+    binding it here - forgetting this under-scales `Q_in` by a factor of
+    `DX**2` (invisible on any grid built with `DX=1`, silently wrong on a
+    real DEM's actual cell size).
 
     fill_method="jump" additionally requires `rec`, `ndep_p`, `bid`,
     `rec_jump`, `z_prime`, `is_border`, `basin_saddle`, `basin_saddlenode`,
@@ -496,6 +541,17 @@ def make_graphflood(
         `indegree` i32 (n_flat,), `frontier0`/`frontier1` i32 (n_flat,)
         each, `count` i32 (2,), `barrier` u32 (1,) - all rebuilt from
         scratch every step, no caller-side init needed beyond allocation.
+    dist, anc, dist2, anc2, filled_eps : DataHandle, optional
+        Required iff kind="vanilla_mfd" - "reconstruct_epsilon"'s own
+        scratch (_cupy_reconstruct_epsilon.py): `dist`/`dist2` f32 (n_flat,)
+        (a self-scaling, per-cell-ULP cumulative perturbation - see
+        build_hops_init's own docstring for why this is float, not a hop
+        count), `anc`/`anc2` i32 (n_flat,) - `dist2`/`anc2` are the
+        double-buffering partner build_hops_jump's ping-pong needs (see its
+        own docstring for why in-place pointer-jumping isn't safe here) -
+        `filled_eps` f32
+        (n_flat,). All rebuilt from scratch every step, no
+        caller-side init needed beyond allocation.
 
     Returns
     -------
@@ -604,10 +660,10 @@ def make_graphflood(
             "kind='vanilla_mfd'", surface=surface, filled=filled, parent=parent, frontier=frontier,
             counters=counters, queued_gen=queued_gen, pass_p=pass_p, active_p=active_p,
             dirs=dirs, mfd_w=mfd_w, indegree=indegree, frontier0=frontier0, frontier1=frontier1,
-            count=count, barrier=barrier,
+            count=count, barrier=barrier, dist=dist, anc=anc, dist2=dist2, anc2=anc2, filled_eps=filled_eps,
         )
         from ..flow._cupy_mfd_accum import build_persistent_mfd, init_frontier_mfd, persistent_grid_block
-        from . import _cupy_mfd_topology
+        from . import _cupy_mfd_topology, _cupy_reconstruct_epsilon
 
         make_surface_fk = core_blocks.build_make_surface(n_flat=n_flat)
         ms_bound = make_surface_fk.build()
@@ -639,11 +695,52 @@ def make_graphflood(
             n_flat=n_flat, nx=nx, ny=ny, block_size=block_size, max_passes=max_passes,
         )
 
+        # "reconstruct_epsilon": filled_eps = filled + MFD_EPSILON * (hops to
+        # outlet along parent) - see _cupy_reconstruct_epsilon.py's own module
+        # docstring for why plain `filled` breaks MFD topology across a flat
+        # resolved depression, and why this fixes it without changing
+        # build_mfd_topology's own slope-based dirs_weights logic at all.
+        hops_init_fk = _cupy_reconstruct_epsilon.build_hops_init(n_flat=n_flat)
+        hi_bound = hops_init_fk.build()
+        hi_bound.bind("parent", parent)
+        hi_bound.bind("filled", filled)
+        hi_bound.bind("dist", dist)
+        hi_bound.bind("anc", anc)
+        hops_init_kernel = hi_bound.compile(backend, **launch)
+
+        hops_jump_fk = _cupy_reconstruct_epsilon.build_hops_jump(n_flat=n_flat)
+        hj_fwd_bound = hops_jump_fk.build()
+        hj_fwd_bound.bind("dist_in", dist)
+        hj_fwd_bound.bind("anc_in", anc)
+        hj_fwd_bound.bind("dist_out", dist2)
+        hj_fwd_bound.bind("anc_out", anc2)
+        hops_jump_fwd_kernel = hj_fwd_bound.compile(backend, **launch)
+
+        hj_bwd_bound = hops_jump_fk.build()
+        hj_bwd_bound.bind("dist_in", dist2)
+        hj_bwd_bound.bind("anc_in", anc2)
+        hj_bwd_bound.bind("dist_out", dist)
+        hj_bwd_bound.bind("anc_out", anc)
+        hops_jump_bwd_kernel = hj_bwd_bound.compile(backend, **launch)
+
+        # rounded up to even so alternating fwd/bwd always ends back in the
+        # primary dist/anc buffers - see build_hops_jump's own docstring.
+        hops_rounds = math.ceil(math.log2(max(2, n_flat))) + 1
+        if hops_rounds % 2 != 0:
+            hops_rounds += 1
+
+        apply_epsilon_fk = _cupy_reconstruct_epsilon.build_apply_epsilon(n_flat=n_flat)
+        ae_bound = apply_epsilon_fk.build()
+        ae_bound.bind("filled", filled)
+        ae_bound.bind("dist", dist)
+        ae_bound.bind("filled_eps", filled_eps)
+        apply_epsilon_kernel = ae_bound.compile(backend, **launch)
+
         topo = _cupy_mfd_topology.build_mfd_topology(
             grid=grid, n_flat=n_flat, topology=topology, diagonal_partition_correction=diagonal_partition_correction,
         )
         dw_bound = topo["dirs_weights"].build()
-        dw_bound.bind("filled", filled)
+        dw_bound.bind("filled", filled_eps)
         dw_bound.bind("dirs", dirs)
         dw_bound.bind("mfd_w", mfd_w)
         dw_bound.bind_leaf(grid_params)
@@ -708,7 +805,11 @@ def make_graphflood(
         return GraphfloodVanillaMFD(
             make_surface=make_surface_kernel, reset_counters=reset_counters_kernel,
             reset_queued_gen=reset_queued_gen_kernel, minima_solver=minima_solver,
-            h_from_filled=h_from_filled_kernel, indegree_reset=indegree_reset_kernel,
+            h_from_filled=h_from_filled_kernel,
+            hops_init=hops_init_kernel, hops_jump_fwd=hops_jump_fwd_kernel, hops_jump_bwd=hops_jump_bwd_kernel,
+            apply_epsilon=apply_epsilon_kernel,
+            hops_rounds=hops_rounds,
+            indegree_reset=indegree_reset_kernel,
             dirs_weights=dirs_weights_kernel, indegree_count=indegree_count_kernel,
             indegree=indegree, frontier0=frontier0, count=count, barrier=barrier,
             init_frontier_mfd=init_frontier_mfd, q_init=persistent_q_init_kernel,
