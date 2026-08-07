@@ -4,10 +4,10 @@ src helpers, and the three accumulation methods ("atomic", "rake_compress",
 "pointer_jump_push"), on the new builder/frozen/bound/sequence stack
 (../core/context/builder.py, frozen.py, bound.py, sequence.py).
 
-Split out of a single _cupy_blocks.py that used to hold every flow algorithm
-- see _cupy_receivers.py/_cupy_depressions.py/_cupy_reconstruct.py for the
-others. Mirrors _closure_accum.py's build_rake_compress/build_pointer_jump_push
-step-for-step - see that module's docstring for the loop-vs-unroll design
+See _cupy_receivers.py/_cupy_depressions.py/_cupy_reconstruct.py for the
+other flow algorithms. Mirrors _closure_accum.py's build_rake_compress/
+build_pointer_jump_push step-for-step - see that module's docstring for the
+loop-vs-unroll design
 choice and the two-address pointer_jump_push ping-pong shape, both identical
 here. Every span reaching a PARAM is spelled `$ctx.NAME.get(...)$`/
 `$ctx.NAME.set_node(...)$` in full, every span reaching a composed HELPER is
@@ -80,6 +80,15 @@ def build_atomic(*, n_flat: int):
     indirection in this stack. `q` stays plain DATA (native CUDA
     `atomicAdd`, no `ctx.bk` involved - cupy keeps native C, see bk.py's own
     module docstring).
+
+    Parameters
+    ----------
+    n_flat : int
+
+    Returns
+    -------
+    dict
+        {"q_init": FrozenKernel, "accum": FrozenKernel}.
 
     Author: B.G (08/2026)
     """
@@ -166,6 +175,16 @@ def build_rake_compress(*, n_neighbours: int, logn: int, n_flat: int):
     compose(..., launch=...)) - the sequence-level `compile(backend,
     grid=..., block=...)` call the caller eventually makes supplies the
     n_flat-sized default every other step falls back to.
+
+    Parameters
+    ----------
+    n_neighbours : int
+    logn : int
+    n_flat : int
+
+    Returns
+    -------
+    tuple[SequenceBuilder, dict]
 
     Author: B.G (08/2026)
     """
@@ -381,6 +400,16 @@ def build_pointer_jump_push(*, rounds: int, n_flat: int):
     is ("step_a_copy", "step_a_core") and "step_b" is ("step_b_copy",
     "step_b_core"), both pairs referenced together in the loop body so a
     round is always copy-then-core, for both directions.
+
+    Parameters
+    ----------
+    rounds : int
+        Already rounded to even by the caller.
+    n_flat : int
+
+    Returns
+    -------
+    tuple[SequenceBuilder, dict]
 
     Author: B.G (08/2026)
     """

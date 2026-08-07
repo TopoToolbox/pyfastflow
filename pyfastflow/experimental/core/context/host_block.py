@@ -186,14 +186,23 @@ class BoundHostBlock(_Bound):
     def compile(self, backend: "str | None" = None, **kwargs) -> Any:
         """
         Resolve this block's ctx (each wired PARAM slot's bound Parameter,
-        unwrapped) and return `lambda: template(ctx)` - see the module
-        docstring's "One class for every backend" section for why `backend`
-        is accepted and ignored rather than dispatched on. Checks unmet slots
-        and legal host accessors first, and that `template`'s own signature
-        declares exactly one parameter (`ctx` - wire_data() can never have
-        wired a data argument here, so a template declaring one more is
-        always a mistake, not a valid combination this layer forgot to
-        support).
+        unwrapped) and return `lambda: template(ctx)`.
+
+        Checks unmet slots and legal host accessors first, and that
+        `template`'s own signature declares exactly one parameter (`ctx` -
+        wire_data() can never have wired a data argument here, so a
+        template declaring one more is always a mistake).
+
+        Parameters
+        ----------
+        backend : str, optional
+            Accepted and ignored - see the module docstring's "One class
+            for every backend" section for why.
+
+        Returns
+        -------
+        callable
+            Zero-argument `lambda: template(ctx)`.
 
         Author: B.G (08/2026)
         """

@@ -1,13 +1,10 @@
 """
 Taichi/Quadrants (closure) block templates behind make_accumulation: the
 ping-pong src helpers, and the three accumulation methods ("atomic",
-"rake_compress", "pointer_jump_push"), on the new builder/frozen/bound/
-sequence stack (../core/context/builder.py, frozen.py, bound.py,
-sequence.py).
-
-Split out of a single _closure_blocks.py that used to hold every flow
-algorithm - see _closure_receivers.py/_closure_depressions.py/
-_closure_reconstruct.py for the others.
+"rake_compress", "pointer_jump_push"), on the builder/frozen/bound/sequence
+stack (../core/context/builder.py, frozen.py, bound.py, sequence.py). See
+_closure_receivers.py/_closure_depressions.py/_closure_reconstruct.py for
+the other flow algorithms.
 
 `SOURCE`/`ITER` are plain wired PARAM slots (`wire_param`, any mode - const,
 scalar or field, uniformly), never a Need: a caller binds a Parameter to
@@ -48,8 +45,7 @@ distinct address per round), so unrolling would only multiply the number of
 addresses a caller has to bind (N times) for zero benefit - a SequenceBuilder
 loop keeps that count fixed regardless of round count. See
 make_accumulation's own docstring (__init__.py) for the caller-facing
-contract; this is a design choice this project's rewrite plan did not itself
-settle, flagged in the porting report.
+contract.
 
 pointer_jump_push's ping-pong is the opposite shape: the SAME
 accum_pointer_jump_push_step kernel is composed under two sequence names,
@@ -127,6 +123,18 @@ def build_atomic(*, backend: str, backend_mod, n_flat: int):
     not PARAM, the same "genuinely concurrent write" classification
     ../ops/__init__.py's Reduce already establishes for its own accumulator.
 
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -182,10 +190,22 @@ def build_rake_compress(*, backend: str, backend_mod, n_neighbours: int, logn: i
     any of them here). DATA addresses: this sequence's own {step}.{arg}
     for every kernel's own wire_data name (see each template below).
 
-    Returns (sequence_builder, kernel_builders_dict) - the dict exposes every
-    constituent FrozenKernel individually (keyed by its own name, "rake_step"
-    aliased as "rake_compress_accum" for parity with the pre-port naming),
-    for direct standalone use if ever wanted.
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    n_neighbours : int
+    logn : int
+
+    Returns
+    -------
+    tuple[SequenceBuilder, dict]
+        (sequence_builder, kernel_builders_dict) - the dict exposes every
+        constituent FrozenKernel individually (keyed by its own name,
+        "rake_step" aliased as "rake_compress_accum" for parity with the
+        pre-port naming), for direct standalone use if ever wanted.
 
     Author: B.G (08/2026)
     """
@@ -364,6 +384,19 @@ def build_pointer_jump_push(*, backend: str, backend_mod, rounds: int):
     is a sink in the current jumped graph (grandparent == parent), the node
     pushes once more and then points at itself, so it never re-pushes a
     growing sum into the sink.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    rounds : int
+        Already rounded to even by the caller.
+
+    Returns
+    -------
+    tuple[SequenceBuilder, dict]
 
     Author: B.G (08/2026)
     """

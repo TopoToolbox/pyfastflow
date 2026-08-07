@@ -1,15 +1,15 @@
 """
-Taichi/Quadrants compile phase (1c): turns a BoundKernel into a CompiledKernel
+Taichi/Quadrants compile phase: turns a BoundKernel into a CompiledKernel
 by emitting real `ti.func`/`ti.kernel` (or `qd.func`/`qd.kernel`) objects.
 Both backends share every line here - only which module `backend` points to
 differs - mirroring `_closure_backend.py`'s own Taichi/Quadrants split.
 
 The `ctx` problem and how this solves it
 -----------------------------------------
-1a/1b settled `ctx` as a template's literal first parameter - `def tmpl(ctx,
+`ctx` is a template's literal first parameter - `def tmpl(ctx,
 i): return ctx.grad(ctx.z.get(i), i)` - not a name spliced into the
-template's globals the way every earlier compile path in this package
-(`_closure_backend.py`'s `specialize_closure`) works. That distinction
+template's globals the way `_closure_backend.py`'s `specialize_closure`
+works for a Parameter's own device view. That distinction
 matters here: `ctx` being a real parameter means it is read via `LOAD_FAST`
 bytecode, not `LOAD_GLOBAL` - splicing a value into `__globals__` under the
 name `ctx`, the `specialize_closure` technique, would have **no effect at
@@ -47,9 +47,7 @@ own composition tree in lock-step with `BoundKernel`'s address tree:
     function object. A compiled closure-backend function is an ordinary
     python object and accepts arbitrary attribute assignment freely, so
     `ctx.grid` is simultaneously callable (`ctx.grid(...)`, invoking the
-    compiled func directly - matching how `compile.py`'s own
-    `_LazyBagView`/`resolve_binding` already hand a bound HelperBuilder's
-    caller the *raw* `.compiled` func, never a wrapper) and further
+    compiled func directly, never a wrapper) and further
     attribute-navigable (`ctx.grid.neighbour(...)`, since `neighbour` was
     attached onto the same object as `.grid`'s own attribute). This is built
     bottom-up: a composed helper's own children are compiled and attached
@@ -257,10 +255,19 @@ def _build_ctx_node(prefix: Address, frozen: _Frozen, bound: BoundKernel, backen
 
 def compile_kernel(bound: BoundKernel, backend: Any) -> CompiledKernel:
     """
-    Compile `bound` (a BoundKernel) against `backend` (the `taichi` or
-    `quadrants` module). Checks unmet slots and legal PARAM accessors first
-    (compile_shared.py), then builds the whole ctx tree and compiles the
-    kernel's own template as `backend.kernel(...)`.
+    Checks unmet slots and legal PARAM accessors first (compile_shared.py),
+    then builds the whole ctx tree and compiles the kernel's own template as
+    `backend.kernel(...)`.
+
+    Parameters
+    ----------
+    bound : BoundKernel
+    backend : module
+        `taichi` or `quadrants`.
+
+    Returns
+    -------
+    CompiledKernel
 
     Author: B.G (08/2026)
     """

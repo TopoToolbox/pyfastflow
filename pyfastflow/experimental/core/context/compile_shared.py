@@ -1,13 +1,14 @@
 """
-Backend-agnostic pieces of the compile phase (1c): the two checks every
+Backend-agnostic pieces of the compile phase: the two checks every
 backend's `BoundKernel.compile()` runs before emitting anything, and
 CompiledKernel - the callable every backend's compile() returns.
 
 Legal PARAM accessors
 ----------------------
-1a/1b deliberately left "does this chain spell a real accessor" unenforced -
-only the emission layer knows what a PARAM slot may legally do in device
-code, per slot.py's own module docstring. Settled here, identically on every
+The build and bind phases deliberately leave "does this chain spell a real
+accessor" unenforced - only the emission layer knows what a PARAM slot may
+legally do in device code, per slot.py's own module docstring. Settled here,
+identically on every
 backend (Taichi, Quadrants, cupy all resolve a PARAM chain the same way, so
 there is one answer, not three): a PARAM-rooted chain must be exactly
 `(name, "get")` or `(name, "set_node")` - two segments, nothing else. A bare
@@ -91,6 +92,19 @@ def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
     source string for the life of the process. An eviction only costs one
     re-parse.
 
+    Parameters
+    ----------
+    template : callable or str
+        A python def, or raw CUDA source text.
+
+    Returns
+    -------
+    source_text : str or None
+        None only if a python def had no recoverable source.
+    tree : ast.AST or None
+        None for CUDA source text, or a python def with no recoverable/
+        parseable source.
+
     Author: B.G (07/2026)
     """
     if isinstance(template, str):
@@ -108,7 +122,7 @@ def capture_template_meta(template) -> tuple[str | None, ast.AST | None]:
 
 class CompileError(Exception):
     """
-    Raised by the compile phase (1c): unmet slots, an illegal PARAM accessor,
+    Raised by the compile phase: unmet slots, an illegal PARAM accessor,
     a data-argument signature mismatch between a template and its wire_data()
     slots, or any other structural problem caught before/while emitting
     device code. Every case names the exact address (and, for accessors, the
@@ -173,9 +187,25 @@ def check_data_signature(template, declared_names: set[str]) -> list[str]:
     """
     A python template's own data-argument names, in declaration order (its
     parameters after `ctx`), validated to be exactly `declared_names` as a
-    set - not a subset, not a superset. Raises CompileError naming the
-    mismatch otherwise. The order returned is what CompiledKernel resolves
-    DATA addresses against for positional launch.
+    set - not a subset, not a superset. The order returned is what
+    CompiledKernel resolves DATA addresses against for positional launch.
+
+    Parameters
+    ----------
+    template : callable
+    declared_names : set[str]
+        The kernel's own wire_data() slot names.
+
+    Returns
+    -------
+    list[str]
+        `template`'s data-argument names, in declaration order.
+
+    Raises
+    ------
+    CompileError
+        `template`'s first parameter is not `ctx`, or its data-argument
+        names do not match `declared_names` exactly.
 
     Author: B.G (08/2026)
     """
@@ -234,9 +264,14 @@ class CompiledKernel:
         """
         Re-point DATA address `addr` at `buf` - a dict write, nothing else:
         no re-trace, no recompile, the compiled kernel itself is untouched.
-        Validates `buf`'s dtype against the slot's declared dtype
-        (wire_data(..., dtype=...)), if one was declared, the same check
-        bind() runs.
+
+        Parameters
+        ----------
+        addr : Address or str
+        buf : Any
+            Validated against the slot's declared dtype
+            (wire_data(..., dtype=...)), if one was declared - the same
+            check bind() runs.
 
         Author: B.G (08/2026)
         """

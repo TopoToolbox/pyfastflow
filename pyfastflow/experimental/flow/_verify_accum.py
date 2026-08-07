@@ -28,12 +28,10 @@ read against the scale they occur on. It also reports the receiver graph's
 maximum chain depth (root distance), computed by iterative path compression,
 so it's clear whether the graph exercised was actually deep or just wide.
 
-There is no fuse-check pass here (an earlier version of this script diffed
-a closure-backend Routine's `fused=True` vs `fused=False` compile for
-rake_compress/pointer_jump_push): both methods are now `SequenceBuilder`s
-(sequence.py) - each composed step is always a separate real kernel
-launch, there being no per-Sequence fusion mechanism the way the old
-`Routine.compile(fused=...)` had one. Nothing to diff.
+There is no fuse-check pass here: rake_compress/pointer_jump_push are
+`SequenceBuilder`s (sequence.py), where each composed step is always a
+separate real kernel launch - there is no per-Sequence fusion mechanism to
+diff against.
 
 `source` mode coverage (const/scalar/field) is exercised on taichi only, to
 prove mode-agnosticism without tripling the run time; quadrants/cupy run

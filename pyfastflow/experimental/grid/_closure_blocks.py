@@ -1,5 +1,5 @@
 """
-Taichi/Quadrants (closure) block templates behind make_grid, on the new
+Taichi/Quadrants (closure) block templates behind make_grid, on the
 builder/frozen/bound stack (core/context/builder.py, frozen.py, bound.py).
 
 Every private block below is one plain python def, first parameter `ctx`,
@@ -24,10 +24,11 @@ builder.py's module docstring: a template can only reach what is composed
 onto its own scope, never a sibling's. The same FrozenHelper object is shared
 by identity at every such composition (frozen.py), but each occurrence mints
 its own independently-bindable PARAM address once the whole tree is build()-
-ed one level up (bound.py) - a caller composing the returned group into a
-kernel must bind or wire() every one of those addresses to the grid's own
-nx/ny/dx (see make_grid's own module docstring for the exact set, and the
-Phase 2a report for why this is flagged rather than papered over here).
+ed one level up (bound.py) - `make_grid_group`'s own `share_leaf` call
+collapses these back to one address per canonical name before returning
+(see make_grid's own module docstring for the exact set); a caller working
+against this module directly, below that collapsing, would see one address
+per occurrence instead.
 
 nx/ny/dx are read exclusively through `ctx.NX.get(0)` / `ctx.NY.get(0)` /
 `ctx.DX.get(0)`, uniformly across whatever mode they end up bound to (const,
@@ -36,15 +37,10 @@ uniform across modes." This is what lets any of them be overridden to a
 runtime-modifiable mode without touching a single block template.
 
 `abs`/`min` (row_dist_periodic/col_dist_periodic) are plain python builtins,
-not a bound backend module - the old closure stack auto-injected the bound
-ti/qd module under a reserved `_BK` name for exactly this call
-(_closure_backend.py's `specialize_closure`); the new stack's
-compile_closure.py has no equivalent auto-injection (`ctx` is a template's
-literal first parameter, and nothing besides `ctx.*` chains is part of the
-grammar contract.py derives). Both Taichi and Quadrants trace plain
-`abs()`/`min()` directly inside a `ti.func`/`qd.func` body without a `ti.`/
-`qd.` prefix, so this is exercised, not merely assumed - see the Phase 2a
-verification run.
+not a bound backend module - `ctx` is a template's only injected name, and
+nothing besides `ctx.*` chains is part of the grammar contract.py derives.
+Both Taichi and Quadrants trace plain `abs()`/`min()` directly inside a
+`ti.func`/`qd.func` body without a `ti.`/`qd.` prefix.
 
 Author: B.G (08/2026)
 """

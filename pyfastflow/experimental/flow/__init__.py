@@ -36,8 +36,7 @@ slot, any mode - see rand_unit in the block modules; not build-phase-shared
 with anything, so it stays at that nested address rather than being
 promoted to the kernel's own top level the way `grid`'s own PARAM names
 are) after `.build()`, exactly like any other PARAM slot - there is no Need
-indirection in this stack (need.py is part of the pre-rewrite core only);
-the host bumps the underlying Parameter between calls for a fresh draw.
+indirection in this stack - the host bumps the underlying Parameter between calls for a fresh draw.
 
 `diagonal_partition_correction` only changes anything when `topology ==
 "D8"`: it adds the sqrt(2) correction inside dist_from_k_corrected/
@@ -78,8 +77,7 @@ builder/frozen/bound stack (see its own docstring below for the per-method
 details). `source` is bound directly, post-`.build()`, at the returned
 kernel's own `SOURCE` PARAM slot - any mode (const, scalar or field all work
 with no variant code, since every template reads `source.get(i)`) - there is
-no Need indirection anywhere in this stack (need.py is part of the
-pre-rewrite core only):
+no Need indirection anywhere in this stack:
 
     source_p = TaichiParameter("SOURCE", dtype=ti.f32, mode="const", value=1.0, pool=pool)
     accum = make_accumulation("taichi", grid, method="atomic", n_flat=n_flat)
@@ -166,21 +164,18 @@ a build-time constant), so unrolling costs nothing beyond the kernels
 themselves; here the SAME kernel body runs unchanged every round, so
 unrolling would only multiply the number of addresses a caller has to bind
 (once per round) for no benefit - a loop keeps that count fixed regardless of
-round count (`ceil(log2(n_flat))+2` rounds at 1024x1024 is ~22). This is a
-design choice this project's rewrite plan did not itself settle - flagged in
-the porting report rather than decided silently.
+round count (`ceil(log2(n_flat))+2` rounds at 1024x1024 is ~22).
 
 `n_flat` is REQUIRED for both, like `method="atomic"`'s own required `n_flat`
 - `grid` is a bare `make_grid_group` FrozenGroup with no bound Parameter
 values to read it off at build time (see ../grid/__init__.py's own module
-docstring), so there is no dict-fallback to read it from the way an
-old-stack Bag would have allowed. `rake_compress` also needs `n_neighbours`
-explicitly, for the same reason (sizing the fixed per-node donor arrays) -
-`pointer_jump_push` needs neither `grid` nor `n_neighbours` at all.
+docstring), so there is no way to read it from `grid` itself. `rake_compress`
+also needs `n_neighbours` explicitly, for the same reason (sizing the fixed
+per-node donor arrays) - `pointer_jump_push` needs neither `grid` nor
+`n_neighbours` at all.
 
-make_depressions: the depression-handling factory, on the new builder/frozen/
-bound stack, porting ../../flow/flow_reroute_kernels.py. Two orthogonal build
-flags:
+make_depressions: the depression-handling factory, on the builder/frozen/
+bound stack. Two orthogonal build flags:
 
     ndep_p = TaichiParameter("NDEP", dtype=ti.i32, mode="scalar", value=0, pool=pool)
     deps = make_depressions("taichi", grid, ndep_p, method="vanilla", reroute="carve", n_flat=n_flat)
@@ -190,8 +185,8 @@ reroute="carve", how the carve itself runs; `reroute` ("carve"|"jump") picks
 how a resolved basin's pit is reconnected to its outlet. All four
 combinations build. `depression_counter_p` is a bare caller-allocated scalar
 i32 Parameter, bound directly at the returned kernel's own `NDEP` PARAM
-slot, post-`.build()` - there is no Need indirection anywhere in this stack
-(need.py is part of the pre-rewrite core only); the underlying Parameter is
+slot, post-`.build()` - there is no Need indirection anywhere in this stack;
+the underlying Parameter is
 not built here, since this factory takes no pool: every scratch buffer below
 is a caller-supplied data arg, never a bound field Parameter.
 
@@ -275,13 +270,11 @@ make_fill_reconstruct/make_fill_reconstruct_solver: a standalone alternative
 to make_depressions/make_depression_solver, not a `method` of it - grayscale
 morphological reconstruction against elevation, converging `filled`/`parent`
 (the receiver graph) directly with no basin ids, saddle search or outlet
-routing at all. Ported from
-../../../experimental/LM/fill_reconstruct_optimised.py; see that pair's own
-docstrings and the block modules' section notes above build_fill_reconstruct_*
-for the algorithm, the combined-buffer frontier ping-pong a Sequence's
-fixed-at-compile-time data handles require, and the two closure-backend
-substitutions (no 3-arg `range()`, `atomic_max` standing in for `atomicExch`)
-verified before use.
+routing at all. See that pair's own docstrings and the block modules'
+section notes above build_fill_reconstruct_* for the algorithm, the
+combined-buffer frontier ping-pong a Sequence's fixed-at-compile-time data
+handles require, and the two closure-backend substitutions (no 3-arg
+`range()`, `atomic_max` standing in for `atomicExch`).
 
 Author: B.G (07/2026)
 """
@@ -305,11 +298,8 @@ def _blocks_for(backend: str, section: str):
     for one backend name - e.g. ("cupy", "depressions") -> _cupy_depressions.
 
     `section` is one of "receivers", "accum", "depressions", "reconstruct" -
-    each has its own {_cupy,_closure}_<section>.py module
-    (see those modules' own docstrings for why: flow used to keep every
-    algorithm's blocks in one _cupy_blocks.py/_closure_blocks.py pair, split
-    apart per algorithm since none of them share device code with each
-    other).
+    each has its own {_cupy,_closure}_<section>.py module, kept separate
+    since none of them share device code with each other.
 
     Author: B.G (07/2026)
     """
@@ -341,6 +331,32 @@ def make_receivers(
     `mode` "steepest"|"stochastic" picks the kernel body variant.
     `diagonal_partition_correction`, `h_aware` and `topology` are documented
     in the module docstring.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    grid : FrozenGroup
+        Grid structure this composes.
+    topology : str, optional
+        "D4" or "D8" (default).
+    mode : str, optional
+        "steepest" (default) or "stochastic".
+    diagonal_partition_correction : bool, optional
+        See the module docstring.
+    h_aware : bool, optional
+        See the module docstring.
+
+    Returns
+    -------
+    dict
+        {"receivers": FrozenKernel, ...distance/slope FrozenHelpers, and
+        "rand_unit" when mode="stochastic"}.
+
+    Raises
+    ------
+    ValueError
+        If `mode` or `topology` is not a recognised value.
 
     Author: B.G (08/2026)
     """
@@ -391,13 +407,12 @@ def make_accumulation(
     Build one accumulation structure for `method`
     "atomic"|"rake_compress"|"pointer_jump_push"|"persistent_mfd".
 
-    method="atomic" (ported to the new builder/frozen/bound stack, ../core/
-    context/builder.py/frozen.py/bound.py): `grid` is unused (atomic reads no
-    grid at all - it only walks `rec`) and `source` is ignored; `n_flat` is
-    REQUIRED (there is no bare-FrozenGroup equivalent of the old `grid.nx.
-    get() * grid.ny.get()` fallback - a `make_grid_group` result carries no
-    Parameter values to read at build time - see ../grid/__init__.py's own
-    module docstring on the structure/data split). Returns
+    method="atomic" (../core/context/builder.py/frozen.py/bound.py):
+    `grid` is unused (atomic reads no grid at all - it only walks `rec`) and
+    `source` is ignored; `n_flat` is REQUIRED - a `make_grid_group` result
+    carries no Parameter values to read `nx`/`ny` from at build time (see
+    ../grid/__init__.py's own module docstring on the structure/data
+    split), so there is no way to compute it from `grid`. Returns
     {"accum": FrozenKernel} on Taichi/Quadrants (data args (rec, q); `SOURCE`
     is this kernel's own wired PARAM slot, bound after `.build()` like any
     other) or {"q_init": FrozenKernel, "accum": FrozenKernel} on cupy (see
@@ -447,6 +462,38 @@ def make_accumulation(
     `persistent_grid_block(blocks_per_sm=blocks_per_sm, threads=threads)`'s
     fixed (grid, block), not n_flat-sized). `fr_stage`/`blocks_per_sm`/
     `threads` are only used by this method.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    grid : FrozenGroup
+        Unused except by method="persistent_mfd" (composes `grid.neighbour_raw`).
+    source : optional
+        Unused - accepted only for call-site parity across methods.
+    method : str, optional
+        "atomic", "rake_compress" (default), "pointer_jump_push" or
+        "persistent_mfd".
+    n_flat : int, optional
+        Required for every method.
+    n_neighbours : int, optional
+        Required for method="rake_compress" and "persistent_mfd".
+    iteration_p : optional
+        Unused - accepted only for call-site parity across methods.
+    fr_stage, blocks_per_sm, threads : optional
+        Used only by method="persistent_mfd".
+
+    Returns
+    -------
+    dict or Bag
+        Structure depends on `method` - see above.
+
+    Raises
+    ------
+    ValueError
+        If `method` is unrecognised, `n_flat`/`n_neighbours` is required and
+        missing, or `method="persistent_mfd"` is requested on a non-cupy
+        backend.
 
     Author: B.G (08/2026)
     """
@@ -592,6 +639,32 @@ def make_depressions(
     This builds the routines/kernels only; running them in the
     label -> saddlesort -> reroute -> recount loop the algorithm needs is
     make_depression_solver's job, not this one's.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    grid : FrozenGroup
+        Grid structure, composed independently at each site that needs it.
+    depression_counter_p : Parameter
+        Caller-owned i32 scalar Parameter, bound to "depression_counter"'s
+        `ndep` data arg.
+    method : str, optional
+        "vanilla" (default) or "optimized".
+    reroute : str, optional
+        "carve" (default) or "jump".
+    n_flat : int
+        Required explicitly - see above.
+
+    Returns
+    -------
+    dict
+        Keys documented above.
+
+    Raises
+    ------
+    ValueError
+        If `method` or `reroute` is not a recognised value.
 
     Author: B.G (08/2026)
     """
@@ -793,9 +866,38 @@ def make_depression_solver(
     KernelBuilder in `deps` was itself already built against this same
     `n_flat`, see make_depressions).
 
-    Returns the compiled Sequence. It takes no arguments, holds the buffers
-    given here for its whole life, and reports the passes it took in
-    `last_trip_counts[0]` (the loop is this sequence's only loop entry).
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    deps : dict
+        A make_depressions() result.
+    grid_params : dict
+        The make_grid_parameters() dict backing the same grid.
+    method : str, optional
+        Must match what `deps` was built with.
+    reroute : str, optional
+        Must match what `deps` was built with.
+    rec, z, bid, rec_jump, z_prime, is_border, basin_saddle,
+    basin_saddlenode, outlet : DataHandle
+        Required in every combination - see above.
+    rerouted, tag, tag_alt, rec_scratch : DataHandle, optional
+        Required for some `method`/`reroute` combinations - see above.
+    n_flat : int
+        Required - sets cupy's launch dimensions.
+    block_size : int, optional
+        cupy CUDA block size (default 256); unused on taichi/quadrants.
+
+    Returns
+    -------
+    CompiledSequence
+        Takes no arguments; reports passes taken in `last_trip_counts[0]`.
+
+    Raises
+    ------
+    ValueError
+        If `method`/`reroute` is unrecognised, or a required buffer is
+        missing for the given combination.
 
     Author: B.G (08/2026)
     """
@@ -911,12 +1013,9 @@ def make_depression_solver(
 # to make_depressions/make_depression_solver, not a variant of it: no basin
 # ids, no saddle search, no outlet routing - one frontier-relaxation kernel
 # converging `filled`/`parent` (the receiver graph) directly to a fixed
-# point. Ported from experimental/LM/fill_reconstruct_optimised.py - see
-# that file's module docstring for the algorithm's derivation and every
-# optimisation round it documents, and _cupy_reconstruct.py's/
-# _closure_reconstruct.py's own section notes above build_fill_reconstruct_*
-# for what changed to make it fit this framework's Sequence-driven,
-# data-args-fixed-at-compile-time shape.
+# point. See _cupy_reconstruct.py's/_closure_reconstruct.py's own section
+# notes above build_fill_reconstruct_* for the algorithm and for this
+# framework's Sequence-driven, data-args-fixed-at-compile-time shape.
 # ---------------------------------------------------------------------------
 
 
@@ -944,6 +1043,22 @@ def make_fill_reconstruct(
     `nx`/`ny` are explicit, required build-time python ints - the row-
     length/row-count split the sweep kernels need is not derivable from a
     bare FrozenGroup (which carries no bound values); n_flat is `nx * ny`.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    grid : FrozenGroup
+        Grid structure, composed independently by `init_filled`/`relax`.
+    nx, ny : int
+        Grid dimensions.
+
+    Returns
+    -------
+    dict
+        {"init_filled": ..., "sweep_row_lr": ..., "sweep_row_rl": ...,
+        "sweep_col_tb": ..., "sweep_col_bt": ..., "frontier_init": ...,
+        "relax": ...}, all FrozenKernels.
 
     Author: B.G (08/2026)
     """
@@ -1037,11 +1152,36 @@ def make_fill_reconstruct_solver(
     measured ~0.6x that ratio in
     experimental/LM/fill_reconstruct_optimised.py.
 
-    `grid_params` is unused here (relax's own `grid` PARAM addresses are
-    bound directly below via `_bind_grid_everywhere`) - accepted for call-site
-    parity with make_depression_solver.
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    deps : dict
+        A make_fill_reconstruct() result.
+    grid_params : dict
+        Unused - accepted for call-site parity with make_depression_solver
+        (relax's own `grid` PARAM addresses are bound directly via
+        `_bind_grid_everywhere`).
+    z, filled, parent, frontier, counters, queued_gen : DataHandle
+        Required buffers - see above for shapes and caller-side init needs.
+    pass_p, active_p : Parameter
+        Required caller-allocated scalar i32 Parameters - see above.
+    n_flat, nx, ny : int
+        Required.
+    block_size : int, optional
+        cupy CUDA block size (default 256); unused on taichi/quadrants.
+    max_passes : int, optional
+        Defaults to `4 * max(nx, ny)`.
 
-    Returns the compiled Sequence. It takes no arguments.
+    Returns
+    -------
+    CompiledSequence
+        Takes no arguments.
+
+    Raises
+    ------
+    ValueError
+        If a required buffer/Parameter is missing.
 
     Author: B.G (08/2026)
     """

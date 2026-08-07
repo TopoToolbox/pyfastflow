@@ -58,13 +58,9 @@ ingest() returns a frozen, immutable FrozenKernel/FrozenHelper and freezes
 the builder itself in the same call - every wire_*/compose/ingest afterwards
 raises FrozenBuilderError. A builder is therefore used once, start to finish;
 build a new one for a different template rather than trying to reuse an
-ingested one. This is a deliberate choice this design left open (see the
-Phase-1a report): nothing forces "one builder, one ingest" as opposed to
-letting a builder be re-ingested with a different template against the same
-wired slots, but a builder holding live, still-mutable slot state after
-having already handed out one frozen, immutable result reads as exactly the
-kind of aliasing hazard the frozen/mutable split exists to rule out, so this
-implementation closes it off entirely instead.
+ingested one: a builder holding live, still-mutable slot state after having
+already handed out one frozen, immutable result would be exactly the kind
+of aliasing hazard the frozen/mutable split exists to rule out.
 
 Author: B.G (08/2026)
 """
@@ -134,10 +130,20 @@ class _Builder:
         `ctx.{name}.get(...)` / `ctx.{name}.set_node(...)`, uniformly across
         whatever mode the Parameter eventually bound to it has (see slot.py's
         module docstring). Deliberately generic - a slot declares a place to
-        plug in a Parameter (parameter.py) later (1b), not a shape; nothing
+        plug in a Parameter (parameter.py) later, not a shape; nothing
         here constrains mode or dtype, which is the entire point of a
         Parameter being able to move between const/scalar/field without
         touching a template.
+
+        Parameters
+        ----------
+        name : str
+            Slot name.
+
+        Returns
+        -------
+        _Builder
+            self, for chaining.
 
         Author: B.G (08/2026)
         """
@@ -150,6 +156,16 @@ class _Builder:
         same name - see the module docstring and compose()'s own docstring
         for why compose() (and only compose()) may target an already-wired
         HELPER slot.
+
+        Parameters
+        ----------
+        name : str
+            Slot name.
+
+        Returns
+        -------
+        _Builder
+            self, for chaining.
 
         Author: B.G (08/2026)
         """
@@ -164,9 +180,18 @@ class _Builder:
         device-only and takes data only as its caller's own trusted
         argument, never as a declared slot of its own.
 
-        `dtype`, optional, declares this slot's data-argument contract -
-        checked later (1b/1c) against whatever value is actually bound or
-        passed. Left as None, the slot stays open to any dtype.
+        Parameters
+        ----------
+        name : str
+        dtype : optional
+            Declares this slot's data-argument contract, checked later at
+            bind/compile time against whatever value is actually bound or
+            passed. Left as None, the slot stays open to any dtype.
+
+        Returns
+        -------
+        _Builder
+            self, for chaining.
 
         Author: B.G (08/2026)
         """
@@ -200,10 +225,32 @@ class _Builder:
         THIS compose site, re-minting each as its own independently-bindable
         address instead of collapsing into its shared canonical - see the
         module docstring and bound.py's module docstring for the full
-        mechanism. Every path given must already be one of `frozen.shared`'s
-        own declared relative paths - raises, naming it, otherwise. `split`
-        on a `frozen` that is not a FrozenGroup, or carries no `.shared`
-        entries at all, raises: there is nothing to split.
+        mechanism.
+
+        Parameters
+        ----------
+        name : str
+            Slot name to compose `frozen` under.
+        frozen : FrozenHelper or FrozenGroup
+            Already-frozen sub-structure to attach.
+        split : list[str], optional
+            Dotted relative paths to opt back out of `frozen`'s build-phase
+            sharing at this compose site.
+
+        Returns
+        -------
+        _Builder
+            self, for chaining.
+
+        Raises
+        ------
+        TypeError
+            If `frozen` is not a `_Frozen`, or is a FrozenKernel.
+        SlotGroupError
+            If `name` is reserved, already composed, already wired as a
+            non-HELPER slot, or `split` names a path not in
+            `frozen.shared`, or `split` is given for a `frozen` with no
+            shared paths at all.
 
         Author: B.G (08/2026)
         """
@@ -288,11 +335,28 @@ class _Builder:
         `.shared` is consulted exactly as a FrozenGroup's is (see bound.py's
         module docstring).
 
-        Raises if `canonical` is not a PARAM slot wired on this builder, if a
-        path does not resolve (through this builder's already-composed
-        children) to a real PARAM slot, or if a path is already declared
-        shared under a different (or the same) canonical - each relative
-        path may be shared at most once.
+        Parameters
+        ----------
+        canonical : str
+            PARAM slot, already wire_param()'d on this builder, that the
+            given `paths` collapse into.
+        *paths : str
+            Dotted relative addresses into this builder's own composed
+            subtree, each naming a PARAM slot to share with `canonical`.
+
+        Returns
+        -------
+        _Builder
+            self, for chaining.
+
+        Raises
+        ------
+        SlotGroupError
+            If `canonical` is not a PARAM slot wired on this builder, if a
+            path does not resolve (through this builder's already-composed
+            children) to a real PARAM slot, or if a path is already declared
+            shared under a different (or the same) canonical - each relative
+            path may be shared at most once.
 
         Author: B.G (08/2026)
         """
@@ -408,6 +472,21 @@ class HelperBuilder(_Builder):
         (see the module docstring), freeze this builder, and return the
         resulting FrozenHelper.
 
+        Parameters
+        ----------
+        template : Any
+            A python def (closure backends) or CUDA source text (cupy).
+
+        Returns
+        -------
+        FrozenHelper
+
+        Raises
+        ------
+        ContractError
+            If a chain `template` requires has no matching slot/composed
+            root.
+
         Author: B.G (08/2026)
         """
         self._check_mutable()
@@ -429,6 +508,21 @@ class KernelBuilder(_Builder):
         Close out the build phase: derive and check `template`'s contract
         (see the module docstring), freeze this builder, and return the
         resulting FrozenKernel.
+
+        Parameters
+        ----------
+        template : Any
+            A python def (closure backends) or CUDA source text (cupy).
+
+        Returns
+        -------
+        FrozenKernel
+
+        Raises
+        ------
+        ContractError
+            If a chain `template` requires has no matching slot/composed
+            root.
 
         Author: B.G (08/2026)
         """
@@ -485,6 +579,10 @@ class GroupBuilder(_Builder):
         template to check it against at this phase, but still enforced one
         phase later.
 
+        Returns
+        -------
+        FrozenGroup
+
         Author: B.G (08/2026)
         """
         self._check_mutable()
@@ -508,6 +606,21 @@ def find_param_paths(frozen: "_Frozen", leaf_name: str, prefix: tuple = ()) -> l
     docstring ("Build-phase sharing collapses the duplicate addresses") for
     why this exists.
 
+    Parameters
+    ----------
+    frozen : _Frozen
+        Sub-structure to search.
+    leaf_name : str
+        PARAM slot name to find.
+    prefix : tuple, optional
+        Path segments prepended to every result; used internally for
+        recursion.
+
+    Returns
+    -------
+    list[str]
+        Dotted relative paths to every occurrence of `leaf_name`.
+
     Author: B.G (08/2026)
     """
     paths = []
@@ -526,6 +639,14 @@ def share_leaf(group: "GroupBuilder", canonical: str) -> None:
     the subtree (e.g. OUTLET_MASK when no block happens to reference it under
     the current config) - share() itself requires at least one path, so this
     only calls it when there is something to share.
+
+    Parameters
+    ----------
+    group : GroupBuilder
+        Builder whose own `canonical` PARAM slot every found occurrence
+        collapses into.
+    canonical : str
+        PARAM slot name to search for and share.
 
     Author: B.G (08/2026)
     """

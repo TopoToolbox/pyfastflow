@@ -1,80 +1,54 @@
 """
-RoutineBuilder / FrozenRoutine / BoundRoutine / CompiledRoutine: the same
-build -> freeze -> bind -> compile lifecycle a kernel goes through (builder.py
-/frozen.py/bound.py), one level up - an ordered, device-only sequence of
-already-built kernels, sharing one address space, launched back to back as
-one unit.
+An ordered, device-only sequence of already-built kernels that share one
+address space and launch back to back as a single unit.
 
-Named `routine` (not `routine`) only because `routine.py` already names
-the pre-1d implementation this replaces, which stays in the tree untouched
-until Phase 3 deletes it - see the Phase 1d report for this naming fork.
+`RoutineBuilder` / `FrozenRoutine` / `BoundRoutine` / `CompiledRoutine` follow
+the same build -> freeze -> bind -> compile lifecycle as a single kernel
+(see builder.py, frozen.py, bound.py), one level up.
 
-Composition, not registration
--------------------------------
-`compose(name, frozen_kernel)` is this module's only way to add a step: it
-both names the step (an explicit handle, never a positional `step0` - see
-builder.py's compose() for the same rule one level down) and fixes its
-position in launch order, which is insertion order. There is no separate
-"declare a step" call followed by a separate "now order it" call - the two
-are the same call, so a routine's execution order is always exactly its own
-composition order, readable straight off `FrozenRoutine.order`.
+Composing steps
+----------------
+`compose(name, frozen_kernel)` appends a step: `name` is its address prefix
+and its position in launch order is its position in composition order - there
+is no separate ordering call. `FrozenRoutine.order` reads back exactly the
+sequence `compose()` was called in.
 
-Composing the *same* FrozenKernel object under two different step names
-(`rb.compose("diffuse1", diffuse).compose("diffuse2", diffuse)`) is how a
-kernel runs twice in one routine with independently-bound data at each
-occurrence - the routine-level extension of the instancing property
-frozen.py's module docstring describes for a helper composed into eighty
-kernels: one FrozenKernel, two addresses (`diffuse1.*`, `diffuse2.*`), two
-independently bindable slot sets, and - after compile() - two independent
-CompiledKernel launches. This is also what replaces the old routine.py's
-add_swap: instead of relabelling one shared data name between two launches of
-one compiled kernel, two separate step names each hold their own DATA
-address, bound to whichever buffer that occurrence needs.
+Composing the same `FrozenKernel` under two step names runs it twice with
+independently bound data at each occurrence:
 
-compose() rejects a FrozenHelper (a helper has no standalone launch - compose
-it into a KernelBuilder first, then compose that kernel's FrozenKernel here)
-and anything that is not a FrozenKernel.
+    rb.compose("diffuse1", diffuse).compose("diffuse2", diffuse)
+
+gives two addresses (`diffuse1.*`, `diffuse2.*`), two independently bindable
+slot sets, and two independent `CompiledKernel` launches after `compile()`.
+
+`compose()` rejects a `FrozenHelper` - a helper has no standalone launch.
+Compose it into a `KernelBuilder` first, then compose that kernel here.
 
 Addressing
 -----------
-`build()` walks every composed step's own composition tree via bound.py's
-`_walk`, prefixed with that step's own name - `flux.grad.z` names the `z`
-PARAM slot of the `grad` helper composed inside the kernel composed under
-`flux`, exactly the nesting a kernel's own address tree already has, with one
-more level of handle name in front of it. No separate bookkeeping: the
-address table is derived fresh, every `build()` call, straight from what each
-composed FrozenKernel's own `.build()` would mint on its own - see bound.py's
-module docstring for why that is exactly the instancing guarantee this relies
-on.
+`build()` walks each step's own composition tree, prefixed with that step's
+name: `flux.grad.z` names the `z` PARAM slot of the `grad` helper composed
+inside the kernel composed under `flux`.
 
 Compiling
 ----------
 `BoundRoutine.compile(backend, **kwargs)` checks this routine's own unmet
-slots first (routine-level addresses, not a per-step address a caller would
-have to map back), then, per step in order: builds a *fresh* BoundKernel from
-that step's own FrozenKernel, copies in whatever this BoundRoutine currently
-holds at each of that step's local addresses (routine address `name.*` ->
-step-local address `*`), and calls that BoundKernel's own `.compile(backend,
-**step_kwargs)` - reusing compile_closure.py/compile_cupy.py entirely
-unchanged. The result is one CompiledRoutine wrapping the steps' own
-CompiledKernels, in order.
+slots, then per step: builds a fresh `BoundKernel` from that step's
+`FrozenKernel`, copies over whatever is bound at that step's addresses
+(`name.*` -> the step's own local addresses), and compiles it. The result is
+a `CompiledRoutine` wrapping each step's `CompiledKernel`, in order.
 
 Per-step launch config
 ------------------------
-`compose(name, frozen_kernel, launch=None)` accepts an optional dict of
-compile()-kwargs (cupy's `grid=`/`block=`, in practice) that apply to this
-step only - the obvious case being `ops`' scan kernels, which need a
-different launch shape than whatever else shares a routine. `step_kwargs`
-above is `{**kwargs, **launch}` - the routine-level `compile(backend,
-**kwargs)` call is the default every step falls back to, `launch` overrides
-it key by key for that one step. A step composed with no `launch` uses the
-routine-level default outright.
+`compose(name, frozen_kernel, launch=None)` takes an optional dict of
+compile()-kwargs (cupy's `grid=`/`block=`) applied to that step only,
+overriding the routine-level `compile(backend, **kwargs)` defaults key by
+key - e.g. `ops`' scan kernels, which need a different launch shape than
+the rest of a routine they share with.
 
-`CompiledRoutine.swap(addr, buf)` routes `name.*` to the matching step's own
-CompiledKernel.swap() - a dict write on that step alone, exactly as free as
-CompiledKernel.swap() itself (compile_shared.py). Calling a CompiledRoutine
-launches every step in order, each with whatever its own swap() state
-currently holds.
+`CompiledRoutine.swap(addr, buf)` routes `name.*` to that step's own
+`CompiledKernel.swap()`. Calling a `CompiledRoutine` launches every step in
+order, each with whatever its own `swap()` state currently holds.
 
 Author: B.G (08/2026)
 """
@@ -126,13 +100,17 @@ class RoutineBuilder:
     def compose(self, name: str, frozen_kernel: FrozenKernel, *, launch: "dict | None" = None) -> "RoutineBuilder":
         """
         Append a step named `name`, launching `frozen_kernel` at this
-        position in the routine's launch order (= composition order). See
-        the module docstring for the FrozenHelper rejection and the
-        same-kernel-twice-under-two-names instancing pattern.
+        position in the routine's launch order.
 
-        `launch`, optional, is a dict of compile()-kwargs (cupy's `grid=`/
-        `block=`) that override the routine-level default for this step
-        only - see the module docstring's "Per-step launch config" section.
+        Parameters
+        ----------
+        name : str
+            Address prefix for this step. Must be unique within the routine.
+        frozen_kernel : FrozenKernel
+        launch : dict, optional
+            compile()-kwargs (cupy's `grid=`/`block=`) applied to this step
+            only, overriding the routine-level default. See the module
+            docstring's "Per-step launch config" section.
 
         Author: B.G (08/2026)
         """
@@ -154,9 +132,13 @@ class RoutineBuilder:
 
     def freeze(self) -> "FrozenRoutine":
         """
-        Close out the build phase: freeze this builder and return the
-        resulting FrozenRoutine. Raises if no step was ever composed - an
-        empty routine has nothing to launch.
+        Close out the build phase and return the resulting FrozenRoutine.
+
+        Raises
+        ------
+        RoutineBuilderError
+            No step was ever composed - an empty routine has nothing to
+            launch.
 
         Author: B.G (08/2026)
         """
@@ -204,16 +186,13 @@ class FrozenRoutine:
 
     def build(self) -> "BoundRoutine":
         """
-        Walk every step's own composition tree (bound.py's `_walk`, prefixed
-        with that step's own name) and return a fresh BoundRoutine. See the
-        module docstring's "Addressing" section.
+        Return a fresh BoundRoutine with every step's addresses walked and
+        prefixed by that step's name. See the module docstring's
+        "Addressing" section.
 
-        A step's own `.shared` (`_Builder.share()`, builder.py) is honoured
-        exactly as bound.py's own top-level `build()` honours it for a
-        standalone FrozenKernel - dispatching to `_walk_group` rather than
-        plain `_walk` - so a step composed with its own share() declarations
-        collapses identically whether it is built standalone or as one step
-        of a routine.
+        A step's own `share()` declarations (builder.py) are honoured the
+        same way whether the step is built standalone or as part of a
+        routine.
 
         Author: B.G (08/2026)
         """
@@ -242,7 +221,16 @@ class BoundRoutine(_Bound):
 
     def compile(self, backend: str, **kwargs) -> "CompiledRoutine":
         """
-        See the module docstring's "Compiling" section.
+        Compile every step and return the resulting CompiledRoutine. See
+        the module docstring's "Compiling" section.
+
+        Parameters
+        ----------
+        backend : str
+            "taichi", "quadrants" or "cupy".
+        **kwargs
+            Routine-level compile()-kwargs, the default every step falls
+            back to unless overridden by its own `launch=`.
 
         Author: B.G (08/2026)
         """
@@ -281,9 +269,14 @@ class CompiledRoutine:
 
     def swap(self, addr: "Address | str", buf: Any) -> "CompiledRoutine":
         """
-        Re-point one step's DATA address at `buf` - routes `name.*` to that
-        step's own CompiledKernel.swap(), a dict write on that step alone.
-        See the module docstring.
+        Re-point one step's DATA address at `buf`.
+
+        Parameters
+        ----------
+        addr : Address or str
+            `name.*`, routed to step `name`'s own CompiledKernel.swap().
+        buf : Any
+            Replacement buffer.
 
         Author: B.G (08/2026)
         """

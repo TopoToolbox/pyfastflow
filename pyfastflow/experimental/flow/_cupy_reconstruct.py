@@ -1,13 +1,13 @@
 """
 cupy (CUDA source) block templates behind make_fill_reconstruct/
 make_fill_reconstruct_solver - grayscale morphological reconstruction
-against elevation, on the new builder/frozen/bound stack (../core/context/
-builder.py, frozen.py, bound.py) - ported from
+against elevation, on the builder/frozen/bound stack (../core/context/
+builder.py, frozen.py, bound.py). Based on
 experimental/LM/fill_reconstruct_optimised.py's Round 4/5.
 
-Split out of a single _cupy_blocks.py that used to hold every flow algorithm
-- see _cupy_receivers.py/_cupy_accum.py/_cupy_depressions.py for the others.
-See that script's module docstring for the full derivation of the
+See _cupy_receivers.py/_cupy_accum.py/_cupy_depressions.py for the other
+flow algorithms. See fill_reconstruct_optimised.py's module docstring for
+the full derivation of the
 direct-elevation-space formulation (filled[i] = max(z[i], min over
 neighbours filled), decreasing from a +inf interior sentinel to a fixed
 point) and of every optimisation below (queued_gen dedup instead of a
@@ -48,6 +48,15 @@ def build_fill_reconstruct_init(*, grid, n_flat: int):
     convention); elsewhere filled[i] = +inf sentinel, parent[i] = -1 (never
     yet claimed). Composes its own `grid` occurrence.
 
+    Parameters
+    ----------
+    grid : FrozenGroup
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     t = f"pfi{new_uid()}"
@@ -78,6 +87,16 @@ def build_fill_reconstruct_sweeps(*, nx: int, ny: int):
     sweep per direction, one thread per row/column walking it serially - no
     atomics needed, since distinct rows/columns never touch the same cell.
     Keyed "row_lr", "row_rl", "col_tb", "col_bt".
+
+    Parameters
+    ----------
+    nx, ny : int
+
+    Returns
+    -------
+    dict
+        {"row_lr": ..., "row_rl": ..., "col_tb": ..., "col_bt": ...}, all
+        KernelBuilders.
 
     Author: B.G (08/2026)
     """
@@ -166,6 +185,14 @@ def build_fill_reconstruct_frontier_init(*, n_flat: int):
     into `frontier`'s first half (indices [0, n_flat)) and counted into
     `counters[0]`.
 
+    Parameters
+    ----------
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     t = f"pff{new_uid()}"
@@ -214,6 +241,15 @@ def build_fill_reconstruct_relax(*, grid, n_flat: int):
     returns to know whether the next pass has any work
     (make_fill_reconstruct_solver's early-stop `until`). The caller must
     reset it to 0 (`.set(0)`) before each launch, same as `ndep`.
+
+    Parameters
+    ----------
+    grid : FrozenGroup
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
 
     Author: B.G (08/2026)
     """

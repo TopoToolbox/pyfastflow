@@ -1,9 +1,9 @@
 """
-Small device-op factories built on the new builder/frozen/bound stack
+Small device-op factories built on the builder/frozen/bound stack
 (../core/context/builder.py, frozen.py, bound.py; see parameter.py for
-Parameter, unchanged) - bit packing, missing math, generic flat-buffer
-kernels, a grid-aware slope helper, a parallel inclusive scan / stream
-compaction, plain reductions, and (cupy only) a cub::BlockReduce wrapper.
+Parameter) - bit packing, missing math, generic flat-buffer kernels, a
+grid-aware slope helper, a parallel inclusive scan / stream compaction,
+plain reductions, and (cupy only) a cub::BlockReduce wrapper.
 
 Four shapes, mirroring grid/noise/visu's own split
 -------------------------------------------------------
@@ -16,14 +16,14 @@ just with an empty data half for every one of these (none of the four owns
 any Parameter). `make_elementwise` is the kernel-builder shape: a
 dict[str, FrozenKernel], unbuilt - a caller `.build()`s the member it wants,
 binds its DATA addresses, `.compile()`s. `make_scan`/`make_reduce` are
-host-orchestrated, like the old stack: each returns a plain python object
-(Scan/Reduce) wrapping one or more compiled kernels/routines plus
-device-side 0-d scalar Parameters for their results - not representable as a
-single composable structure, since calling them runs a short host-side
-sequence. Unlike the helper-group factories, `make_scan`/`make_reduce` DO
-take a `pool` and hand Parameters back to the caller - deliberately, and
-deliberately unlike `flow/`'s factories (which take no pool at all): see the
-Phase 2b brief for why this split holds.
+host-orchestrated: each returns a plain python object (Scan/Reduce)
+wrapping one or more compiled kernels/routines plus device-side 0-d scalar
+Parameters for their results - not representable as a single composable
+structure, since calling them runs a short host-side sequence. Unlike the
+helper-group factories, `make_scan`/`make_reduce` DO take a `pool` and hand
+Parameters back to the caller, unlike `flow/`'s factories (which take no
+pool at all): a scan/reduce result is a value the caller consumes, not
+scratch state the caller already owns.
 
 `make_slope_group` is this pass's first nested-FrozenGroup-in-FrozenGroup
 case within `ops/` itself (mirroring visu's own hillshade gradient blocks,
@@ -69,42 +69,20 @@ straight into that kernel's own DATA slot, no Parameter indirection either
 side. See _closure_blocks.py's own module docstring for the fuller reasoning
 on why atomic accumulation forces DATA over PARAM in the first place.
 
-Scan's cupy compaction: a genuine per-step `launch=` user
--------------------------------------------------------------
-`.inclusive()` on cupy stays `cp.cumsum` (CUB's own DeviceScan is already the
-accelerator cupy dispatches to by default on this build). Compaction's
-count-read and scatter - previously a host-side numpy slice-copy plus one
-directly-launched kernel - are now a 2-step FrozenRoutine (routine.py):
-"read_count" (1 thread) then "scatter" (ceil(n/block) blocks), each composed
-with its own `launch=` override sized to its own real thread count - see
-_cupy_blocks.build_count_and_scatter_routine's own docstring. This is a
-resolved design fork, flagged rather than chosen silently: the coordinating
-brief calls out routine.py's per-step `launch=` as needing to be
-"exercised" by scan, but scan's only genuinely multi-kernel pipeline
-(Blelloch up-sweep/down-sweep) lives on Taichi/Quadrants, where
-compile_closure.compile_kernel takes no extra kwargs at all - there is
-nothing for a non-empty `launch=` to override there. cupy is the only
-backend where launch dims mean anything, and cupy's own multi-kernel
-surface, before this port, was two kernels total (count-read via a numpy
-slice, one scatter launch) - reading the brief as asking for BOTH "multi-
-kernel" and "meaningfully different launch=" on the SAME routine would mean
-reimplementing the whole Blelloch tree in CUDA text for cupy too, which
-directly contradicts this package's own settled reasoning for using
-`cp.cumsum` (CUB) there in the first place - exactly the kind of silent
-downgrade-to-dodge-a-collision the brief warns against, just inverted (here
-it would be an unrequested *addition* of reimplemented work to manufacture a
-"multi-kernel" routine that already has a perfectly good accelerator). This
-port instead promotes the count-read (previously a bare numpy slice) into a
-real 1-thread kernel and routes both steps through a real, 2-step
-FrozenRoutine with two genuinely different, non-trivial launch shapes - a
-smaller-scale but literal exercise of the mechanism, without touching
-`.inclusive()`'s accelerator path. One consequence: scatter now always
-launches on cupy, even when `count == 0` (Taichi/Quadrants' `compact_fn`
-still short-circuits before its own scatter launch, since those two kernels
-are NOT bundled into one Routine call and can be skipped independently) - a
-harmless extra launch in the rare all-flags-zero case, not a correctness
-change. Flagged here rather than silently accepted; happy to reshape if a
-different reading of "exercise it" was intended.
+Scan's cupy compaction
+-----------------------
+`.inclusive()` on cupy stays `cp.cumsum` (CUB's own DeviceScan is already
+the accelerator cupy dispatches to by default on this build). Compaction's
+count-read and scatter are a 2-step FrozenRoutine (routine.py): "read_count"
+(1 thread) then "scatter" (ceil(n/block) blocks), each composed with its own
+`launch=` override sized to its own real thread count - see
+_cupy_blocks.build_count_and_scatter_routine's own docstring.
+
+One consequence: scatter always launches on cupy, even when `count == 0`
+(Taichi/Quadrants' `compact_fn` short-circuits before its own scatter
+launch, since those two kernels are not bundled into one Routine call and
+can be skipped independently) - a harmless extra launch in the all-flags-
+zero case, not a correctness difference.
 
 Author: B.G (08/2026)
 """
@@ -140,6 +118,15 @@ def make_bitpack_group(backend: str) -> "FrozenGroup":
     (`kb.compose("bitpack", group)`, `ctx.bitpack.pack(f, i)`). No PARAM
     slots - see this module's own docstring.
 
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+
+    Returns
+    -------
+    FrozenGroup
+
     Author: B.G (08/2026)
     """
     return _blocks_for(backend).build_bitpack_group()
@@ -150,6 +137,15 @@ def make_math_group(backend: str) -> "FrozenGroup":
     atan(x) and nextafter(x, y) (f32), filling in for the two functions
     Taichi/Quadrants/CUDA device code has no direct equivalent for - composed
     by name (`ctx.math.atan(x)`, `ctx.math.nextafter(x, y)`). No PARAM slots.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+
+    Returns
+    -------
+    FrozenGroup
 
     Author: B.G (08/2026)
     """
@@ -169,6 +165,25 @@ def make_elementwise(backend: str, *, n: "int | None" = None) -> dict:
     build time - see _cupy_blocks.build_elementwise) and ignored on Taichi/
     Quadrants (whose `for i in array` ranges over the buffer's own runtime
     shape, needing no baked length at all).
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    n : int, optional
+        Buffer length, required on cupy.
+
+    Returns
+    -------
+    dict
+        {"swap": ..., "add_B_to_A": ..., "add_B_to_weighted_A": ...,
+        "weighted_mean_B_in_A": ..., "arange": ..., "multiply_by_scalar":
+        ...}, each an unbuilt FrozenKernel.
+
+    Raises
+    ------
+    ValueError
+        On cupy, if `n` is not given.
 
     Author: B.G (08/2026)
     """
@@ -190,6 +205,17 @@ def make_slope_group(backend: str, grid: "FrozenGroup") -> "FrozenGroup":
     topology/boundary/nodata `grid` was built with - see this module's own
     docstring for the nested-FrozenGroup mechanism involved.
 
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    grid : FrozenGroup
+        Grid structure to walk (../grid's make_grid_group result).
+
+    Returns
+    -------
+    FrozenGroup
+
     Author: B.G (08/2026)
     """
     return _blocks_for(backend).build_slope_group(grid)
@@ -204,6 +230,22 @@ def make_block_reduce_group(backend: str, *, block_size: int = 128) -> "FrozenGr
     The first compile that reaches this triggers a one-time jitify header
     cache warm-up for <cub/block/block_reduce.cuh>, roughly two minutes; that
     is expected, not a hang.
+
+    Parameters
+    ----------
+    backend : str
+        Must be "cupy".
+    block_size : int, optional
+        CUDA block size, default 128.
+
+    Returns
+    -------
+    FrozenGroup
+
+    Raises
+    ------
+    ValueError
+        If `backend` is not "cupy".
 
     Author: B.G (08/2026)
     """
@@ -243,12 +285,15 @@ class Scan:
         self.count_param = count_param
 
     def inclusive(self, input_handle, output_handle) -> None:
+        """Fill `output_handle` with the inclusive prefix sum of `input_handle`."""
         self._inclusive_fn(input_handle, output_handle)
 
     def compact(self, flags_handle, ids_handle) -> int:
+        """Scatter indices where `flags_handle` is nonzero into `ids_handle[0:count]`; returns count."""
         return self._compact_fn(flags_handle, ids_handle)
 
     def count(self) -> int:
+        """Host-syncing read of the most recent `.compact()` count."""
         return int(self.count_param.read())
 
 
@@ -261,6 +306,19 @@ def make_scan(backend: str, pool, n: int) -> Scan:
     _closure_blocks.build_scan_routine. cupy: `.inclusive` is `cp.cumsum`;
     `.compact`'s count-read/scatter are a 2-step FrozenRoutine - see this
     module's own docstring and _cupy_blocks.build_count_and_scatter_routine.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    pool : Pool
+        Device-buffer pool backing scratch storage.
+    n : int
+        Buffer length.
+
+    Returns
+    -------
+    Scan
 
     Author: B.G (08/2026)
     """
@@ -381,27 +439,35 @@ class Reduce:
         self._host = host
 
     def sum(self, handle) -> None:
+        """Accumulate `handle`'s sum into `self.sum_data` (device-side, no host sync)."""
         self._run["sum"](handle)
 
     def min(self, handle) -> None:
+        """Accumulate `handle`'s min into `self.min_data` (device-side, no host sync)."""
         self._run["min"](handle)
 
     def max(self, handle) -> None:
+        """Accumulate `handle`'s max into `self.max_data` (device-side, no host sync)."""
         self._run["max"](handle)
 
     def argmin(self, handle) -> None:
+        """Accumulate `handle`'s argmin into `self.argmin_data` (device-side, no host sync)."""
         self._run["argmin"](handle)
 
     def sum_value(self) -> float:
+        """Host-syncing read of `self.sum_data`."""
         return self._host["sum"]()
 
     def min_value(self) -> float:
+        """Host-syncing read of `self.min_data`."""
         return self._host["min"]()
 
     def max_value(self) -> float:
+        """Host-syncing read of `self.max_data`."""
         return self._host["max"]()
 
     def argmin_value(self) -> int:
+        """Host-syncing read of `self.argmin_data`."""
         return self._host["argmin"]()
 
 
@@ -418,6 +484,19 @@ def make_reduce(backend: str, pool, n: int) -> Reduce:
     DataHandle from the host. See this module's own docstring for why the
     running total is a DATA argument, not a PARAM slot - and so pooled
     storage handed back bare, not wrapped in a Parameter.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    pool : Pool
+        Device-buffer pool backing the accumulator storage.
+    n : int
+        Buffer length.
+
+    Returns
+    -------
+    Reduce
 
     Author: B.G (08/2026)
     """

@@ -11,8 +11,9 @@ as a value both contribute a chain; nothing about the grammar privileges a
 call over any other use. What a chain's own trailing segment means for
 device emission - is it a required `.get`, is a bare non-call reference even
 legal - is a backend question, deliberately not decided here (see slot.py's
-module docstring on PARAM access being uniform across modes, and 1c for
-where "is this spelling legal" actually gets enforced).
+module docstring on PARAM access being uniform across modes, and the compile
+phase's `check_legal_accessors`, compile_shared.py, for where "is this
+spelling legal" actually gets enforced).
 
 extract_python_contract(template)   a python def, read by inspect.getsource +
                                      ast - STATIC ANALYSIS, the template is
@@ -108,11 +109,23 @@ class Contract:
 
         A chain `("grid", "neighbour")` requires `"neighbour"` to be among
         `provided` - the candidate's own top-level names (see frozen.py,
-        `_Frozen.provides`). Raises ContractError naming the first missing
-        member (and how many more, if any) and what the candidate provides,
-        if any chain's next segment is absent. A chain of length 1 rooted at
-        `root` (bare `ctx.root`, no further member) needs nothing from
-        `provided` - the root itself being composed is enough.
+        `_Frozen.provides`). A chain of length 1 rooted at `root` (bare
+        `ctx.root`, no further member) needs nothing from `provided` - the
+        root itself being composed is enough.
+
+        Parameters
+        ----------
+        root : str
+            The composed slot name being checked.
+        provided : set[str]
+            The candidate's own top-level PARAM/HELPER/composed names.
+
+        Raises
+        ------
+        ContractError
+            Some chain's next segment is absent from `provided` - names the
+            first missing member (and how many more, if any) and what the
+            candidate provides instead.
 
         Author: B.G (08/2026)
         """
@@ -241,6 +254,16 @@ def extract_python_contract(template: Callable) -> Contract:
     another name, or not receiving one as its first argument at all, is
     rejected here rather than silently producing an empty or wrong contract.
 
+    Parameters
+    ----------
+    template : callable
+        A plain python `def` with real, statically recoverable source.
+
+    Raises
+    ------
+    ContractError
+        Source cannot be recovered, or `ctx` is not the first parameter.
+
     Author: B.G (08/2026)
     """
     fn = _get_function_ast(template)
@@ -268,10 +291,10 @@ def extract_cupy_contract(source: str) -> Contract:
     """
     The Contract a cupy (CUDA source text) template requires, by scanning its
     already-materialised `$...$` spans for ones prefixed `ctx.` - see
-    cupy_backend.py's _SpanParser for the span mechanism this reads, and the
-    module docstring for why this needs no AST and none of the python
-    surface's restrictions: the template is a plain string by the time this
-    runs, nothing to lose sight of.
+    compile_cupy.py for the span resolver this reads, and the module
+    docstring for why this needs no AST and none of the python surface's
+    restrictions: the template is a plain string by the time this runs,
+    nothing to lose sight of.
 
     A span not prefixed `ctx.` (a bound plain value, a bare const name used
     outside any span) contributes nothing - only ctx-rooted spans are part of
@@ -280,6 +303,16 @@ def extract_cupy_contract(source: str) -> Contract:
     difference - `$ctx.grid.neighbour(i, k)$` and a hypothetical bare
     `$ctx.grid.neighbour$` both record `("grid", "neighbour")` (see the
     module docstring: every reference through ctx counts, called or not).
+
+    Parameters
+    ----------
+    source : str
+        Fully materialised CUDA source text.
+
+    Raises
+    ------
+    ContractError
+        A `$...$` span's contents do not start with a dotted path.
 
     Author: B.G (08/2026)
     """

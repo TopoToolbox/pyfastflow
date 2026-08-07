@@ -28,12 +28,11 @@ pair silently produces a working-but-wrong grid, nothing here cross-checks
 the two.
 
 This two-call split is forced by the architecture, not a style choice: a
-Parameter is always supplied by a caller at bind time (1b), for every
-address it fills, on every kernel that reaches it - there is no longer a
-Bag-shaped object that is simultaneously a compose()-able recipe and a live
-data binding the way the pre-rewrite Bag was. Every later factory
-(noise/ops/flow) that owns Parameters internally the way this one owns
-nx/ny/dx is expected to split the same way: one function returning the
+Parameter is always supplied by a caller at bind time, for every address it
+fills, on every kernel that reaches it - there is no object that is
+simultaneously a compose()-able recipe and a live data binding. Every later
+factory (noise/ops/flow) that owns Parameters internally the way this one
+owns nx/ny/dx is expected to split the same way: one function returning the
 build-phase composable (whatever shape that factory's own device surface
 needs - a FrozenGroup here, possibly something else elsewhere), one
 returning the caller-owned Parameters that composable's PARAM slots need
@@ -128,10 +127,27 @@ def make_grid_group(
     is the companion that builds those (see the module docstring for why
     the two are separate calls).
 
-    `topology` "D4"|"D8", `boundary` "normal"|"periodic_EW"|"periodic_NS",
-    `outlet` "edge"|"mask" pick block variants at build time (see
-    _closure_blocks.py / _cupy_blocks.py). `nodata` wires NODATA_MASK
-    wherever a block needs it.
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    topology : str, optional
+        "D4" or "D8" (default). Picks block variants at build time.
+    boundary : str, optional
+        "normal" (default), "periodic_EW" or "periodic_NS".
+    nodata : bool, optional
+        Wires NODATA_MASK wherever a block needs it.
+    outlet : str, optional
+        "edge" (default) or "mask" - wires OUTLET_MASK when "mask".
+
+    Returns
+    -------
+    FrozenGroup
+
+    Raises
+    ------
+    ValueError
+        If `topology`, `boundary` or `outlet` is not a recognised value.
 
     Author: B.G (08/2026)
     """
@@ -199,6 +215,38 @@ def make_grid_parameters(
     off, so a genuinely spatially-varying dx is not wired through those two
     helpers as things stand - only reachable by reading grid.DX.get(i)
     directly in a caller's own template.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    pool : Pool
+        Device-buffer pool backing scalar/field-mode Parameters.
+    nx, ny : int
+        Grid dimensions.
+    dx : float
+        Cell size.
+    topology : str, optional
+        Must match the value passed to make_grid_group().
+    nodata : bool, optional
+        Must match make_grid_group(); allocates NODATA_MASK if set.
+    outlet : str, optional
+        Must match make_grid_group(); allocates OUTLET_MASK if "mask".
+    nx_mode, ny_mode : str, optional
+        "const" (default) or "scalar".
+    dx_mode : str, optional
+        "const" (default), "scalar" or "field".
+
+    Returns
+    -------
+    dict
+        {"NX": ..., "NY": ..., "DX": ..., "N_NEIGHBOURS": ...}, plus
+        "NODATA_MASK"/"OUTLET_MASK" when applicable.
+
+    Raises
+    ------
+    ValueError
+        If `topology`/`outlet` or any `*_mode` is not a recognised value.
 
     Author: B.G (08/2026)
     """

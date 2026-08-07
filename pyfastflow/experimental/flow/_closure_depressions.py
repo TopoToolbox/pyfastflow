@@ -5,10 +5,9 @@ saddlesort, both carve variants, jump reroute, and the depression counter -
 on the new builder/frozen/bound/routine/sequence stack (../core/context/
 builder.py, frozen.py, bound.py, routine.py, sequence.py).
 
-Split out of a single _closure_blocks.py that used to hold every flow
-algorithm - see _closure_receivers.py/_closure_accum.py/
-_closure_reconstruct.py for the others. Ported from
-../../flow/flow_reroute_kernels.py, `pack`/`unpack_value`/`unpack_index`
+See _closure_receivers.py/_closure_accum.py/_closure_reconstruct.py for
+the other flow algorithms. Based on ../../flow/flow_reroute_kernels.py,
+`pack`/`unpack_value`/`unpack_index`
 composed from ops.make_bitpack_group (a FrozenGroup, `ctx.bitpack.pack(f,
 i)`) in place of legacy's f32_i32_struct module. Every array here (rec, bid,
 tag, basin_saddle, outlet, ...) is n_flat-sized, basin id = pit index + 1, so
@@ -68,6 +67,17 @@ def build_copy_field(*, backend: str, backend_mod):
     needs it (composed under a distinct name at each use site - routine.py's
     instancing) rather than rebuilt per call site.
 
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -85,6 +95,18 @@ def build_basin_id_init(*, backend: str, backend_mod, grid):
     labelling's pointer-jump propagation. Data arg (bid,); composes its own
     `grid` occurrence (`ctx.grid.can_out(i)`).
 
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    grid : FrozenGroup
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -100,6 +122,17 @@ def build_propagate_basin_iter(*, backend: str, backend_mod):
     """
     One pointer-jump step over `rec_jump`, halving path length to the root
     each call. Data arg (rec_jump,).
+
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+
+    Returns
+    -------
+    KernelBuilder
 
     Author: B.G (08/2026)
     """
@@ -118,6 +151,17 @@ def build_propagate_basin_final(*, backend: str, backend_mod):
     bid[i] = bid[root(i)] - finalizes vanilla basin labelling once
     `rec_jump` has been pointer-jumped down to (near-)roots. Data args (bid,
     rec_jump).
+
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+
+    Returns
+    -------
+    KernelBuilder
 
     Author: B.G (08/2026)
     """
@@ -147,10 +191,24 @@ def build_basin_labelling_vanilla(*, backend: str, backend_mod, grid, copy_field
     N_NEIGHBOURS[, NODATA_MASK/OUTLET_MASK]) - one occurrence, since only
     basin_id_init reaches grid in this routine.
 
-    Returns (routine_builder, kernels_dict); kernels_dict holds
-    "basin_id_init", "propagate_basin_iter" (the shared, unrolled kernel),
-    "propagate_basin_final" (not "copy_field" - the caller's own to keep
-    track of, shared across every routine that needs a copy).
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    grid : FrozenGroup
+    copy_field : KernelBuilder
+        Composed under "copy_rec_to_recjump".
+    logn : int
+
+    Returns
+    -------
+    tuple[RoutineBuilder, dict]
+        kernels_dict holds "basin_id_init", "propagate_basin_iter" (the
+        shared, unrolled kernel), "propagate_basin_final" (not
+        "copy_field" - the caller's own to keep track of, shared across
+        every routine that needs a copy).
 
     Author: B.G (08/2026)
     """
@@ -184,6 +242,19 @@ def build_basin_labelling_optimized(*, backend: str, backend_mod, grid, n_flat: 
     Data args (rec, rec_jump, bid). Composes its own `grid` occurrence
     (`ctx.grid.can_out(root)`), one PARAM address group per grid slot at
     "grid.*" (this kernel's own top level, since it is the only occurrence).
+
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    grid : FrozenGroup
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
 
     Author: B.G (08/2026)
     """
@@ -238,6 +309,20 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
     grid.*", "atomic_min_saddle.grid.*", "find_saddlenode.grid.*",
     "atomic_min_outlet.grid.*" - four independent grid occurrences, same
     Parameter bound at each (see the module docstring).
+
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    grid : FrozenGroup
+    bitpack : FrozenGroup
+        ops.make_bitpack_group's result.
+
+    Returns
+    -------
+    tuple[RoutineBuilder, dict]
 
     Author: B.G (08/2026)
     """
@@ -408,6 +493,20 @@ def build_reroute_carve_vanilla(*, backend: str, backend_mod, bitpack, copy_fiel
     "outlet", "rerouted" under each step's own name (see each template's
     signature above); `finalise_reroute_carve` composes `bitpack`.
 
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    bitpack : FrozenGroup
+    copy_field : KernelBuilder
+    logn : int
+
+    Returns
+    -------
+    tuple[RoutineBuilder, dict]
+
     Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -492,6 +591,18 @@ def build_reroute_carve_optimized(*, backend: str, backend_mod, bitpack):
 
     Data args (rec, basin_saddlenode, outlet). Composes `bitpack`.
 
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    bitpack : FrozenGroup
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -534,6 +645,18 @@ def build_reroute_jump(*, backend: str, backend_mod, bitpack):
 
     Data args (rec, outlet, rerouted). Composes `bitpack`.
 
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    bitpack : FrozenGroup
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -568,6 +691,18 @@ def build_depression_counter(*, backend: str, backend_mod, grid):
     and ops.Reduce's own accumulators already use; PARAM access stays strict
     get()/set_node(). Composes its own `grid` occurrence (`ctx.grid.
     can_out(i)`).
+
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    grid : FrozenGroup
+
+    Returns
+    -------
+    KernelBuilder
 
     Author: B.G (08/2026)
     """

@@ -35,8 +35,8 @@ Both are produced only by KernelBuilder.ingest() / HelperBuilder.ingest()
 
 Nothing here is a recipe any more - a frozen object is done being built.
 Mutability alternates through the scheme this module is one step of: builder
-mutable -> frozen builder immutable (here) -> bound object mutable (1b) ->
-compiled callable immutable (1c). `__setattr__` raises FrozenBuilderError
+mutable -> frozen builder immutable (here) -> bound object mutable ->
+compiled callable immutable. `__setattr__` raises FrozenBuilderError
 unconditionally after construction, so any code path that tries to poke a new
 value into a frozen object - rather than building a new one - fails loudly
 and by name.
@@ -54,7 +54,7 @@ DATA slot is never reached through `ctx.*` (see slot.py), so it is not part
 of what a chain like `outer.this.member` could ever ask this object to
 provide.
 
-`.build()` is the entry point into the bind phase (bound.py, 1b): it walks
+`.build()` is the entry point into the bind phase (bound.py): it walks
 this object's whole composition tree - recursing into every composed
 FrozenHelper/FrozenKernel in turn - and mints one independently-bindable
 slot per full dotted path it finds, returning a BoundKernel/BoundHelper. This
@@ -115,10 +115,9 @@ class _Frozen:
     def uid(self) -> int:
         """
         Process-wide identity assigned at construction, from the same
-        counter as Parameter/HelperBuilder/Bag (parameter.py, compile.py,
-        bag.py). Two references to one FrozenKernel/FrozenHelper share a uid;
-        composing "the same" frozen object into two builders never changes
-        it.
+        counter as Parameter/Bag (parameter.py, bag.py). Two references to
+        one FrozenKernel/FrozenHelper share a uid; composing "the same"
+        frozen object into two builders never changes it.
 
         Author: B.G (08/2026)
         """

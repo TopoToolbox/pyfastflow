@@ -203,8 +203,27 @@ def build_receivers(
     module docstring) - a caller binds e.g. `NX` once on the compiled
     receivers kernel, not once per occurrence.
 
-    Returns {name: HelperBuilder/KernelBuilder} - the distance/slope helpers
-    plus "receivers", plus "rand_unit" when mode="stochastic".
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    grid : FrozenGroup
+    hash_u32 : FrozenHelper
+        Required, and only used, when mode="stochastic".
+    mode : str
+        "steepest" or "stochastic".
+    topology : str
+        "D4" or "D8".
+    diagonal_partition_correction : bool
+    h_aware : bool
+
+    Returns
+    -------
+    dict
+        {name: HelperBuilder/KernelBuilder} - the distance/slope helpers
+        plus "receivers", plus "rand_unit" when mode="stochastic".
 
     Author: B.G (08/2026)
     """

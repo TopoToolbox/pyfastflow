@@ -1,23 +1,21 @@
 """
 cupy (CUDA source) block templates behind ops's make_bitpack_group/make_scan/
-make_reduce, on the new builder/frozen/bound stack (core/context/builder.py,
+make_reduce, on the builder/frozen/bound stack (core/context/builder.py,
 frozen.py, bound.py). Mirrors _closure_blocks.py's split and
 ../grid/_cupy_blocks.py's own conventions: every span reaching a PARAM is
 spelled `$ctx.NAME.get(...)$`/`$ctx.NAME.set_node(...)$` in full, every span
-reaching a composed HELPER is spelled `$ctx.name(args)$` - the old bare-span
-shorthand (`$flip(f)$`) is gone. Every device/global function name is
-prefixed with this build's own tag (a fresh new_uid()), matching grid/noise/
-visu's own belt-and-braces convention (compile_cupy.py already mangles by
-address - see its own module docstring - this is redundant safety, not load
-bearing).
+reaching a composed HELPER is spelled `$ctx.name(args)$`. Every device/
+global function name is prefixed with this build's own tag (a fresh
+new_uid()), matching grid/noise/visu's own belt-and-braces convention
+(compile_cupy.py already mangles by address - see its own module docstring
+- this is redundant safety, not load bearing).
 
 `.inclusive()` on cupy stays `cp.cumsum` (ops/__init__.py's own module
 docstring: CUB's DeviceScan is already the accelerator cupy dispatches to by
 default) - no RoutineBuilder involved for that half. Compaction's count-read
-and scatter, previously a bare host-side numpy slice-copy plus one directly-
-launched kernel, are ported as a two-step FrozenRoutine (routine.py)
-instead: "read_count" (a 1-thread kernel writing scan_out[n-1] into the COUNT
-PARAM) and "scatter", each composed with its own `launch=` override
+and scatter are a two-step FrozenRoutine (routine.py): "read_count" (a
+1-thread kernel writing scan_out[n-1] into the COUNT PARAM) and "scatter",
+each composed with its own `launch=` override
 (routine.py's `RoutineBuilder.compose(name, frozen, launch=...)`) - a
 genuinely different, meaningfully-sized grid/block per step, which is what
 actually exercises the per-step launch mechanism on a backend where launch

@@ -85,6 +85,18 @@ def persistent_grid_block(*, blocks_per_sm: int = 2, threads: int = 256) -> tupl
     frontier itself, not the whole node range, bounds how much work a
     level does).
 
+    Parameters
+    ----------
+    blocks_per_sm : int, optional
+        Default 2.
+    threads : int, optional
+        Default 256.
+
+    Returns
+    -------
+    tuple
+        (grid, block) launch dims.
+
     Author: B.G (08/2026)
     """
     sm_count = cp.cuda.Device().attributes["MultiProcessorCount"]
@@ -102,6 +114,15 @@ def init_frontier_mfd(indegree_data, frontier_data) -> int:
     device-side primitive this package's span/template mechanism reaches,
     and the reference implementation this ports does the same compaction
     as an ordinary host op rather than a custom kernel.
+
+    Parameters
+    ----------
+    indegree_data, frontier_data : cupy.ndarray
+
+    Returns
+    -------
+    int
+        Count of cells with indegree 0.
 
     Author: B.G (08/2026)
     """
@@ -136,6 +157,18 @@ def build_persistent_mfd(
     into "accum"'s generated source as a compile-time array length - a
     smaller value uses less shared memory per block at the cost of more
     direct-scatter spills past capacity.
+
+    Parameters
+    ----------
+    grid : FrozenGroup
+    n_flat, n_neighbours : int
+    fr_stage : int, optional
+        Default 2048.
+
+    Returns
+    -------
+    dict
+        {"q_init": FrozenKernel, "accum": FrozenKernel}.
 
     Author: B.G (08/2026)
     """

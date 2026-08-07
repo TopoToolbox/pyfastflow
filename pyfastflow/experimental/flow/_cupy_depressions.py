@@ -7,9 +7,8 @@ context/builder.py, frozen.py, bound.py, routine.py). Mirrors
 _closure_depressions.py step for step - same routine composition, same
 grid/bitpack occurrence-per-site shape - CUDA text instead of python defs.
 
-Split out of a single _cupy_blocks.py that used to hold every flow algorithm
-- see _cupy_receivers.py/_cupy_accum.py/_cupy_reconstruct.py for the others.
-Ported from ../../flow/flow_reroute_kernels.py; `bitpack`'s pack/
+See _cupy_receivers.py/_cupy_accum.py/_cupy_reconstruct.py for the other
+flow algorithms. Based on ../../flow/flow_reroute_kernels.py; `bitpack`'s pack/
 unpack_value/unpack_index (ops.make_bitpack_group, a FrozenGroup) replace
 legacy's f32_i32_struct module. Every array here (rec, bid, tag,
 basin_saddle, outlet, ...) is n_flat-sized, basin id = pit index + 1, so a
@@ -58,6 +57,10 @@ def build_atomic_min_ll():
     the bitpacked saddle/outlet values need signed comparison to match
     Taichi/Quadrants' `atomic_min` over an i64 field.
 
+    Returns
+    -------
+    HelperBuilder
+
     Author: B.G (08/2026)
     """
     t = f"pd{new_uid()}"
@@ -81,6 +84,14 @@ def build_copy_field(*, n_flat: int):
     dst[i] = src[i] over a whole n_flat int32 buffer - see
     _closure_depressions.py's build_copy_field.
 
+    Parameters
+    ----------
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     t = f"pd{new_uid()}"
@@ -102,6 +113,15 @@ def build_basin_id_init(*, grid, n_flat: int):
     bid[i] = 0 on a can_out node, i+1 otherwise. Data arg (bid,). Composes
     its own `grid` occurrence.
 
+    Parameters
+    ----------
+    grid : FrozenGroup
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     t = f"pbi{new_uid()}"
@@ -119,7 +139,16 @@ __global__ void {t}_basin_id_init(int* bid) {{
 
 
 def build_propagate_basin_iter(*, n_flat: int):
-    """One pointer-jump step over `rec_jump`. Data arg (rec_jump,)."""
+    """One pointer-jump step over `rec_jump`. Data arg (rec_jump,).
+
+    Parameters
+    ----------
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
+    """
     t = f"pbi{new_uid()}"
     return (
         KernelBuilder().wire_data("rec_jump").ingest(
@@ -137,7 +166,16 @@ __global__ void {t}_propagate_basin_iter(int* rec_jump) {{
 
 
 def build_propagate_basin_final(*, n_flat: int):
-    """bid[i] = bid[root(i)]. Data args (bid, rec_jump)."""
+    """bid[i] = bid[root(i)]. Data args (bid, rec_jump).
+
+    Parameters
+    ----------
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
+    """
     t = f"pbf{new_uid()}"
     return (
         KernelBuilder().wire_data("bid").wire_data("rec_jump").ingest(
@@ -159,6 +197,17 @@ def build_basin_labelling_vanilla(*, grid, copy_field, n_flat: int, logn: int):
     choice). Every step here is already one launch (no cross-loop splitting
     needed for this variant - it has no per-round cross-thread ordering
     dependency other kernels here need split for).
+
+    Parameters
+    ----------
+    grid : FrozenGroup
+    copy_field : KernelBuilder
+    n_flat : int
+    logn : int
+
+    Returns
+    -------
+    tuple[RoutineBuilder, dict]
 
     Author: B.G (08/2026)
     """
@@ -189,6 +238,15 @@ def build_basin_labelling_optimized(*, grid, n_flat: int):
     launches (copy, path-halving, bid finalize), since the path-halving
     phase needs every thread's copy to have landed first, and the finalize
     phase needs every thread's path-halving to have converged first.
+
+    Parameters
+    ----------
+    grid : FrozenGroup
+    n_flat : int
+
+    Returns
+    -------
+    tuple[RoutineBuilder, dict]
 
     Author: B.G (08/2026)
     """
@@ -252,6 +310,16 @@ def build_saddlesort(*, grid, bitpack, n_flat: int):
     KernelBuilder composes its own occurrence, only where it actually calls
     one of the three. `atomic_min_ll` (build_atomic_min_ll) is composed onto
     the two sites that need it.
+
+    Parameters
+    ----------
+    grid : FrozenGroup
+    bitpack : FrozenGroup
+    n_flat : int
+
+    Returns
+    -------
+    tuple[RoutineBuilder, dict]
 
     Author: B.G (08/2026)
     """
@@ -446,6 +514,17 @@ def build_reroute_carve_vanilla(*, bitpack, copy_field, n_flat: int, logn: int):
     split into several real launches here (no grid-wide barrier inside one
     `__global__`); the closure backends keep each as one kernel.
 
+    Parameters
+    ----------
+    bitpack : FrozenGroup
+    copy_field : KernelBuilder
+    n_flat : int
+    logn : int
+
+    Returns
+    -------
+    tuple[RoutineBuilder, dict]
+
     Author: B.G (08/2026)
     """
     t = f"prc{new_uid()}"
@@ -601,6 +680,15 @@ def build_reroute_carve_optimized(*, bitpack, n_flat: int):
     Node-disjoint chains across basins mean no cross-thread dependency at
     all, so this needs no splitting the way the vanilla carve routine does.
 
+    Parameters
+    ----------
+    bitpack : FrozenGroup
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     t = f"pco{new_uid()}"
@@ -641,6 +729,15 @@ def build_reroute_jump(*, bitpack, n_flat: int):
     The write is deliberately `rec[i - 1]`, not `rec[i]` - see
     _closure_depressions.py's build_reroute_jump docstring for why; ported
     exactly.
+
+    Parameters
+    ----------
+    bitpack : FrozenGroup
+    n_flat : int
+
+    Returns
+    -------
+    tuple[RoutineBuilder, dict]
 
     Author: B.G (08/2026)
     """
@@ -690,10 +787,18 @@ def build_depression_counter(*, grid, n_flat: int):
     depression_counter KernelBuilder, data args (rec, ndep) - `ndep` is
     `ndep_p.get().data`, passed positionally same as `rec` (a Parameter
     reached only through `$...$` get() spans is registered read-only in the
-    constant block - cupy_backend.py's _SpanParser._register_ptr - so
-    atomicAdd into it needs the raw pointer as an ordinary DATA argument
-    instead). The caller must reset `ndep_p` to 0 (`.set(0)`) before each
-    launch. Composes its own `grid` occurrence.
+    constant block, so atomicAdd into it needs the raw pointer as an
+    ordinary DATA argument instead). The caller must reset `ndep_p` to 0
+    (`.set(0)`) before each launch. Composes its own `grid` occurrence.
+
+    Parameters
+    ----------
+    grid : FrozenGroup
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
 
     Author: B.G (08/2026)
     """

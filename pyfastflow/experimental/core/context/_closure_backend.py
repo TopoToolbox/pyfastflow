@@ -43,6 +43,19 @@ def specialize_closure(template, globals_: dict[str, Any]) -> FunctionType:
     annotations and the rest are copied over so the result still introspects
     like the template it came from.
 
+    Parameters
+    ----------
+    template : FunctionType
+        Function to rebuild.
+    globals_ : dict[str, Any]
+        Names to inject into the rebuilt function's globals.
+
+    Returns
+    -------
+    FunctionType
+        A new function sharing `template`'s code object but with `globals_`
+        merged into its globals.
+
     Author: B.G (07/2026)
     """
     source = getattr(template, "__wrapped__", template)
@@ -102,6 +115,25 @@ class ClosureBackendParameter(Parameter):
         scalar and field take pooled storage straight away; const stays a
         plain python value.
 
+        Parameters
+        ----------
+        name : str
+        dtype : ti.* or qd.* dtype
+        mode : str
+            One of MODES ("const", "scalar", "field").
+        value : Any
+            Initial value.
+        pool : Pool
+            Device-buffer pool backing scalar/field storage.
+        n_flat : int, optional
+            Node count, required for field mode.
+
+        Raises
+        ------
+        ValueError
+            If `mode` is not in MODES, or field mode is given without
+            `n_flat`.
+
         Author: B.G (07/2026)
         """
         if mode not in MODES:
@@ -155,6 +187,11 @@ class ClosureBackendParameter(Parameter):
         Overwrite the whole value: a device write for scalar, a full
         host->device copy for field. const is immutable - see Parameter.set.
 
+        Raises
+        ------
+        ValueError
+            If this parameter's mode is const.
+
         Author: B.G (07/2026)
         """
         if self.mode == "const":
@@ -184,6 +221,11 @@ class ClosureBackendParameter(Parameter):
         """
         Host-side single-cell write. scalar ignores node; const is read-only.
 
+        Raises
+        ------
+        ValueError
+            If this parameter's mode is const.
+
         Author: B.G (07/2026)
         """
         if self.mode == "const":
@@ -196,6 +238,11 @@ class ClosureBackendParameter(Parameter):
     def read(self):
         """
         Host-side scalar read - see Parameter.read for the contract.
+
+        Raises
+        ------
+        ValueError
+            If this parameter's mode is field.
 
         Author: B.G (07/2026)
         """

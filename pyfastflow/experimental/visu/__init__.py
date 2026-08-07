@@ -73,13 +73,11 @@ already bound to `grid.NX`/...), not once per gradient block.
 Structure needs `topology`, data does not, and the grid FrozenGroup itself
 carries neither
 ------------------------------------------------------------------------------
-Deciding which neighbour index `k` means "left"/"right"/"top"/"bottom" (the
-old code's own `k_left`/`k_right`/`k_top`/`k_bottom`) needs the grid's own
-n_neighbours count - the old Bag-based make_hillshade read `grid.n_
-neighbours.get()` directly, because the old Bag held a live Parameter. A
-FrozenGroup carries no Parameter objects (frozen.py: pure structure), so
-there is nothing here to read a concrete n_neighbours value off even in
-principle. `make_hillshade_group` therefore takes an explicit `topology`
+Deciding which neighbour index `k` means "left"/"right"/"top"/"bottom" needs
+the grid's own n_neighbours count. A FrozenGroup carries no Parameter
+objects (frozen.py: pure structure), so there is nothing here to read a
+concrete n_neighbours value off even in principle. `make_hillshade_group`
+therefore takes an explicit `topology`
 ("D4"|"D8") argument instead, exactly mirroring make_grid_group's own - and,
 exactly like the grid_group/grid_parameters pair, it is the caller's job to
 pass the same topology the grid FrozenGroup composed here was itself built
@@ -158,9 +156,25 @@ def make_hillshade_group(backend: str, grid: FrozenGroup, *, topology: str = "D8
     make_grid_parameters - bind the same objects into `hillshade.NX`/... as
     well as `grid.NX`/...).
 
-    `topology` must match whatever `grid` was itself built with - see the
-    module docstring's "Structure needs topology" section for why this
-    module cannot read that off `grid` itself.
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    grid : FrozenGroup
+        The grid structure this hillshade reads neighbours/distances from.
+    topology : str, optional
+        "D4" or "D8" (default). Must match whatever `grid` was itself built
+        with - see the module docstring's "Structure needs topology" section
+        for why this module cannot read that off `grid` itself.
+
+    Returns
+    -------
+    FrozenGroup
+
+    Raises
+    ------
+    ValueError
+        If `topology` is not "D4" or "D8".
 
     Author: B.G (08/2026)
     """
@@ -209,8 +223,31 @@ def make_hillshade_parameters(
 
     `azimuth`/`altitude` are light-source angles in degrees (315/45 is the
     classic NW-lit default); `z_factor` scales the gradient before it enters
-    the slope/aspect computation. The `*_mode` arguments are "const" or
-    "scalar" - same convention as make_grid_parameters/make_noise_parameters.
+    the slope/aspect computation.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    pool : Pool
+        Device-buffer pool backing scalar-mode Parameters.
+    azimuth, altitude : float, optional
+        Light-source angles in degrees.
+    z_factor : float, optional
+        Gradient scale factor.
+    azimuth_mode, altitude_mode, z_factor_mode : str, optional
+        "const" (default) or "scalar" - same convention as
+        make_grid_parameters/make_noise_parameters.
+
+    Returns
+    -------
+    dict
+        {"AZIMUTH": ..., "ALTITUDE": ..., "ZFACTOR": ...}.
+
+    Raises
+    ------
+    ValueError
+        If any `*_mode` is not "const" or "scalar".
 
     Author: B.G (08/2026)
     """
@@ -244,6 +281,18 @@ def make_hillshade_kernel(backend: str, hillshade_group: FrozenGroup) -> FrozenK
     A caller `.build()`s the result, binds `z`/`out` (and, on cupy, `n`) plus
     every PARAM address `hillshade_group` itself carries (`hillshade.NX`,
     `hillshade.AZIMUTH`, ...), then `.compile()`s.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    hillshade_group : FrozenGroup
+        The group built by make_hillshade_group(), composed whole under
+        `hillshade`.
+
+    Returns
+    -------
+    FrozenKernel
 
     Author: B.G (08/2026)
     """

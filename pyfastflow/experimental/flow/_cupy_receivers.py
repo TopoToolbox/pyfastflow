@@ -1,5 +1,5 @@
 """
-cupy (CUDA source) block templates behind make_receivers, on the new
+cupy (CUDA source) block templates behind make_receivers, on the
 builder/frozen/bound stack (core/context/builder.py, frozen.py, bound.py).
 Mirrors _closure_receivers.py block for block: same private/public split,
 same `mode`/`h_aware`/`diagonal_partition_correction` selectors picking
@@ -8,8 +8,8 @@ two independent occurrences (see _closure_receivers.py's module docstring).
 
 Every span reaching a PARAM is spelled `$ctx.NAME.get(...)$`/
 `$ctx.NAME.set_node(...)$` in full, every span reaching a composed HELPER is
-spelled `$ctx.name(args)$` - the old bare-span shorthand is gone (see
-builder.py's module docstring, "Param access is STRICT"). Every `__device__`/
+spelled `$ctx.name(args)$` (see builder.py's module docstring, "Param
+access is STRICT"). Every `__device__`/
 `__global__` symbol is prefixed with this build's own tag (a fresh
 new_uid()) so two make_receivers() calls in one process never collide inside
 a single compiled cupy module.
@@ -159,6 +159,23 @@ def build_receivers(
     for mode="stochastic", rand_unit) HelperBuilders it is made of - see
     _closure_receivers.py's build_receivers (identical structure and
     sharing).
+
+    Parameters
+    ----------
+    grid : FrozenGroup
+    hash_u32 : FrozenHelper
+        Required, and only used, when mode="stochastic".
+    mode : str
+        "steepest" or "stochastic".
+    topology : str
+        "D4" or "D8".
+    diagonal_partition_correction : bool
+    h_aware : bool
+
+    Returns
+    -------
+    dict
+        {name: HelperBuilder/KernelBuilder}.
 
     Author: B.G (08/2026)
     """

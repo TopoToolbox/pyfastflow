@@ -38,7 +38,7 @@ address" any other typo would.
 
 bind(addr, obj) fills a slot. Rebinding is normal, not an error - there is no
 freeze-once rule at this layer, since immutability is a property of the
-*compiled* artifact (1c), not of a slot. What bind() checks depends on the
+*compiled* artifact, not of a slot. What bind() checks depends on the
 slot's kind: PARAM accepts any Parameter, of any mode (no mode constraint -
 see slot.py's module docstring, genericity across modes is the entire point
 of a PARAM slot); DATA checks the dtype declared at wire_data(..., dtype=...)
@@ -101,11 +101,10 @@ enclosing group's own canonical (`...GRID.DX` -> `hillshade.DX`).
 `_ShareScope` is one enclosing group's own sharing declarations, tagged with
 the full address (`start`) its own paths are expressed relative to. Walking
 into a shared FrozenGroup pushes a new scope onto an ordered list threaded
-through the recursion - outermost first, most-recently-entered last -
-rather than resetting to a fresh scope per boundary the way the old,
-single-scope implementation did (which is exactly what dropped an
-enclosing group's own declarations the moment a nested group's own boundary
-was crossed). `_resolve_shared` is the one place every PARAM leaf - a
+through the recursion - outermost first, most-recently-entered last - so an
+enclosing group's own declarations stay active when a nested group's own
+boundary is crossed, rather than being dropped by a single active scope.
+`_resolve_shared` is the one place every PARAM leaf - a
 group's own top-level name (`_walk_group`) or one reached descending its
 composed subtree (`_walk_group_subtree`) - is checked against every active
 scope at once.
@@ -379,9 +378,7 @@ def _walk_group_subtree(
     (with its own `.shared`) pushes its own scope onto `scopes` for its own
     descent (`_walk_group`) rather than starting a fresh, disconnected one -
     sharing is declared per group, but an enclosing group's own declarations
-    stay active reaching through a group-within-a-group, which is exactly
-    what this fixes relative to the single-scope implementation this module
-    used to have.
+    stay active reaching through a group-within-a-group.
 
     Author: B.G (08/2026)
     """
@@ -418,6 +415,15 @@ def build(frozen: _Frozen) -> "BoundKernel | BoundHelper":
     independently-bindable slot minted per full address found - collapsed
     per any build-phase sharing reachable in the tree (module docstring,
     "Build-phase sharing"). Also reachable as `frozen.build()` (frozen.py).
+
+    Parameters
+    ----------
+    frozen : FrozenKernel or FrozenHelper
+        The frozen recipe to build.
+
+    Returns
+    -------
+    BoundKernel or BoundHelper
 
     Author: B.G (08/2026)
     """
@@ -526,9 +532,9 @@ class _Bound:
         """
         The object currently bound at `addr` (following wire()-d equivalence
         to its group's representative), or None if that group is unbound.
-        Read-only counterpart to bind() - for compile.py's use, and for
-        anything else that wants to read a binding without going through
-        inspect()'s formatted report.
+        Read-only counterpart to bind() - for the compile phase's use, and
+        for anything else that wants to read a binding without going
+        through inspect()'s formatted report.
 
         `addr` may be a build-phase-collapsed address (module docstring,
         "Build-phase sharing") even though it is not one of `.addresses()`'
@@ -538,6 +544,16 @@ class _Bound:
         redirected it, and this is the one read path required to resolve
         transparently either way. `bind()`/`wire()` do not get this
         treatment - a collapsed address is not independently bindable.
+
+        Parameters
+        ----------
+        addr : Address or str
+            Dotted path or address tuple, possibly build-phase-collapsed.
+
+        Returns
+        -------
+        Any
+            The bound object, or None if unbound.
 
         Author: B.G (08/2026)
         """
@@ -577,6 +593,11 @@ class _Bound:
         Empty means every slot build() minted is filled - the precondition
         compile() checks first (see compile_shared.py's check_unmet).
 
+        Returns
+        -------
+        list[Address]
+            Unbound addresses, sorted.
+
         Author: B.G (08/2026)
         """
         return sorted(addr for addr in self._table if self._values.get(self._find(addr)) is None)
@@ -615,6 +636,18 @@ class _Bound:
         as opposed to `flux.grad.grid.NX`) was never minted an address at
         all, so `_addr` above already raises "unknown address" for it before
         this method's own kind dispatch ever runs.
+
+        Parameters
+        ----------
+        addr : Address or str
+        obj : Any
+            A Parameter for a PARAM slot; any dtype-matching object for a
+            DATA slot.
+
+        Raises
+        ------
+        BindError
+            `addr` is unknown, or `obj` is the wrong kind/dtype for its slot.
 
         Author: B.G (08/2026)
         """
@@ -674,6 +707,25 @@ class _Bound:
         almost always a typo, though - pass `strict=True` wherever the
         address set is known fixed.
 
+        Parameters
+        ----------
+        mapping : dict[str, Any]
+            Leaf name -> value to bind.
+        prefix : Address or str, optional
+            Restricts matches to addresses starting with this prefix.
+        strict : bool, optional
+            Raise if a mapping key matches no address.
+
+        Returns
+        -------
+        _Bound
+            self, for chaining.
+
+        Raises
+        ------
+        BindError
+            If `strict` is True and some key matched no address.
+
         Author: B.G (08/2026)
         """
         p = parse_address(prefix) if isinstance(prefix, str) else tuple(prefix)
@@ -708,6 +760,23 @@ class _Bound:
         pattern that resolves to nothing is almost always a typo, not a
         legitimately-absent combination.
 
+        Parameters
+        ----------
+        pattern : str
+            Dotted pattern, `*` matching any one segment.
+        obj : Any
+            Value to bind at every matching address.
+
+        Returns
+        -------
+        _Bound
+            self, for chaining.
+
+        Raises
+        ------
+        BindError
+            If `pattern` matches zero addresses.
+
         Author: B.G (08/2026)
         """
         segs = tuple(pattern.split("."))
@@ -729,6 +798,22 @@ class _Bound:
         to different objects (which wiring them together could not resolve
         without silently discarding one). No other guard runs - see the
         module docstring.
+
+        Parameters
+        ----------
+        addr_a, addr_b : Address or str
+            The two addresses to merge into one equivalence group.
+
+        Returns
+        -------
+        _Bound
+            self, for chaining.
+
+        Raises
+        ------
+        BindError
+            If the two addresses resolve to different slot kinds, or both
+            are already bound to different objects.
 
         Author: B.G (08/2026)
         """
@@ -780,6 +865,11 @@ class _Bound:
         wire()-d group is listed once more, under an "Informational"
         heading - never as an error; see the module docstring for why this
         is deliberately not a conflict.
+
+        Returns
+        -------
+        str
+            The formatted report.
 
         Author: B.G (08/2026)
         """
@@ -846,7 +936,7 @@ class BoundKernel(_Bound):
 
     def compile(self, backend: str, **kwargs) -> Any:
         """
-        The compile phase (1c) - produce a frozen, immutable callable from
+        The compile phase - produce a frozen, immutable callable from
         this object's current bindings. A snapshot: this BoundKernel stays
         live and rebindable afterwards, and a later compile() (with or
         without edits in between) produces an independent callable - see
@@ -863,6 +953,23 @@ class BoundKernel(_Bound):
         Imported locally, per backend, to avoid importing taichi/quadrants/
         cupy at module load time for a caller that only uses one of them -
         the same reasoning `backends.py.backend_classes` follows.
+
+        Parameters
+        ----------
+        backend : str
+            "taichi", "quadrants" or "cupy".
+        **kwargs
+            Backend-specific: cupy accepts `grid=`/`block=`.
+
+        Returns
+        -------
+        Any
+            A compiled, callable kernel object (CompiledKernel).
+
+        Raises
+        ------
+        BindError
+            If `backend` is not one of the three known names.
 
         Author: B.G (08/2026)
         """
@@ -900,6 +1007,11 @@ class BoundHelper(_Bound):
         composes it (see compile_shared.py/compile_closure.py/
         compile_cupy.py). Mirrors HelperBuilder.compile() (builder.py) at
         the build phase.
+
+        Raises
+        ------
+        TypeError
+            Always.
 
         Author: B.G (08/2026)
         """

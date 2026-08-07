@@ -15,17 +15,16 @@ public `at` device helper (plus `hash_u32`, always, and `white_unit`/
 the backend. `make_noise_parameters` returns data: the concrete owned
 Parameters the group's own value PARAM slots need bound.
 
-NX/NY are deliberately NOT among make_noise_parameters' own output. Unlike
-the old Bag-based noise, which held a live `grid` Bag and could read its
-`nx`/`ny` Parameter objects directly at build time, a FrozenGroup carries no
-Parameter objects of its own (frozen.py) - make_grid_group returns pure
-structure, so there is no live grid Parameter left for noise to reach for
-here even if it wanted to. Noise instead wires its own `NX`/`NY` PARAM slots,
-generic exactly like every other PARAM slot (slot.py: "deliberately
-generic ... nothing here constrains mode or dtype"), and a caller binds them
-to the *same* Parameter objects make_grid_parameters already produced -
-`kbound.bind("noise.NX", grid_params["NX"])` alongside
-`kbound.bind("grid.NX", grid_params["NX"])`. This is why noise's own
+NX/NY are deliberately NOT among make_noise_parameters' own output. A
+FrozenGroup carries no Parameter objects of its own (frozen.py) -
+make_grid_group returns pure structure, so there is no live grid Parameter
+for noise to read at build time even if it wanted to. Noise instead wires
+its own `NX`/`NY` PARAM slots, generic exactly like every other PARAM slot
+(slot.py: "deliberately generic ... nothing here constrains mode or
+dtype"), and a caller binds them to the *same* Parameter objects
+make_grid_parameters already produced -
+`kbound.bind_leaf(grid_params, prefix=("noise",))` alongside
+`kbound.bind_leaf(grid_params, prefix=("grid",))`. This is why noise's own
 `at(i)`/`row`/`col` never structurally compose the grid FrozenGroup at all:
 row/column math only ever needs `nx`/`ny` as plain values, never a grid
 HELPER call (no neighbour lookup, no distance, nothing structural), so there
@@ -72,8 +71,8 @@ Author: B.G (08/2026)
 import numpy as np
 
 from ..core.context.backends import backend_classes
-from ..core.context.builder import GroupBuilder, HelperBuilder, share_leaf
-from ..core.context.frozen import FrozenGroup
+from ..core.context.builder import GroupBuilder, share_leaf
+from ..core.context.frozen import FrozenGroup, FrozenHelper
 
 _KINDS = frozenset({"white", "perlin"})
 _MODES = ("const", "scalar")
@@ -88,6 +87,15 @@ def permutation_table(seed: int) -> np.ndarray:
     Same construction (and same numpy Generator) as
     pyfastflow/noise/noisecontext.py, so a given seed yields the same table
     and therefore the same noise.
+
+    Parameters
+    ----------
+    seed : int
+
+    Returns
+    -------
+    np.ndarray
+        512 int32 entries.
 
     Author: B.G (07/2026)
     """
@@ -133,8 +141,21 @@ def make_noise_group(backend: str, *, kind: str = "perlin") -> FrozenGroup:
     companion that builds the value params (NX/NY are the caller's own, from
     make_grid_parameters - see the module docstring).
 
-    `kind` "white"|"perlin" picks the block chain (see _closure_blocks.py /
-    _cupy_blocks.py).
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    kind : str, optional
+        "white" or "perlin" (default). Picks the block chain.
+
+    Returns
+    -------
+    FrozenGroup
+
+    Raises
+    ------
+    ValueError
+        If `kind` is not "white" or "perlin".
 
     Author: B.G (08/2026)
     """
@@ -171,13 +192,22 @@ def make_noise_group(backend: str, *, kind: str = "perlin") -> FrozenGroup:
     return group.close()
 
 
-def make_hash_u32(backend: str) -> HelperBuilder:
+def make_hash_u32(backend: str) -> FrozenHelper:
     """
     The standalone hash_u32(x) FrozenHelper make_noise_group's white-noise
     chain is built on - no Parameters, no grid, no pool. A caller that only
     wants the same integer hash (e.g. flow's rand_unit) reaches it here
     rather than building a whole noise group just to pull hash_u32 back out
     of it.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+
+    Returns
+    -------
+    FrozenHelper
 
     Author: B.G (08/2026)
     """
@@ -223,6 +253,33 @@ def make_noise_parameters(
     Perlin's seed is not a device parameter at all, it drives the
     permutation table, built on the host and uploaded as a field (reseed by
     refilling it: `params["PERM"].set(permutation_table(7))`).
+
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
+    pool : Pool
+        Device-buffer pool backing scalar/field-mode Parameters.
+    kind : str, optional
+        Must match make_noise_group()'s `kind`.
+    amplitude, seed, frequency, frequency_x, frequency_y, octaves,
+    persistence : optional
+        Initial values.
+    amplitude_mode, seed_mode, frequency_mode, octaves_mode,
+    persistence_mode : str, optional
+        "const" or "scalar"; see above for the `seed_mode` default.
+
+    Returns
+    -------
+    dict
+        {"AMPLITUDE": ..., "SEED": ...} for kind="white";
+        {"AMPLITUDE": ..., "PERM": ..., "FX": ..., "FY": ..., "OCTAVES": ...,
+        "PERSISTENCE": ...} for kind="perlin".
+
+    Raises
+    ------
+    ValueError
+        If `kind` or any `*_mode` is not a recognised value.
 
     Author: B.G (08/2026)
     """

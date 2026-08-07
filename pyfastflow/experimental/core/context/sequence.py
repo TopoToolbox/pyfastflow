@@ -1,11 +1,11 @@
 """
-SequenceBuilder / FrozenSequence / BoundSequence / CompiledSequence: the
-host-driven layer above Routine (routine.py) - an ordered list of blocks
-(kernel, whole routine, host block) plus one loop whose trip count and break
-are evaluated on the host. Same build -> freeze -> bind -> compile lifecycle
-as everything else in this package. Named `sequence` for the same reason
-routine.py is - `sequence.py` already names the pre-1d implementation this
-replaces, kept untouched until Phase 3.
+The host-driven layer above Routine (routine.py): an ordered list of blocks
+(kernel, whole routine, host block) plus loops whose trip count and break
+are evaluated on the host.
+
+`SequenceBuilder` / `FrozenSequence` / `BoundSequence` / `CompiledSequence`
+follow the same build -> freeze -> bind -> compile lifecycle as everything
+else in this package.
 
 What this is for
 ------------------
@@ -23,11 +23,11 @@ Composition vs. order
 Unlike RoutineBuilder, composing a block here (`compose(name, frozen)`) does
 not by itself place it in execution order - a name may be composed once and
 then referenced from `step(name)` and/or from inside `loop(...)`'s body more
-than once (the old sequence.py's `zero_ndep` callback, called once before a
-loop and again every iteration, is exactly this shape). `step(name)` appends
-`name` to the top-level order; `loop(body, max_times, until=None)` appends one
-loop entry whose `body` is a sequence of already-composed names, run in order,
-`max_times` times, stopping early when `until` returns True.
+than once (a callback run once before a loop and again every iteration is
+exactly this shape). `step(name)` appends `name` to the top-level order;
+`loop(body, max_times, until=None)` appends one loop entry whose `body` is a
+sequence of already-composed names, run in order, `max_times` times, stopping
+early when `until` returns True.
 
 `max_times`/`until` are each either a plain value (an int for `max_times`,
 `None` for `until`, meaning "run to completion") or the *name* of an
@@ -57,15 +57,14 @@ Compiling
 ----------
 `BoundSequence.compile(backend, **kwargs)` checks this sequence's own unmet
 slots first, then compiles each composed name at most once (cached by name,
-since one composed block may be referenced from several places in order),
-decomposing exactly as BoundRoutine.compile() does: a fresh bound object from
-that block's own `.build()`, filled from this BoundSequence's current values
-at that block's addresses, then that object's own `.compile()` - a
-FrozenHostBlock's ignoring `backend` (host_block.py), everything else taking
-it. The result, CompiledSequence, is an ordered list of zero-argument
-callables (blocks already resolved to their own compiled form) plus loop
-entries carrying their own body/max_times/until, evaluated on the host at
-call time exactly as sequence.py's own `Sequence.__call__`/`_run_loop` did.
+since one composed block may be referenced from several places in order): a
+fresh bound object from that block's own `.build()`, filled from this
+BoundSequence's current values at that block's addresses, then that object's
+own `.compile()` - a FrozenHostBlock ignores `backend` (host_block.py),
+everything else takes it. The result, CompiledSequence, is an ordered list
+of zero-argument callables (blocks already resolved to their own compiled
+form) plus loop entries carrying their own body/max_times/until, evaluated
+on the host at call time.
 
 Per-block launch config
 --------------------------
@@ -174,17 +173,20 @@ class SequenceBuilder:
 
     def compose(self, name: str, frozen: Any, *, launch: "dict | None" = None) -> "SequenceBuilder":
         """
-        Register `frozen` (a FrozenKernel, FrozenRoutine or FrozenHostBlock)
-        under `name`, without placing it in execution order - see step()/
-        loop() for that, and the module docstring for why the two are
-        separate calls here (unlike RoutineBuilder.compose()).
+        Register `frozen` under `name`, without placing it in execution
+        order - see step()/loop() for that, and the module docstring for why
+        the two are separate calls here (unlike RoutineBuilder.compose()).
 
-        `launch`, optional, is a dict of compile()-kwargs overriding this
-        sequence's own compile()-level default for this block only - see the
-        module docstring's "Per-block launch config" section. Ignored for a
-        FrozenHostBlock (BoundHostBlock.compile() takes no backend-specific
-        kwargs), accepted here regardless so a caller need not special-case
-        which kind of block it is composing.
+        Parameters
+        ----------
+        name : str
+        frozen : FrozenKernel, FrozenRoutine or FrozenHostBlock
+        launch : dict, optional
+            compile()-kwargs overriding this sequence's own compile()-level
+            default for this block only. Ignored for a FrozenHostBlock
+            (BoundHostBlock.compile() takes no backend-specific kwargs),
+            accepted here regardless so a caller need not special-case which
+            kind of block it is composing.
 
         Author: B.G (08/2026)
         """
@@ -220,8 +222,19 @@ class SequenceBuilder:
     def loop(self, body, max_times, until: "str | None" = None) -> "SequenceBuilder":
         """
         Append a loop running the composed blocks named in `body`, in order,
-        `max_times` times, stopping early once `until` reports True. See the
-        module docstring for the accepted shapes of `max_times`/`until`.
+        `max_times` times, stopping early once `until` reports True.
+
+        Parameters
+        ----------
+        body : Sequence[str]
+            Names of already-composed blocks, run in order each iteration.
+        max_times : int or str
+            Trip count, or the name of a composed host block whose
+            zero-argument callable is invoked once on entry and coerced
+            with `int()`.
+        until : str, optional
+            Name of a composed host block invoked after each iteration and
+            coerced with `bool()`; `None` runs to completion.
 
         Author: B.G (08/2026)
         """
@@ -248,9 +261,12 @@ class SequenceBuilder:
 
     def freeze(self) -> "FrozenSequence":
         """
-        Close out the build phase: freeze this builder and return the
-        resulting FrozenSequence. Raises if no step()/loop() was ever
-        recorded.
+        Close out the build phase and return the resulting FrozenSequence.
+
+        Raises
+        ------
+        SequenceBuilderError
+            No step()/loop() was ever recorded.
 
         Author: B.G (08/2026)
         """
@@ -325,7 +341,16 @@ class BoundSequence(_Bound):
 
     def compile(self, backend: str, **kwargs) -> "CompiledSequence":
         """
-        See the module docstring's "Compiling" section.
+        Compile every composed block and return the resulting
+        CompiledSequence. See the module docstring's "Compiling" section.
+
+        Parameters
+        ----------
+        backend : str
+            "taichi", "quadrants" or "cupy".
+        **kwargs
+            Sequence-level compile()-kwargs, the default every block falls
+            back to unless overridden by its own `launch=`.
 
         Author: B.G (08/2026)
         """
@@ -405,10 +430,21 @@ class CompiledSequence:
 
     def swap(self, addr: "Address | str", buf: Any) -> "CompiledSequence":
         """
-        Re-point one composed block's DATA address at `buf` - routes
-        `name.*` to that block's own compiled `.swap()`. Raises if that
-        block has nothing to swap (a compiled host block is a plain
-        callable with no data addresses of its own).
+        Re-point one composed block's DATA address at `buf`.
+
+        Parameters
+        ----------
+        addr : Address or str
+            `name.*`, routed to that block's own compiled `.swap()`.
+        buf : Any
+            Replacement buffer.
+
+        Raises
+        ------
+        BindError
+            `name` is not composed, or the named block has nothing to swap
+            (a compiled host block is a plain callable with no data
+            addresses of its own).
 
         Author: B.G (08/2026)
         """

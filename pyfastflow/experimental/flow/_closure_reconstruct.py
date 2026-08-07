@@ -1,17 +1,15 @@
 """
 Taichi/Quadrants (closure) block templates behind make_fill_reconstruct/
-make_fill_reconstruct_solver, on the new builder/frozen/bound stack (../core/
+make_fill_reconstruct_solver, on the builder/frozen/bound stack (../core/
 context/builder.py, frozen.py, bound.py) - see _cupy_reconstruct.py's own
-module docstring for the algorithm (ported from
-experimental/LM/fill_reconstruct_optimised.py) and for why frontier_a/
+module docstring for the algorithm and for why frontier_a/
 frontier_b become one combined (2*n_flat,) buffer here, addressed by a
 `p % 2` parity computed from the bound `P` Parameter - identical reasoning on
 this backend, since a compiled Sequence step's data is bound once, at compile
 time, on every backend, not just cupy.
 
-Split out of a single _closure_blocks.py that used to hold every flow
-algorithm - see _closure_receivers.py/_closure_accum.py/
-_closure_depressions.py for the others.
+See _closure_receivers.py/_closure_accum.py/_closure_depressions.py for
+the other flow algorithms.
 
 `P` is a plain wired PARAM slot (`wire_param`, any mode) on `relax` - a
 caller binds a Parameter there (mode "scalar", since the host bumps it
@@ -60,6 +58,18 @@ def build_fill_reconstruct_init(*, backend: str, backend_mod, grid):
     yet claimed) - the seed state every sweep/relax pass decreases from.
     Composes its own `grid` occurrence.
 
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    grid : FrozenGroup
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -87,6 +97,20 @@ def build_fill_reconstruct_sweeps(*, backend: str, backend_mod, nx: int, ny: int
     top-to-bottom, column bottom-to-top), one thread per row/column walking
     it serially - no atomics needed, since distinct rows/columns never touch
     the same cell. Keyed "row_lr", "row_rl", "col_tb", "col_bt".
+
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    nx, ny : int
+
+    Returns
+    -------
+    dict
+        {"row_lr": ..., "row_rl": ..., "col_tb": ..., "col_bt": ...}, all
+        KernelBuilders.
 
     Author: B.G (08/2026)
     """
@@ -156,6 +180,17 @@ def build_fill_reconstruct_frontier_init(*, backend: str, backend_mod):
     into `frontier`'s first half (indices [0, n_flat)) and counted into
     `counters[0]` - the seed frontier the relax loop's pass 0 reads.
 
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+
+    Returns
+    -------
+    KernelBuilder
+
     Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
@@ -194,6 +229,19 @@ def build_fill_reconstruct_relax(*, backend: str, backend_mod, grid, n_flat: int
     kernel returns to know whether the next pass has any work
     (make_fill_reconstruct_solver's early-stop `until`). The caller must
     reset it to 0 (`.set(0)`) before each launch, same as `ndep`.
+
+    Parameters
+    ----------
+    backend : str
+        "taichi" or "quadrants".
+    backend_mod
+        The bound `ti`/`qd` module.
+    grid : FrozenGroup
+    n_flat : int
+
+    Returns
+    -------
+    KernelBuilder
 
     Author: B.G (08/2026)
     """

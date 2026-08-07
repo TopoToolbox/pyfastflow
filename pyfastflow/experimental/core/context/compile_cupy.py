@@ -1,18 +1,15 @@
 """
-cupy compile phase (1c): turns a BoundKernel into a CompiledKernel by
-assembling CUDA source text and building a `cp.RawModule` from it.
+cupy compile phase: turns a BoundKernel into a CompiledKernel by assembling
+CUDA source text and building a `cp.RawModule` from it.
 
 Reuses cupy_backend.py's pure text/emission utilities - dtype/literal
 formatting, the `pf_params` constant-block and `__restrict__`-local
-machinery, `__global__`/`__device__` function-name extraction - none of which
-know anything about the old CompileBuilder/Need/`_SpecializeCtx` binding
-model, only about Parameter objects and plain text (see cupy_backend.py's
-module docstring for the block's exact shape). What is new here is the span
-*resolver*: the old `_SpanParser` resolves a `$name.path$` span against a
-flat `{name: object}` bindings dict built by `CompileBuilder.bind()`; this
-module resolves a `$ctx.path$` span against one BoundKernel's address tree
-instead (bound.py) - `$ctx.z.get(i)$`, `$ctx.grid.neighbour(i, k)$`, same
-grammar contract.py already derives.
+machinery, `__global__`/`__device__` function-name extraction - which know
+only about Parameter objects and plain text (see cupy_backend.py's module
+docstring for the block's exact shape). The span *resolver* lives here: a
+`$ctx.path$` span resolves against one BoundKernel's address tree (bound.py)
+- `$ctx.z.get(i)$`, `$ctx.grid.neighbour(i, k)$`, the same grammar
+contract.py derives.
 
 Composed helpers become `__device__` functions
 ------------------------------------------------
@@ -70,11 +67,10 @@ class _EmitState:
     """
     Everything one compile() accumulates across every `__device__`/
     `__global__` body it parses - the pointer registry and its
-    first-encounter local-index map (both handed straight to
-    cupy_backend.py's `_param_block_source`/`_upload_param_block`/
-    `_insert_locals`, unchanged in shape from what `_SpanParser` built for
-    the old model), and the dependency-first, dedup-by-name map of every
-    composed helper's own `__device__` source.
+    first-encounter local-index map (handed straight to cupy_backend.py's
+    `_param_block_source`/`_upload_param_block`/`_insert_locals`), and the
+    dependency-first, dedup-by-name map of every composed helper's own
+    `__device__` source.
 
     Author: B.G (08/2026)
     """
@@ -270,16 +266,23 @@ def _check_cupy_data_signature(template: str, declared_names: set[str]) -> list[
 
 def compile_kernel(bound: BoundKernel, *, grid: Any = None, block: Any = None) -> CompiledKernel:
     """
-    Compile `bound` (a BoundKernel) to a cupy `cp.RawModule`. Checks unmet
-    slots and legal PARAM accessors first (compile_shared.py), then emits
-    the kernel's own `__global__` body and every composed helper's
-    `__device__` source it reaches, in dependency order, assembles the
-    `pf_params` constant block, builds the module and uploads the block.
+    Compile `bound` to a cupy `cp.RawModule`. Checks unmet slots and legal
+    PARAM accessors first (compile_shared.py), then emits the kernel's own
+    `__global__` body and every composed helper's `__device__` source it
+    reaches, in dependency order, assembles the `pf_params` constant block,
+    builds the module and uploads the block.
 
-    `grid`/`block`, if given, become this compiled kernel's launch-dimension
-    defaults (see CompiledKernel.__call__) - cupy has no auto-ranging
-    equivalent to Taichi/Quadrants, so a caller must supply them here or at
-    call time.
+    Parameters
+    ----------
+    bound : BoundKernel
+    grid, block : optional
+        Launch-dimension defaults for the returned CompiledKernel (see
+        CompiledKernel.__call__) - cupy has no auto-ranging equivalent to
+        Taichi/Quadrants, so a caller must supply them here or at call time.
+
+    Returns
+    -------
+    CompiledKernel
 
     Author: B.G (08/2026)
     """

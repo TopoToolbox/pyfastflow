@@ -266,6 +266,19 @@ class CupyParameter(Parameter):
         pooled storage immediately via `pool`; "const" stays a plain python
         value, read bare in a template body as a #define.
 
+        Parameters
+        ----------
+        name : str
+        dtype : numpy dtype
+        mode : str
+            "const", "scalar" or "field".
+        value : Any
+            Initial value.
+        pool : DataPool
+            Backing store for "scalar"/"field" modes.
+        n_flat : int, optional
+            Required for "field" mode - the number of nodes.
+
         Author: B.G (07/2026)
         """
         if mode not in MODES:

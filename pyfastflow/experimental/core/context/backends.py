@@ -21,25 +21,29 @@ import numpy as np
 
 def backend_classes(backend: str):
     """
-    (backend_module_or_None, ParameterCls, unused, dtypes) for one backend
-    name.
+    Look up the module, Parameter subclass and dtype table for one backend.
 
-    `backend_module_or_None` is `ti`/`qd` for the closure backends, `None` for
-    cupy - cupy blocks call plain C, never a bound backend module. `dtypes`
-    maps "i32"/"i64"/"f32"/"u8"/"u32" to that backend's own dtype objects
-    (ti.*/qd.* for the closure backends, numpy dtypes for cupy) - every name
-    make_grid/make_noise/make_depressions currently needs ("i64" for
-    depressions' bitpacked basin_saddle/outlet buffers), plus the obvious
-    siblings.
+    Parameters
+    ----------
+    backend : str
+        "taichi", "quadrants" or "cupy".
 
-    The third element is a leftover 4-tuple slot from before the builder/
-    frozen/bound rewrite (it used to carry a HelperBuilder class); every
-    remaining caller unpacks it as `_` and ignores it, kept only so existing
-    `_, ParamCls, _, dtypes = backend_classes(backend)` call sites do not need
-    editing.
+    Returns
+    -------
+    module : module or None
+        `ti`/`qd` for the closure backends, `None` for cupy - cupy blocks
+        call plain C, never a bound backend module.
+    ParameterCls : type
+        The backend's Parameter subclass.
+    unused : None
+        Reserved, always None - kept so `_, ParamCls, _, dtypes =
+        backend_classes(backend)` call sites stay stable.
+    dtypes : dict
+        Maps "i32"/"i64"/"f32"/"u8"/"u32" to that backend's own dtype
+        objects (ti.*/qd.* for the closure backends, numpy dtypes for cupy).
 
-    No blocks module is returned - each factory (grid, noise, ...) has its own
-    private block module and picks it itself.
+    No blocks module is returned - each factory (grid, noise, ...) has its
+    own private block module and picks it itself.
 
     Author: B.G (07/2026)
     """

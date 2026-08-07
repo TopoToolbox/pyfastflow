@@ -4,11 +4,10 @@ that reshape one.
 
 A Bag is a container and nothing more. It never inspects what it holds and has
 no notion of backend, mode or compilation - each member is resolved on its own
-type at compile time, by resolve_binding in compile.py. That is why this module
-stands on its own: it depends on nothing else here beyond the shared uid
-counter.
+type by whatever consumes the Bag. That is why this module stands on its own:
+it depends on nothing else here beyond the shared uid counter.
 
-merge/extract/trim/replace/from_builder all return a fresh Bag holding the very
+merge/extract/trim/replace all return a fresh Bag holding the very
 same member objects - no device storage is ever copied, and the same Parameter
 reachable from two bags is one Parameter. check_handles is the guard against
 the one thing that aliasing can get wrong: a single name meaning two different
@@ -63,7 +62,19 @@ class Bag:
 
     def add(self, name: str, item: Any) -> None:
         """
-        Register `item` under `name`. Raises if `name` is already taken.
+        Register `item` under `name`.
+
+        Parameters
+        ----------
+        name : str
+            Key to register `item` under. Must not already be taken.
+        item : Any
+            Value to store - a Parameter, Helper, nested Bag or plain value.
+
+        Raises
+        ------
+        KeyError
+            If `name` is already registered.
 
         Author: B.G (07/2026)
         """
@@ -128,6 +139,17 @@ class Bag:
         `("at", <Bag>)`, `("at.i", p1)`, `("at.j", p2)`, `("r", p3)` - the
         parent Bag's entry always precedes its members'.
 
+        Parameters
+        ----------
+        prefix : str, optional
+            Dotted path prepended to every yielded handle. Used internally
+            for recursion; callers normally leave it at "".
+
+        Returns
+        -------
+        Iterator[tuple[str, Any]]
+            (dotted_handle, obj) pairs in depth-first order.
+
         Author: B.G (07/2026)
         """
         for name, item in self._items.items():
@@ -141,9 +163,20 @@ class Bag:
 
 def _uid_of(obj: Any) -> int | None:
     """
-    An object's uid if it has one, else None. Handles bound without a uid
-    (plain python values, unwrapped bindings) are simply skipped by
-    check_handles rather than treated as a conflict.
+    An object's uid if it has one, else None.
+
+    Handles bound without a uid (plain python values, unwrapped bindings) are
+    simply skipped by check_handles rather than treated as a conflict.
+
+    Parameters
+    ----------
+    obj : Any
+        Object to inspect.
+
+    Returns
+    -------
+    int or None
+        `obj.uid` if it is an int, else None.
 
     Author: B.G (07/2026)
     """
@@ -167,6 +200,18 @@ def check_handles(units: dict[str, dict[str, Any]]) -> None:
 
     Objects with no `uid` attribute are ignored - there is nothing to compare.
 
+    Parameters
+    ----------
+    units : dict[str, dict[str, Any]]
+        Unit name -> {handle: obj} map, typically each built from a Bag's
+        `.walk()`.
+
+    Raises
+    ------
+    ValueError
+        If the same handle resolves to objects with different uids in two
+        units, naming the handle and both owning units.
+
     Author: B.G (07/2026)
     """
     seen: dict[str, tuple[int, str]] = {}
@@ -189,8 +234,23 @@ def _resolve_path(bag: "Bag", path: str) -> Any:
     """
     Walk a dotted path through nested Bags and return what it names.
 
-    Raises if any segment is missing or if a non-terminal segment does not
-    resolve to a Bag, naming the exact prefix that failed.
+    Parameters
+    ----------
+    bag : Bag
+        Bag to resolve `path` in.
+    path : str
+        Dotted path, e.g. "at.i".
+
+    Returns
+    -------
+    Any
+        The object named by `path`.
+
+    Raises
+    ------
+    KeyError
+        If any segment is missing or a non-terminal segment does not resolve
+        to a Bag, naming the exact prefix that failed.
 
     Author: B.G (07/2026)
     """
@@ -219,6 +279,22 @@ def merge(*bags: "Bag") -> "Bag":
     this way and always raises, since there is nothing to compare.
 
     No input bag is read from twice or mutated; the result is a fresh Bag.
+
+    Parameters
+    ----------
+    *bags : Bag
+        Bags to union, in precedence order.
+
+    Returns
+    -------
+    Bag
+        Fresh Bag holding the union of all members.
+
+    Raises
+    ------
+    ValueError
+        If a name collides between bags and cannot be proven to be the same
+        object.
 
     Author: B.G (07/2026)
     """
@@ -251,7 +327,24 @@ def extract(bag: "Bag", names) -> "Bag":
     (`"stove.at.i"`); a dotted path is resolved through nested Bags and
     reconstructed as nesting in the result, so extracting `"at.i"` and
     `"at.j"` yields a result with an `at` sub-bag holding `i` and `j`, not
-    two flat members. Raises if any path does not resolve.
+    two flat members.
+
+    Parameters
+    ----------
+    bag : Bag
+        Bag to extract from.
+    names : Iterable[str]
+        Plain names or dotted paths to keep.
+
+    Returns
+    -------
+    Bag
+        Fresh Bag holding just the named members, with nesting rebuilt.
+
+    Raises
+    ------
+    KeyError
+        If any path does not resolve in `bag`.
 
     Author: B.G (07/2026)
     """
@@ -286,8 +379,24 @@ def trim(bag: "Bag", names) -> "Bag":
     Accepts the same plain-name or dotted-path entries as extract(). Removing
     `"at.i"` drops just that member, leaving `at` in the result with whatever
     else it held; removing a bare name drops that member (and, if it names a
-    nested Bag, everything under it) whole. Raises if any path does not
-    resolve in `bag`.
+    nested Bag, everything under it) whole.
+
+    Parameters
+    ----------
+    bag : Bag
+        Bag to trim.
+    names : Iterable[str]
+        Plain names or dotted paths to remove.
+
+    Returns
+    -------
+    Bag
+        Fresh Bag with the named members removed.
+
+    Raises
+    ------
+    KeyError
+        If any path does not resolve in `bag`.
 
     Author: B.G (07/2026)
     """
@@ -321,12 +430,29 @@ def replace(bag: "Bag", name: str, obj: Any) -> "Bag":
     """
     `bag` with the member at `name` swapped for `obj`, as a new Bag.
 
-    `name` may be a dotted path into nested Bags.
-
     This is how anything fixed at a Parameter's construction is changed - its
     mode (see Parameter.mode), or a const's value (see Parameter.set). Both
     mean building a new Parameter, replacing it in here, and recompiling
     whatever bound the old one.
+
+    Parameters
+    ----------
+    bag : Bag
+        Bag to modify.
+    name : str
+        Plain name or dotted path of the member to replace.
+    obj : Any
+        Replacement value.
+
+    Returns
+    -------
+    Bag
+        Fresh Bag with `obj` at `name` in place of the old member.
+
+    Raises
+    ------
+    KeyError
+        If `name` does not resolve in `bag`.
 
     Author: B.G (07/2026)
     """
@@ -350,17 +476,3 @@ def replace(bag: "Bag", name: str, obj: Any) -> "Bag":
         return result
 
     return _rebuild(bag, parts)
-
-
-def from_builder(builder: "CompileBuilder") -> "Bag":
-    """
-    A new Bag holding a builder's current bindings under their existing
-    names.
-
-    A snapshot at call time: later bind() / rebind() calls on `builder` do
-    not retroactively change the returned Bag, and adding to the Bag does
-    not reach back into the builder.
-
-    Author: B.G (07/2026)
-    """
-    return Bag(dict(builder.bindings))

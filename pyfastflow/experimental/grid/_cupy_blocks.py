@@ -1,5 +1,5 @@
 """
-cupy (CUDA source) block templates behind make_grid, on the new
+cupy (CUDA source) block templates behind make_grid, on the
 builder/frozen/bound stack (core/context/builder.py, frozen.py, bound.py).
 
 Mirrors _closure_blocks.py block for block - same private/public split, same
@@ -7,11 +7,10 @@ per-axis composability (a periodic boundary swaps in the "periodic"
 __device__ variant of a row or column block, the untouched axis keeps its
 "identity"/"bounded" variant) - written as CUDA text instead of python defs.
 
-Every span reaching a PARAM is spelled `$ctx.NAME.get(...)$` in full - the old
-cupy stack's bare-span shorthand (`$phys.dx$` silently meaning `.get(0)`) is
-gone; the new grammar requires an explicit `ctx`-rooted, `.get`/`.set_node`-
-terminated chain (contract.py, compile_shared.py's check_legal_accessors).
-Every span reaching a composed HELPER is spelled `$ctx.name(args)$`.
+Every span reaching a PARAM is spelled `$ctx.NAME.get(...)$` in full - an
+explicit, `ctx`-rooted, `.get`/`.set_node`-terminated chain is required
+(contract.py, compile_shared.py's check_legal_accessors). Every span
+reaching a composed HELPER is spelled `$ctx.name(args)$`.
 
 `_delta(k)` is the one runtime-if-ladder equivalent: k is per-call device
 data, not a structural choice, so here it is a `__constant__` int table

@@ -1,127 +1,82 @@
 """
-`ctx.bk`: the reserved backend-intrinsics namespace.
+`ctx.bk`: the reserved backend-intrinsics namespace for Taichi/Quadrants
+templates that need real transcendental functions or a typed literal cast.
 
 Why this exists
 ----------------
-grid/ never needed a bound backend module - its own private blocks are
-built entirely out of plain arithmetic and the python builtins Taichi and
-Quadrants both trace natively (abs, min - see grid/_closure_blocks.py's
-module docstring). noise/'s Perlin lattice noise and visu/'s hillshade
-formula are not that lucky: they need real transcendental functions
-(sqrt/atan2/cos/sin/floor) and one typed cast (a u32 cast of an oversized
-integer literal, in particular - Taichi rejects `0x846CA68B` outright as a
-default-i32 literal without one), and there is no python builtin standing in
-for any of those. Confirmed empirically before this module existed: calling
-bare `math.sqrt`/`math.floor` inside a `ti.func` raises `TaichiTypeError:
-must be real number, not Taichi Expression` - Taichi's AST transformer only
-special-cases a short, fixed list of python builtins (abs/min/max/int/
-float/...), never the `math` module.
+Most closure templates get by on plain arithmetic and the handful of python
+builtins Taichi/Quadrants trace natively (`abs`, `min`, `max`, `int`,
+`float`). A few need more: transcendental math (`sqrt`, `atan2`, `cos`,
+`sin`, `floor`) and typed dtype casts, neither of which has a python
+built-in equivalent that traces correctly - bare `math.sqrt`/`math.floor`
+inside a `ti.func` raises `TaichiTypeError: must be real number, not Taichi
+Expression`, since Taichi's AST transformer only special-cases its own short
+builtin list, never the `math` module.
 
-The old stack solved the equivalent problem by splicing a free `_BK` name
-into a template's globals (`_closure_backend.py`'s `specialize_closure`,
-`extra_globals={"_BK": self._backend}`). That mechanism is deliberately not
-reintroduced here: a free global name silently available regardless of
-whether a template declared any need for it is exactly what the whole
-`ctx`-rooted grammar (ctx.py, contract.py) exists to eliminate - every
-reference a template makes should be visible in its derived Contract, not
-smuggled in through `__globals__`.
-
-Instead, `bk` is a reserved, always-present member of `ctx` itself, on the
-closure backends only: `ctx.bk.sqrt(x)`, `ctx.bk.atan2(y, x)`,
+`ctx.bk` exposes this surface as a reserved, always-present member of `ctx`
+on the closure backends only: `ctx.bk.sqrt(x)`, `ctx.bk.atan2(y, x)`,
 `ctx.bk.u32(0x846CA68B)`. One template text works against both Taichi and
-Quadrants because `make_closure_bk(backend)` resolves the same short
-attribute surface against whichever module (`ti` or `qd`) `backend` is -
-mirroring how every other closure template already reads uniformly across
-backends.
+Quadrants because `make_closure_bk(backend)` resolves the same attribute
+surface against whichever module (`ti` or `qd`) `backend` is.
+
+A free global spliced into a template's namespace (bypassing `ctx`
+entirely) was considered and rejected: every reference a template makes
+should be visible in its derived Contract, not smuggled in through
+`__globals__` - see ctx.py/contract.py for the grammar this keeps intact.
 
 Reserved, not a slot
 ---------------------
 `ctx.bk.*` is a builtin the grammar recognises structurally, not a
-capability a template's Contract requires satisfied - contract.py's python
-AST walk drops any chain rooted at `RESERVED_BK_NAME` before it ever reaches
-`Contract.chains`, so `ctx.bk.sqrt(...)` never shows up in `inspect()`,
-never appears in `unmet()`, and ingest() never demands a wired "bk" slot for
-it. Symmetrically, builder.py's `_Builder._wire()`/`compose()` (the only two
-places a name becomes a slot or a composed root) raise if a caller ever
+capability a template's Contract requires satisfied: contract.py's AST walk
+drops any chain rooted at `RESERVED_BK_NAME` before it reaches
+`Contract.chains`, so `ctx.bk.sqrt(...)` never shows up in `inspect()` or
+`unmet()`, and `ingest()` never demands a wired "bk" slot for it.
+Symmetrically, `_Builder._wire()`/`compose()` (builder.py) raise if a caller
 tries to declare a slot or compose a sub-structure named "bk" - the name is
-reserved for this namespace and can never mean anything else. This is also
-why `bk` is exposed on every level of the ctx tree compile_closure.py builds
-(the kernel's own root node and every composed helper's node down to the
-leaves), not just the root: a private block many levels deep is exactly
-where noise's/visu's own use of it lives.
+reserved and can never mean anything else. `bk` is exposed on every level of
+the ctx tree compile_closure.py builds, not just the root, since a helper
+several levels deep may need it just as much as its caller.
 
-cupy is unaffected and deliberately excluded: its templates are raw CUDA
-text where the native C spelling (`sqrtf`, `atan2f`, `floorf`, a plain
-`0x846CA68Bu` literal) already is the natural way to write this, and the
-python/cupy template surfaces are already a different grammar by design
-(contract.py's module docstring) - `ctx.bk` is never resolved against a
-cupy compile, and cupy blocks are not expected to reference it.
+cupy is unaffected: its templates are raw CUDA text, where the native C
+spelling (`sqrtf`, `atan2f`, `floorf`, a plain `0x846CA68Bu` literal) is
+already the natural way to write this - `ctx.bk` is never resolved against
+a cupy compile.
 
 Surface
 -------
-Started narrow - exactly what noise/ and visu/ needed: `sqrt`, `atan2`, `cos`,
-`sin`, `floor` (visu's hillshade formula, noise's Perlin lattice math) and
-`u32` (noise's hash - an oversized u32 literal has nowhere else to become a
-correctly-typed value, see below). Extended for ops/'s bitpack/reduce port
-(08/2026) with `bit_cast`, `select`, `cast` (the IEEE-754 bit-flip trick
-bitpack needs - reinterpreting a float's bits as u32 and back, and a
-ternary-style branchless select over that) and `atomic_min`/`atomic_max`
-(reduce's per-thread accumulation into a 0-d field) plus the `i32`/`i64`/`f32`
-dtype tokens alongside the existing `u32`, needed as `ctx.bk.cast(x, ctx.bk.
-i64)`'s second argument and, for `i64`, the same oversized-literal exemption
-`u32` already gets (`ctx.bk.i64(0xFFFFFFFF)` - see below). Extended again for
-ops/'s elementwise port (08/2026) with `grouped` (`ti.grouped`/`qd.grouped` -
-`swap`'s dimensionality-agnostic iteration over a possibly multi-dimensional
-field/ndarray, `for idx in ctx.bk.grouped(array1)`), a plain pass-through with
-no oversized-literal or identity concern of its own. Extended again for
-flow/'s accumulation port (08/2026) with `atomic_add` (accum_downstream_
-atomic's own per-node downstream accumulation into a DATA-typed `q` buffer -
-the same "genuinely concurrent write, so DATA not PARAM" shape reduce's
-`atomic_min`/`atomic_max` already cover, just the third of the three atomic
-ops Taichi/Quadrants both expose that this surface had not yet needed).
-Extended again for flow/'s rake-and-compress accumulation port (08/2026)
-with `Vector` (`ti.Vector`/`qd.Vector` - rake_compress_accum's own
-per-thread fixed-size local donor cache, `ctx.bk.Vector([-1] * NN)`, a
-plain pass-through with no oversized-literal or identity concern of its
-own, mirroring `grouped`).
+`sqrt`, `atan2`, `cos`, `sin`, `floor` - transcendental math.
+`u32`, `i32`, `i64`, `f32` - dtype tokens, exposed as the backend's own
+dtype objects (see "Typed literal casts" below).
+`bit_cast`, `select`, `cast` - the IEEE-754 bit-flip trick (reinterpreting a
+float's bits as u32 and back) plus a branchless ternary-style select.
+`atomic_min`, `atomic_max`, `atomic_add` - the three atomic ops Taichi/
+Quadrants expose, for genuinely concurrent writes into a DATA buffer.
+`grouped`, `Vector` - `ti.grouped`/`ti.Vector` (and `qd.` equivalents)
+passed through unchanged, for dimensionality-agnostic iteration and small
+per-thread fixed-size local arrays.
 
-`abs`/`min`/`max` stay plain python builtins, as grid already established;
-`int()`/`float()` join them here rather than becoming `ctx.bk` members -
-confirmed empirically to trace exactly like `abs`/`min` do (Taichi/Quadrants
-special-case these python builtins for casting too), so Perlin's own
-int<->float lattice-cell conversions use the plain builtins, not a `ctx.bk`
-member - there is nothing dtype-specific about `int(x)`/`float(x)` the way
-there is about an oversized integer literal, and (confirmed the same way)
-`ti.f32`/`ti.i32` do NOT get the same oversized-literal exemption `ti.u32`
-does: `ti.f32(37)` raises `Integer literals must be annotated with a integer
-type. For type casting, use ti.cast.` even though `ti.u32(37)` does not, so
-there would be nothing gained by adding `f32`/`i32` members here anyway -
-plain `float()`/`int()` are both simpler and strictly more capable (they
-work uniformly whether the operand is a bare literal or an already-traced
-Expr, which `ti.f32`/`ti.i32` do not).
+`abs`/`min`/`max`/`int`/`float` stay plain python builtins rather than
+`ctx.bk` members - both backends special-case them for casting the same way
+they special-case `abs`/`min`, and they work uniformly on a bare literal or
+an already-traced expression, which the dtype objects below do not.
 
-`u32`/`i64` are exposed as the backend's own dtype objects themselves (`ti.
-u32`, `ti.i64`, never a `lambda x: ti.cast(x, ti.u32)` wrapper around either)
-- `ctx.bk.u32(0x846CA68B)`, `ctx.bk.i64(0xFFFFFFFF)`, called exactly as
-`ti.u32(0x846CA68B)`/`ti.i64(0xFFFFFFFF)` would be. This is load-bearing, not
-a style choice: confirmed empirically before settling on it, wrapping the
-cast in an ordinary python callable breaks Taichi's own oversized-literal
-handling - `ti.u32(2221713035)` compiles (Taichi's frontend recognises a
-call whose callee resolves, by identity, to one of its own dtype objects,
-and special-cases the literal argument's own type inference accordingly,
-even reached through an attribute chain), while `(lambda x: ti.cast(x,
-ti.u32))(2221713035)` raises `Integer literal 2221713035 exceeded the range
-of default_ip: i32` - the literal is type-inferred as a bare argument to a
-generic python callable *before* the lambda body ever runs `ti.cast`, and
-the generic path defaults every bare int literal to i32 regardless of what
-the callable eventually does with it. So `ctx.bk.u32(...)`/`ctx.bk.i64(...)`
-must resolve to the real `ti.u32`/`ti.i64` (or `qd.` equivalent) object one
-attribute hop away, not to a function that happens to produce the same
-value. `i32`/`f32` are exposed the same uniform way for symmetry (`ctx.bk.
-cast(x, ctx.bk.i32)`, ...) even though no template so far needs their own
-oversized-literal exemption - `ctx.bk.cast`'s second argument is always a
-dtype token regardless, and there is no reason for `i32`/`f32` to be the odd
-ones out of the four.
+Typed literal casts
+--------------------
+`u32`/`i32`/`i64`/`f32` are exposed as the backend's own dtype objects
+themselves (`ti.u32`, never a `lambda x: ti.cast(x, ti.u32)` wrapper) -
+`ctx.bk.u32(0x846CA68B)` is called exactly as `ti.u32(0x846CA68B)` would be.
+This is load-bearing: Taichi's frontend recognises a call whose callee
+resolves, by identity, to one of its own dtype objects, and exempts that
+call's literal argument from default-int-type inference even reached
+through an attribute chain - `ti.u32(2221713035)` compiles, but wrapping the
+same cast in an ordinary python callable breaks it (`Integer literal
+2221713035 exceeded the range of default_ip: i32`), because the literal is
+type-inferred as a bare argument before the wrapper body ever runs. So
+`ctx.bk.u32(...)` must resolve to the real `ti.u32` object one attribute hop
+away, not to a function that happens to produce the same value. Only `u32`/
+`i64` currently need the oversized-literal exemption in practice; `i32`/
+`f32` are exposed the same way for symmetry, since `ctx.bk.cast`'s second
+argument is always one of these four dtype tokens regardless.
 
 Author: B.G (08/2026)
 """
