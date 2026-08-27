@@ -43,10 +43,13 @@ from .flow_reroute_kernels import (
     init_reroute_carve_kernel,
     iteration_reroute_carve_kernel,
     label_basins_walk_kernel,
+    label_from_route_kernel,
+    merge_basin_route_kernel,
     propagate_basin_final_kernel,
     propagate_basin_iter_kernel,
     reroute_jump_kernel,
     saddlesort_kernel,
+    set_keep_kernel,
 )
 from .flow_sfd_accum_kernels import (
     accum_downstream_atomic_kernel,
@@ -287,6 +290,24 @@ class FlowContext:
                 },
                 {
                     "target": "kernels",
+                    "name": "set_keep",
+                    "template": set_keep_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "label_from_route",
+                    "template": label_from_route_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
+                    "name": "merge_basin_route",
+                    "template": merge_basin_route_kernel,
+                    "kind": "kernel",
+                },
+                {
+                    "target": "kernels",
                     "name": "init_reroute_carve",
                     "template": init_reroute_carve_kernel,
                     "kind": "kernel",
@@ -379,6 +400,9 @@ class FlowContext:
                 "propagate_basin_final": "kernels.propagate_basin_final",
                 "saddlesort": "kernels.saddlesort",
                 "reroute_jump": "kernels.reroute_jump",
+                "set_keep": "kernels.set_keep",
+                "label_from_route": "kernels.label_from_route",
+                "merge_basin_route": "kernels.merge_basin_route",
                 "init_reroute_carve": "kernels.init_reroute_carve",
                 "iteration_reroute_carve": "kernels.iteration_reroute_carve",
                 "finalise_reroute_carve": "kernels.finalise_reroute_carve",

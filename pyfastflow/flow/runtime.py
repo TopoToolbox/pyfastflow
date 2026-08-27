@@ -381,11 +381,19 @@ def reroute_flow_with_temps(
     tag,
     tag_alt,
     rerouted,
+    basin_route,
+    b_rcv,
     *,
     carve=True,
 ):
     """
     Execute lake rerouting with caller-provided buffers.
+
+    Basin identity is carried across rounds in ``basin_route`` (the original
+    receivers plus the merges accumulated each round), not re-derived from the
+    carved receivers - so a resolved basin folds into its receiver and the
+    receiver graph carved each round is always a forest. This matches the
+    original FastFlow lakeflow loop and keeps the carved ``rec`` free of cycles.
 
     Author: B.G (03/2026)
     """
@@ -402,7 +410,11 @@ def reroute_flow_with_temps(
     tag_field = require_flat_field(tag, "tag")
     tag_alt_field = require_flat_field(tag_alt, "tag_alt")
     rerouted_field = require_flat_field(rerouted, "rerouted")
+    basin_route_field = require_flat_field(basin_route, "basin_route")
+    b_rcv_field = require_flat_field(b_rcv, "b_rcv")
 
+    # basin identity starts as the original (pre-reroute) receiver forest
+    basin_route_field.copy_from(rec_field)
     rec_work_field.copy_from(rec_field)
     rerouted_field.fill(False)
 
@@ -414,16 +426,13 @@ def reroute_flow_with_temps(
 
     for _ in range(ndep_iters):
         ndep_bis = flowctx.depression_counter(rec_work_field)
-
-        flowctx.basin_id_init(bid_field)
-        rec_jump_field.copy_from(rec_work_field)
-
-        for _ in range(flowctx.logn + 1):
-            flowctx.propagate_basin_iter(rec_jump_field)
-        flowctx.propagate_basin_final(bid_field, rec_jump_field)
-
         if ndep_bis == 0:
             break
+
+        # basins from the carried route, contracted to roots (not from rec_work)
+        for _ in range(flowctx.logn + 1):
+            flowctx.propagate_basin_iter(basin_route_field)
+        flowctx.label_from_route(bid_field, basin_route_field)
 
         flowctx.saddlesort(
             bid_field,
@@ -432,7 +441,15 @@ def reroute_flow_with_temps(
             basin_saddle_field,
             basin_saddlenode_field,
             outlet_field,
+            b_rcv_field,
             z_field,
+        )
+        flowctx.set_keep(
+            bid_field,
+            b_rcv_field,
+            outlet_field,
+            basin_saddle_field,
+            basin_saddlenode_field,
         )
 
         if carve:
@@ -461,6 +478,9 @@ def reroute_flow_with_temps(
         else:
             flowctx.reroute_jump(rec_work_field, outlet_field, rerouted_field)
 
+        # fold every resolved basin into its receiver so the graph shrinks
+        flowctx.merge_basin_route(outlet_field, basin_route_field)
+
     rec_field.copy_from(rec_work_field)
 
 
@@ -481,6 +501,8 @@ def reroute_flow(flowctx, z, receivers, *, carve=True):
     tag = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(flowctx.n_flat))
     tag_alt = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(flowctx.n_flat))
     rerouted = ppool.taipool.get_tpfield(dtype=ti.u1, shape=(flowctx.n_flat))
+    basin_route = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(flowctx.n_flat))
+    b_rcv = ppool.taipool.get_tpfield(dtype=ti.i32, shape=(flowctx.n_flat))
 
     try:
         reroute_flow_with_temps(
@@ -498,6 +520,8 @@ def reroute_flow(flowctx, z, receivers, *, carve=True):
             tag,
             tag_alt,
             rerouted,
+            basin_route,
+            b_rcv,
             carve=carve,
         )
     finally:
@@ -511,6 +535,8 @@ def reroute_flow(flowctx, z, receivers, *, carve=True):
         basin_saddlenode.release()
         tag.release()
         tag_alt.release()
+        basin_route.release()
+        b_rcv.release()
 
     return rerouted
 
