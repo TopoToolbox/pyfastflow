@@ -888,7 +888,7 @@ def build_depression_counter(*, grid, n_flat: int):
 __global__ void {t}_depression_counter(const int* rec, int* ndep) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
-    if (rec[i] == i && !($ctx.grid.can_out(i)$)) {{
+    if (rec[i] == i && !($ctx.grid.can_out(i)$) && !($ctx.grid.nodata(i)$)) {{
         atomicAdd(ndep, 1);
     }}
 }}

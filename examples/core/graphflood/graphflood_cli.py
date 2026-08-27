@@ -229,12 +229,14 @@ def main():
         tag = pool.get_data(i32, (n_flat,))
         tag_alt = pool.get_data(i32, (n_flat,))
         rec_scratch = pool.get_data(i32, (n_flat,))
+        basin_route = pool.get_data(i32, (n_flat,))
+        b_rcv = pool.get_data(i32, (n_flat,))
         ndep_p = ParamCls("NDEP", dtype=i32, mode="scalar", value=0, pool=pool)
         kwargs.update(
             rec=rec.data, ndep_p=ndep_p, bid=bid.data, rec_jump=rec_jump.data, z_prime=z_prime.data,
             is_border=is_border.data, basin_saddle=basin_saddle.data, basin_saddlenode=basin_saddlenode.data,
             outlet=outlet_h.data, rerouted=rerouted.data, tag=tag.data, tag_alt=tag_alt.data,
-            rec_scratch=rec_scratch.data,
+            rec_scratch=rec_scratch.data, basin_route=basin_route.data, b_rcv=b_rcv.data,
         )
 
     gf = make_graphflood(backend, grid_group, grid_params, **kwargs)

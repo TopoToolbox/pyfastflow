@@ -848,13 +848,12 @@ def make_graphflood(
         _require(
             "fill_method='jump'", rec=rec, ndep_p=ndep_p, bid=bid, rec_jump=rec_jump, z_prime=z_prime,
             is_border=is_border, basin_saddle=basin_saddle, basin_saddlenode=basin_saddlenode,
-            outlet=outlet, b_rcv=b_rcv,
+            outlet=outlet, b_rcv=b_rcv, basin_route=basin_route,
         )
         if depression_method == "vanilla":
             _require(
                 "fill_method='jump', depression_method='vanilla'",
                 tag=tag, tag_alt=tag_alt, rec_scratch=rec_scratch, rerouted=rerouted,
-                basin_route=basin_route,
             )
         recv = make_receivers(
             backend, grid, topology=topology, mode="steepest",

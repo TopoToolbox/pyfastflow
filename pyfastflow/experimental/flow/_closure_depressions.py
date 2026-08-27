@@ -793,7 +793,7 @@ def build_depression_counter(*, backend: str, backend_mod, grid):
 
     def depression_counter_tmpl(ctx, rec: T, ndep: T):
         for i in rec:
-            if rec[i] == i and not ctx.grid.can_out(i):
+            if rec[i] == i and not ctx.grid.can_out(i) and not ctx.grid.nodata(i):
                 ctx.bk.atomic_add(ndep[None], 1)
 
     return (

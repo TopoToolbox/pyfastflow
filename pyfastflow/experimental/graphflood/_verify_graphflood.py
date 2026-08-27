@@ -111,11 +111,13 @@ def run(backend: str, fill_method: str) -> None:
         basin_saddlenode = pool.get_data(i32, (n,))
         outlet_h = pool.get_data(i64, (n,))
         rerouted = pool.get_data(i32, (n,))
+        basin_route = pool.get_data(i32, (n,))
+        b_rcv = pool.get_data(i32, (n,))
         ndep_p = ParamCls("NDEP", dtype=i32, mode="scalar", value=0, pool=pool)
         extra = dict(
             rec=rec.data, ndep_p=ndep_p, bid=bid.data, rec_jump=rec_jump.data, z_prime=z_prime.data,
             is_border=is_border.data, basin_saddle=basin_saddle.data, basin_saddlenode=basin_saddlenode.data,
-            outlet=outlet_h.data, rerouted=rerouted.data,
+            outlet=outlet_h.data, rerouted=rerouted.data, b_rcv=b_rcv.data, basin_route=basin_route.data,
         )
     else:
         surface = pool.get_data(f32, (n,))
