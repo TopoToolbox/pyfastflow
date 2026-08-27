@@ -409,6 +409,8 @@ def make_graphflood(
     tag=None,
     tag_alt=None,
     rec_scratch=None,
+    basin_route=None,
+    b_rcv=None,
     surface=None,
     filled=None,
     parent=None,
@@ -845,12 +847,14 @@ def make_graphflood(
     if fill_method == "jump":
         _require(
             "fill_method='jump'", rec=rec, ndep_p=ndep_p, bid=bid, rec_jump=rec_jump, z_prime=z_prime,
-            is_border=is_border, basin_saddle=basin_saddle, basin_saddlenode=basin_saddlenode, outlet=outlet,
+            is_border=is_border, basin_saddle=basin_saddle, basin_saddlenode=basin_saddlenode,
+            outlet=outlet, b_rcv=b_rcv,
         )
         if depression_method == "vanilla":
             _require(
                 "fill_method='jump', depression_method='vanilla'",
                 tag=tag, tag_alt=tag_alt, rec_scratch=rec_scratch, rerouted=rerouted,
+                basin_route=basin_route,
             )
         recv = make_receivers(
             backend, grid, topology=topology, mode="steepest",
@@ -869,6 +873,7 @@ def make_graphflood(
             rec=rec, z=z, bid=bid, rec_jump=rec_jump, z_prime=z_prime, is_border=is_border,
             basin_saddle=basin_saddle, basin_saddlenode=basin_saddlenode, outlet=outlet,
             rerouted=rerouted, tag=tag, tag_alt=tag_alt, rec_scratch=rec_scratch,
+            basin_route=basin_route, b_rcv=b_rcv,
             n_flat=n_flat, block_size=block_size,
         )
         rec_for_accum = rec

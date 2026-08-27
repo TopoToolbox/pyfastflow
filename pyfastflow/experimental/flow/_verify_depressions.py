@@ -187,7 +187,7 @@ def check_all(rec: np.ndarray, nx: int, ny: int, can_out: np.ndarray) -> dict:
     return out
 
 
-def _label_only_sequence(backend, deps, grid_params, n_flat, rec, rec_jump, bid):
+def _label_only_sequence(backend, deps, grid_params, n_flat, rec, rec_jump, bid, basin_route=None):
     """
     A compiled Sequence (sequence.py) whose only block is `deps`'s
     basin-labelling block, so the two labelling implementations can be run
@@ -204,15 +204,33 @@ def _label_only_sequence(backend, deps, grid_params, n_flat, rec, rec_jump, bid)
     from ..core.context.sequence import SequenceBuilder
     from . import _bind_grid_everywhere, _bind_if_present
 
+    # vanilla now labels from the carried basin_route (seeded here from rec),
+    # not from rec directly - see make_depression_solver.
+    is_route = "merge_basin_route" in deps
+
     sb = SequenceBuilder()
-    sb.compose("label_basins", deps["label_basins"])
-    sb.step("label_basins")
+    if is_route:
+        sb.compose("seed", deps["copy_field"])
+        sb.compose("label_basins", deps["label_basins"])
+        sb.step("seed")
+        sb.step("label_basins")
+    else:
+        sb.compose("label_basins", deps["label_basins"])
+        sb.step("label_basins")
     frozen = sb.freeze()
     bound = frozen.build()
 
-    bound.bind_leaf({"rec": rec, "rec_jump": rec_jump, "bid": bid}, prefix=("label_basins",))
-    _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "src"), rec)
-    _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "dst"), rec_jump)
+    if is_route:
+        bound.bind(("seed", "src"), rec)
+        bound.bind(("seed", "dst"), basin_route)
+        bound.bind_leaf(
+            {"rec_jump": basin_route, "basin_route": basin_route, "bid": bid},
+            prefix=("label_basins",),
+        )
+    else:
+        bound.bind_leaf({"rec": rec, "rec_jump": rec_jump, "bid": bid}, prefix=("label_basins",))
+        _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "src"), rec)
+        _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "dst"), rec_jump)
     _bind_grid_everywhere(bound, grid_params)
 
     if backend == "cupy":
@@ -279,6 +297,8 @@ def run(backend: str):
     tag = pool.get_data(u8, (n,))
     tag_alt = pool.get_data(u8, (n,))
     rerouted = pool.get_data(u8, (n,))
+    basin_route = pool.get_data(i32, (n,))
+    b_rcv = pool.get_data(i32, (n,))
 
     ndep_p = ParamCls("NDEP", dtype=i32, mode="scalar", value=0, pool=pool)
 
@@ -294,7 +314,7 @@ def run(backend: str):
         rec=rec.data, z=z.data, bid=bid.data, rec_jump=rec_jump.data, z_prime=z_prime.data,
         is_border=is_border.data, basin_saddle=basin_saddle.data, basin_saddlenode=basin_saddlenode.data,
         outlet=outlet.data, rerouted=rerouted.data, tag=tag.data, tag_alt=tag_alt.data,
-        rec_scratch=rec_scratch.data,
+        rec_scratch=rec_scratch.data, basin_route=basin_route.data, b_rcv=b_rcv.data,
     )
 
     solvers = {}
@@ -306,7 +326,7 @@ def run(backend: str):
         )
         if reroute == "carve":
             labellers[method] = _label_only_sequence(
-                backend, deps, grid_params, n, rec.data, rec_jump.data, bid.data
+                backend, deps, grid_params, n, rec.data, rec_jump.data, bid.data, basin_route.data
             )
 
     terrains = (

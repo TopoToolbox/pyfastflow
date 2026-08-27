@@ -696,13 +696,23 @@ def make_depressions(
 
     # basin labelling
     if method == "vanilla":
+        # basin identity carried across rounds in basin_route (label from it,
+        # not from the carved receivers) plus the merge kernel that folds each
+        # resolved basin into its receiver - the original FastFlow construction
+        # that keeps the carved graph a forest. See _closure_depressions.py.
         if closure:
-            lb_rb, lb_kernels = blocks.build_basin_labelling_vanilla(
-                backend=backend, backend_mod=backend_mod, grid=grid, copy_field=copy_field, logn=logn,
+            lb_rb, lb_kernels = blocks.build_basin_labelling_route(
+                backend=backend, backend_mod=backend_mod, grid=grid, logn=logn,
+            )
+            out["merge_basin_route"] = blocks.build_merge_basin_route(
+                backend=backend, backend_mod=backend_mod, bitpack=bitpack,
             )
         else:
-            lb_rb, lb_kernels = blocks.build_basin_labelling_vanilla(
-                grid=grid, copy_field=copy_field, n_flat=n_flat_resolved, logn=logn,
+            lb_rb, lb_kernels = blocks.build_basin_labelling_route(
+                grid=grid, n_flat=n_flat_resolved, logn=logn,
+            )
+            out["merge_basin_route"] = blocks.build_merge_basin_route(
+                bitpack=bitpack, n_flat=n_flat_resolved,
             )
         out["label_basins"] = lb_rb.freeze()
         for name, kb in lb_kernels.items():
@@ -828,6 +838,8 @@ def make_depression_solver(
     tag=None,
     tag_alt=None,
     rec_scratch=None,
+    basin_route=None,
+    b_rcv=None,
     n_flat: int,
     block_size: int = 256,
 ):
@@ -907,12 +919,15 @@ def make_depression_solver(
         raise ValueError(f"make_depression_solver: reroute must be one of {sorted(_DEP_REROUTES)}, got {reroute!r}")
     _require(
         "every combination", rec=rec, z=z, bid=bid, rec_jump=rec_jump, z_prime=z_prime,
-        is_border=is_border, basin_saddle=basin_saddle, basin_saddlenode=basin_saddlenode, outlet=outlet,
+        is_border=is_border, basin_saddle=basin_saddle, basin_saddlenode=basin_saddlenode,
+        outlet=outlet, b_rcv=b_rcv,
     )
     if reroute == "jump" or (reroute == "carve" and method == "vanilla"):
         _require("reroute='jump' or method='vanilla'+reroute='carve'", rerouted=rerouted)
     if reroute == "carve" and method == "vanilla":
         _require("method='vanilla', reroute='carve'", tag=tag, tag_alt=tag_alt, rec_scratch=rec_scratch)
+    if method == "vanilla":
+        _require("method='vanilla'", basin_route=basin_route)
 
     ndep_p = deps["ndep_p"]
 
@@ -940,14 +955,20 @@ def make_depression_solver(
     sb.compose("reroute", deps["reroute"])
     sb.compose("entry_passes", entry_passes_hb)
     sb.compose("resolved", resolved_hb)
+    if method == "vanilla":
+        # carry basin identity across rounds: seed basin_route = rec once, then
+        # merge each resolved basin into its receiver every round (OG loop).
+        sb.compose("init_basin_route", deps["copy_field"])
+        sb.compose("merge", deps["merge_basin_route"])
 
     sb.step("zero_ndep")
     sb.step("depression_counter")
-    sb.loop(
-        body=["label_basins", "saddlesort", "reroute", "zero_ndep", "depression_counter"],
-        max_times="entry_passes",
-        until="resolved",
-    )
+    if method == "vanilla":
+        sb.step("init_basin_route")
+        body = ["label_basins", "saddlesort", "reroute", "merge", "zero_ndep", "depression_counter"]
+    else:
+        body = ["label_basins", "saddlesort", "reroute", "zero_ndep", "depression_counter"]
+    sb.loop(body=body, max_times="entry_passes", until="resolved")
 
     frozen = sb.freeze()
     bound = frozen.build()
@@ -962,14 +983,26 @@ def make_depression_solver(
     # (a bare FrozenKernel on closure, a 3-step FrozenRoutine on cupy)
     # uniformly. copy_field's own generic "src"/"dst" leaves are ambiguous
     # across occurrences, so that one path is bound explicitly.
-    bound.bind_leaf({"rec": rec, "rec_jump": rec_jump, "bid": bid}, prefix=("label_basins",))
-    _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "src"), rec)
-    _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "dst"), rec_jump)
+    if method == "vanilla":
+        # route labelling: contract steps use `rec_jump`, label uses
+        # `basin_route`; both bound to the carried basin_route buffer.
+        bound.bind_leaf(
+            {"rec_jump": basin_route, "basin_route": basin_route, "bid": bid},
+            prefix=("label_basins",),
+        )
+        bound.bind(("init_basin_route", "src"), rec)
+        bound.bind(("init_basin_route", "dst"), basin_route)
+        bound.bind_leaf({"outlet": outlet, "basin_route": basin_route}, prefix=("merge",))
+    else:
+        bound.bind_leaf({"rec": rec, "rec_jump": rec_jump, "bid": bid}, prefix=("label_basins",))
+        _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "src"), rec)
+        _bind_if_present(bound, ("label_basins", "copy_rec_to_recjump", "dst"), rec_jump)
 
     bound.bind_leaf(
         {
             "bid": bid, "z": z, "z_prime": z_prime, "is_border": is_border,
-            "basin_saddle": basin_saddle, "basin_saddlenode": basin_saddlenode, "outlet": outlet,
+            "basin_saddle": basin_saddle, "basin_saddlenode": basin_saddlenode,
+            "outlet": outlet, "b_rcv": b_rcv,
         },
         prefix=("saddlesort",),
     )

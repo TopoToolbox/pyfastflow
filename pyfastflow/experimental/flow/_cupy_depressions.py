@@ -231,6 +231,79 @@ def build_basin_labelling_vanilla(*, grid, copy_field, n_flat: int, logn: int):
     return rb, kernels
 
 
+def build_label_from_route(*, grid, n_flat: int):
+    """
+    bid[i] = 0 if the node basin_route reaches can output, else root + 1 - the
+    carried-route basin labelling. Data args (bid, basin_route); composes
+    `grid` for can_out. See _closure_depressions.py's build_label_from_route.
+
+    Author: B.G (08/2026)
+    """
+    t = f"lfr{new_uid()}"
+    return (
+        KernelBuilder().compose("grid", grid).wire_data("bid").wire_data("basin_route").ingest(
+            f"""
+__global__ void {t}_label_from_route(int* bid, const int* basin_route) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= {n_flat}) return;
+    int root = basin_route[i];
+    bid[i] = $ctx.grid.can_out(root)$ ? 0 : (root + 1);
+}}
+"""
+        )
+    )
+
+
+def build_basin_labelling_route(*, grid, n_flat: int, logn: int):
+    """
+    RoutineBuilder for basin labelling from the carried `basin_route`: logn+1
+    unrolled contractions of basin_route, then label_from_route. See
+    _closure_depressions.py's build_basin_labelling_route.
+
+    Composed step names: "contract_0".."contract_{logn}", "label_from_route".
+    Data addresses: "contract_K.rec_jump" (all bound to basin_route),
+    "label_from_route.bid"/".basin_route".
+
+    Author: B.G (08/2026)
+    """
+    propagate_basin_iter = build_propagate_basin_iter(n_flat=n_flat)
+    label_from_route = build_label_from_route(grid=grid, n_flat=n_flat)
+
+    kernels = {"propagate_basin_iter": propagate_basin_iter, "label_from_route": label_from_route}
+
+    rb = RoutineBuilder()
+    for k in range(logn + 1):
+        rb.compose(f"contract_{k}", propagate_basin_iter)
+    rb.compose("label_from_route", label_from_route)
+
+    return rb, kernels
+
+
+def build_merge_basin_route(*, bitpack, n_flat: int):
+    """
+    basin_route[pit] = outlet node, folding every kept basin into its receiver
+    (basin id = pit + 1). Data args (outlet, basin_route); composes `bitpack`
+    for unpack_index. See _closure_depressions.py's build_merge_basin_route.
+
+    Author: B.G (08/2026)
+    """
+    t = f"mbr{new_uid()}"
+    return (
+        KernelBuilder().compose("bitpack", bitpack).wire_data("outlet").wire_data("basin_route").ingest(
+            f"""
+__global__ void {t}_merge_basin_route(const long long* outlet, int* basin_route) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= {n_flat}) return;
+    long long invalid = $ctx.bitpack.pack(1e8, 42)$;
+    if (i == 0 || outlet[i] == invalid) return;
+    int p_rcv = $ctx.bitpack.unpack_index(outlet[i])$;
+    basin_route[i - 1] = p_rcv;
+}}
+"""
+        )
+    )
+
+
 def build_basin_labelling_optimized(*, grid, n_flat: int):
     """
     RoutineBuilder (routine) for optimized basin labelling - the closure
@@ -358,16 +431,17 @@ __global__ void {t}_border_zprime(const int* bid, const float* z, float* z_prime
     )
     init_saddle_outlet = (
         KernelBuilder().compose("bitpack", bitpack)
-        .wire_data("basin_saddle").wire_data("outlet").wire_data("basin_saddlenode")
+        .wire_data("basin_saddle").wire_data("outlet").wire_data("basin_saddlenode").wire_data("b_rcv")
         .ingest(
             f"""
-__global__ void {t}_init_saddle_outlet(long long* basin_saddle, long long* outlet, int* basin_saddlenode) {{
+__global__ void {t}_init_saddle_outlet(long long* basin_saddle, long long* outlet, int* basin_saddlenode, int* b_rcv) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
     long long invalid = $ctx.bitpack.pack(1e8, 42)$;
     basin_saddle[i] = invalid;
     outlet[i] = invalid;
     basin_saddlenode[i] = -1;
+    b_rcv[i] = 0;
 }}
 """
         )
@@ -429,55 +503,58 @@ __global__ void {t}_find_saddlenode(const int* bid, const unsigned char* is_bord
         )
     )
     atomic_min_outlet = (
-        KernelBuilder().compose("grid", grid).compose("bitpack", bitpack).compose("atomic_min_ll", atomic_min_ll)
+        KernelBuilder().compose("grid", grid).compose("bitpack", bitpack)
         .wire_data("bid").wire_data("basin_saddle").wire_data("basin_saddlenode")
-        .wire_data("z").wire_data("outlet")
+        .wire_data("z").wire_data("outlet").wire_data("b_rcv")
         .ingest(
             f"""
 __global__ void {t}_atomic_min_outlet(const int* bid, const long long* basin_saddle, const int* basin_saddlenode,
-                                       const float* z, long long* outlet) {{
+                                       const float* z, long long* outlet, int* b_rcv) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
     long long invalid = $ctx.bitpack.pack(1e8, 42)$;
     if (i == 0 || basin_saddle[i] == invalid) return;
     int node = basin_saddlenode[i];
-    float tz = 1e9f;
+    float best_z = 1e9f;
+    int best_b = 2147483647;
     int rec_out = -1;
     int nk = $ctx.grid.N_NEIGHBOURS.get(0)$;
     for (int k = 0; k < nk; k++) {{
         int j = $ctx.grid.neighbour(node, k)$;
-        if (j != -1 && bid[j] != i && tz > z[j]) {{
-            tz = z[j];
-            rec_out = j;
+        if (j != -1 && bid[j] != i) {{
+            float cz = fmaxf(z[node], z[j]);
+            int bj = bid[j];
+            if (cz < best_z || (cz == best_z && bj < best_b)) {{
+                best_z = cz;
+                best_b = bj;
+                rec_out = j;
+            }}
         }}
     }}
     if (rec_out > -1) {{
-        long long candidate = $ctx.bitpack.pack(tz, rec_out)$;
-        $ctx.atomic_min_ll(&outlet[i], candidate)$;
+        outlet[i] = $ctx.bitpack.pack(best_z, rec_out)$;
+        b_rcv[i] = bid[rec_out];
     }}
 }}
 """
         )
     )
-    break_cycle = (
+    set_keep = (
         KernelBuilder().compose("bitpack", bitpack)
-        .wire_data("bid").wire_data("outlet").wire_data("basin_saddle").wire_data("basin_saddlenode")
+        .wire_data("bid").wire_data("b_rcv").wire_data("outlet")
+        .wire_data("basin_saddle").wire_data("basin_saddlenode")
         .ingest(
             f"""
-__global__ void {t}_break_cycle(const int* bid, long long* outlet, long long* basin_saddle, int* basin_saddlenode) {{
-    int bid_d = blockIdx.x * blockDim.x + threadIdx.x;
-    if (bid_d >= {n_flat}) return;
+__global__ void {t}_set_keep(const int* bid, const int* b_rcv, long long* outlet, long long* basin_saddle, int* basin_saddlenode) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= {n_flat}) return;
     long long invalid = $ctx.bitpack.pack(1e8, 42)$;
-    if (bid_d == 0 || outlet[bid_d] == invalid) return;
-    int rec_out = $ctx.bitpack.unpack_index(outlet[bid_d])$;
-    int bid_d_prime = bid[rec_out];
-    if (bid_d_prime == 0) return;
-    int rec_out_prime = $ctx.bitpack.unpack_index(outlet[bid_d_prime])$;
-    int bid_d_prime_prime = bid[rec_out_prime];
-    if (bid_d_prime_prime == bid_d && bid_d_prime < bid_d) {{
-        outlet[bid_d] = invalid;
-        basin_saddle[bid_d] = invalid;
-        basin_saddlenode[bid_d] = -1;
+    if (i == 0 || outlet[i] == invalid) return;
+    int brd = b_rcv[i];
+    if (brd != 0 && b_rcv[brd] == i && brd > i) {{
+        outlet[i] = invalid;
+        basin_saddle[i] = invalid;
+        basin_saddlenode[i] = -1;
     }}
 }}
 """
@@ -490,7 +567,7 @@ __global__ void {t}_break_cycle(const int* bid, long long* outlet, long long* ba
         "atomic_min_saddle": atomic_min_saddle,
         "find_saddlenode": find_saddlenode,
         "atomic_min_outlet": atomic_min_outlet,
-        "break_cycle": break_cycle,
+        "break_cycle": set_keep,
     }
 
     rb = RoutineBuilder()
@@ -499,7 +576,7 @@ __global__ void {t}_break_cycle(const int* bid, long long* outlet, long long* ba
     rb.compose("atomic_min_saddle", atomic_min_saddle)
     rb.compose("find_saddlenode", find_saddlenode)
     rb.compose("atomic_min_outlet", atomic_min_outlet)
-    rb.compose("break_cycle", break_cycle)
+    rb.compose("break_cycle", set_keep)
 
     return rb, kernels
 

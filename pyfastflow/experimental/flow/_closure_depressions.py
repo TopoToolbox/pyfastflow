@@ -281,6 +281,89 @@ def build_basin_labelling_optimized(*, backend: str, backend_mod, grid, n_flat: 
     )
 
 
+def build_label_from_route(*, backend: str, backend_mod, grid):
+    """
+    bid[i] = 0 if the node basin_route reaches can output, else root + 1.
+
+    Labels each node by the basin it reaches through `basin_route` (contracted
+    to a fixed point beforehand), which carries basin identity across rounds
+    via accumulated merges - unlike re-deriving from the carved receivers.
+    Data args (bid, basin_route); composes `grid` for `can_out`.
+
+    Author: B.G (08/2026)
+    """
+    T = _tensor_annotation(backend_mod, backend)
+
+    def label_from_route_tmpl(ctx, bid: T, basin_route: T):
+        for i in bid:
+            root = basin_route[i]
+            bid[i] = 0 if ctx.grid.can_out(root) else root + 1
+
+    return (
+        KernelBuilder().compose("grid", grid)
+        .wire_data("bid").wire_data("basin_route")
+        .ingest(label_from_route_tmpl)
+    )
+
+
+def build_basin_labelling_route(*, backend: str, backend_mod, grid, logn: int):
+    """
+    RoutineBuilder for basin labelling from the carried `basin_route`: logn+1
+    unrolled pointer-jump contractions of `basin_route` (composed under
+    "contract_0".."contract_{logn}", the same instancing idiom vanilla
+    labelling uses), then label_from_route(bid, basin_route).
+
+    Composed step names: "contract_0".."contract_{logn}", "label_from_route".
+    Data addresses: "contract_K.rec_jump" for K in 0..logn (all bound to the
+    basin_route buffer), "label_from_route.bid"/".basin_route". PARAM address:
+    "label_from_route.grid.*".
+
+    Returns (routine_builder, kernels_dict) with keys "propagate_basin_iter"
+    (the shared unrolled kernel) and "label_from_route".
+
+    Author: B.G (08/2026)
+    """
+    propagate_basin_iter = build_propagate_basin_iter(backend=backend, backend_mod=backend_mod)
+    label_from_route = build_label_from_route(backend=backend, backend_mod=backend_mod, grid=grid)
+
+    kernels = {"propagate_basin_iter": propagate_basin_iter, "label_from_route": label_from_route}
+
+    rb = RoutineBuilder()
+    for k in range(logn + 1):
+        rb.compose(f"contract_{k}", propagate_basin_iter)
+    rb.compose("label_from_route", label_from_route)
+
+    return rb, kernels
+
+
+def build_merge_basin_route(*, backend: str, backend_mod, bitpack):
+    """
+    Fold every kept basin into the outlet node it drains through:
+    basin_route[pit] = outlet_node (the original FastFlow update_basin_route),
+    so contraction next round folds the whole resolved basin into its receiver
+    (or the boundary) and the basin graph strictly shrinks. Data args (outlet,
+    basin_route); composes `bitpack` for `unpack_index`. basin id = pit + 1, so
+    basin i's pit is node i - 1.
+
+    Author: B.G (08/2026)
+    """
+    T = _tensor_annotation(backend_mod, backend)
+
+    def merge_basin_route_tmpl(ctx, outlet: T, basin_route: T):
+        invalid_m = ctx.bitpack.pack(1e8, 42)
+        for i in outlet:
+            if i == 0 or outlet[i] == invalid_m:
+                continue
+            p_rcv = ctx.bitpack.unpack_index(outlet[i])
+            basin_route[i - 1] = p_rcv
+
+    return (
+        KernelBuilder().compose("bitpack", bitpack)
+        .wire_data("outlet").wire_data("basin_route")
+        .ingest(merge_basin_route_tmpl)
+    )
+
+
 def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
     """
     RoutineBuilder (routine) for the six saddlesort passes: border/z_prime
@@ -344,12 +427,13 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
             if is_border[i]:
                 z_prime[i] = max(z[i], zn)
 
-    def init_saddle_outlet_tmpl(ctx, basin_saddle: T, outlet: T, basin_saddlenode: T):
+    def init_saddle_outlet_tmpl(ctx, basin_saddle: T, outlet: T, basin_saddlenode: T, b_rcv: T):
         invalid_i = ctx.bitpack.pack(1e8, 42)
         for i in basin_saddle:
             basin_saddle[i] = invalid_i
             outlet[i] = invalid_i
             basin_saddlenode[i] = -1
+            b_rcv[i] = 0
 
     def atomic_min_saddle_tmpl(ctx, bid: T, is_border: T, z_prime: T, basin_saddle: T):
         invalid_a = ctx.bitpack.pack(1e8, 42)
@@ -380,40 +464,38 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
             if is_here:
                 basin_saddlenode[bid[i]] = i
 
-    def atomic_min_outlet_tmpl(ctx, bid: T, basin_saddle: T, basin_saddlenode: T, z: T, outlet: T):
+    def atomic_min_outlet_tmpl(ctx, bid: T, basin_saddle: T, basin_saddlenode: T, z: T, outlet: T, b_rcv: T):
         invalid_o = ctx.bitpack.pack(1e8, 42)
         for i in bid:
             if i == 0 or basin_saddle[i] == invalid_o:
                 continue
             node = basin_saddlenode[i]
-            tz = 1e9
+            best_z = 1e9
+            best_b = 2147483647
             rec_out = -1
             for k in range(ctx.grid.N_NEIGHBOURS.get(0)):
                 j = ctx.grid.neighbour(node, k)
-                if j != -1 and bid[j] != i and tz > z[j]:
-                    tz = z[j]
-                    rec_out = j
+                if j != -1 and bid[j] != i:
+                    cz = max(z[node], z[j])
+                    bj = bid[j]
+                    if cz < best_z or (cz == best_z and bj < best_b):
+                        best_z = cz
+                        best_b = bj
+                        rec_out = j
             if rec_out > -1:
-                candidate = ctx.bitpack.pack(tz, rec_out)
-                ctx.bk.atomic_min(outlet[i], candidate)
+                outlet[i] = ctx.bitpack.pack(best_z, rec_out)
+                b_rcv[i] = bid[rec_out]
 
-    def break_cycle_tmpl(ctx, bid: T, outlet: T, basin_saddle: T, basin_saddlenode: T):
+    def set_keep_tmpl(ctx, bid: T, b_rcv: T, outlet: T, basin_saddle: T, basin_saddlenode: T):
         invalid_c = ctx.bitpack.pack(1e8, 42)
         for i in bid:
-            bid_d = i
-            if bid_d == 0 or outlet[bid_d] == invalid_c:
+            if i == 0 or outlet[i] == invalid_c:
                 continue
-            rec_out = ctx.bitpack.unpack_index(outlet[bid_d])
-            bid_d_prime = bid[rec_out]
-            if bid_d_prime == 0:
-                continue
-            rec_out_prime = ctx.bitpack.unpack_index(outlet[bid_d_prime])
-            bid_d_prime_prime = bid[rec_out_prime]
-            if bid_d_prime_prime == bid_d:
-                if bid_d_prime < bid_d:
-                    outlet[bid_d] = invalid_c
-                    basin_saddle[bid_d] = invalid_c
-                    basin_saddlenode[bid_d] = -1
+            brd = b_rcv[i]
+            if brd != 0 and b_rcv[brd] == i and brd > i:
+                outlet[i] = invalid_c
+                basin_saddle[i] = invalid_c
+                basin_saddlenode[i] = -1
 
     border_zprime = (
         KernelBuilder().compose("grid", grid)
@@ -422,7 +504,7 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
     )
     init_saddle_outlet = (
         KernelBuilder().compose("bitpack", bitpack)
-        .wire_data("basin_saddle").wire_data("outlet").wire_data("basin_saddlenode")
+        .wire_data("basin_saddle").wire_data("outlet").wire_data("basin_saddlenode").wire_data("b_rcv")
         .ingest(init_saddle_outlet_tmpl)
     )
     atomic_min_saddle = (
@@ -439,13 +521,14 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
     atomic_min_outlet = (
         KernelBuilder().compose("grid", grid).compose("bitpack", bitpack)
         .wire_data("bid").wire_data("basin_saddle").wire_data("basin_saddlenode")
-        .wire_data("z").wire_data("outlet")
+        .wire_data("z").wire_data("outlet").wire_data("b_rcv")
         .ingest(atomic_min_outlet_tmpl)
     )
-    break_cycle = (
+    set_keep = (
         KernelBuilder().compose("bitpack", bitpack)
-        .wire_data("bid").wire_data("outlet").wire_data("basin_saddle").wire_data("basin_saddlenode")
-        .ingest(break_cycle_tmpl)
+        .wire_data("bid").wire_data("b_rcv").wire_data("outlet")
+        .wire_data("basin_saddle").wire_data("basin_saddlenode")
+        .ingest(set_keep_tmpl)
     )
 
     kernels = {
@@ -454,7 +537,7 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
         "atomic_min_saddle": atomic_min_saddle,
         "find_saddlenode": find_saddlenode,
         "atomic_min_outlet": atomic_min_outlet,
-        "break_cycle": break_cycle,
+        "break_cycle": set_keep,
     }
 
     rb = RoutineBuilder()
@@ -463,7 +546,7 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
     rb.compose("atomic_min_saddle", atomic_min_saddle)
     rb.compose("find_saddlenode", find_saddlenode)
     rb.compose("atomic_min_outlet", atomic_min_outlet)
-    rb.compose("break_cycle", break_cycle)
+    rb.compose("break_cycle", set_keep)
 
     return rb, kernels
 

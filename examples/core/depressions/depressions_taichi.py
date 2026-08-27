@@ -60,6 +60,8 @@ is_border = pool.get_data(ti.u8, (n_flat,))
 tag = pool.get_data(ti.u8, (n_flat,))
 tag_alt = pool.get_data(ti.u8, (n_flat,))
 rerouted = pool.get_data(ti.u8, (n_flat,))
+basin_route = pool.get_data(ti.i32, (n_flat,))
+b_rcv = pool.get_data(ti.i32, (n_flat,))
 
 
 def init_z_tmpl(ctx, z: ti.template()):
@@ -87,7 +89,7 @@ solver = make_depression_solver(
     rec=rec.data, z=z.data, bid=bid.data, rec_jump=rec_jump.data, z_prime=z_prime.data,
     is_border=is_border.data, basin_saddle=basin_saddle.data, basin_saddlenode=basin_saddlenode.data,
     outlet=outlet.data, rerouted=rerouted.data, tag=tag.data, tag_alt=tag_alt.data,
-    rec_scratch=rec_scratch.data, n_flat=n_flat,
+    rec_scratch=rec_scratch.data, basin_route=basin_route.data, b_rcv=b_rcv.data, n_flat=n_flat,
 )
 
 source = TaichiParameter("SRC", dtype=ti.f32, mode="const", value=1.0, pool=pool)
