@@ -61,11 +61,12 @@ from typing import Callable
 
 from .bk import RESERVED_BK_NAME
 from .ctx import CTX_PARAM_NAME
+from .slot import BuildError
 
 Chain = tuple[str, ...]
 
 
-class ContractError(Exception):
+class ContractError(BuildError):
     """
     Raised when a template's source cannot be turned into a contract (no
     recoverable source, `ctx` not the first parameter, a malformed span), or

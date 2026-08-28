@@ -93,9 +93,10 @@ from .compile_shared import CompileError, check_unmet
 from .frozen import FrozenBuilderError, FrozenHelper, FrozenKernel
 from .host_block import BoundHostBlock, FrozenHostBlock
 from .routine import BoundRoutine, FrozenRoutine
+from .slot import BuildError
 
 
-class SequenceBuilderError(Exception):
+class SequenceBuilderError(BuildError):
     """
     Raised by the SequenceBuilder build phase: a name reused or unknown, an
     attempt to compose an unsupported frozen type, a malformed loop, or a

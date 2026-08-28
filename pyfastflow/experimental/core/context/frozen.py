@@ -73,10 +73,10 @@ from typing import Any
 
 from ..pool.base import new_uid
 from .contract import Contract
-from .slot import SlotGroup, SlotKind
+from .slot import BuildError, SlotGroup, SlotKind
 
 
-class FrozenBuilderError(Exception):
+class FrozenBuilderError(BuildError):
     """
     Raised on any attempt to mutate a frozen object - a FrozenKernel/
     FrozenHelper directly, or a KernelBuilder/HelperBuilder that has already

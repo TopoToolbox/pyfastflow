@@ -59,9 +59,10 @@ from ..pool.base import new_uid
 from .bound import Address, BindError, _Bound, _walk, _walk_group, format_address, parse_address
 from .compile_shared import CompileError, check_unmet
 from .frozen import FrozenBuilderError, FrozenHelper, FrozenKernel
+from .slot import BuildError
 
 
-class RoutineBuilderError(Exception):
+class RoutineBuilderError(BuildError):
     """
     Raised by the RoutineBuilder build phase: a step name reused, an
     attempt to compose a non-FrozenKernel, or a mutation after freeze().

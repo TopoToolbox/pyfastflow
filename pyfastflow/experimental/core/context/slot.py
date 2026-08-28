@@ -67,7 +67,20 @@ class SlotKind(Enum):
     DATA = "data"
 
 
-class SlotGroupError(Exception):
+class BuildError(Exception):
+    """
+    Base of every build-phase exception across the core - slot-namespace
+    misuse, contract derivation/checking, frozen-object mutation, and the
+    RoutineBuilder/SequenceBuilder build phases all raise a subclass of this.
+    Catch `BuildError` to catch any build-phase mistake regardless of which
+    level raised it. Genuine `TypeError`s (e.g. compose() handed the wrong
+    frozen type) are not build-phase errors and stay `TypeError`.
+
+    Author: B.G (08/2026)
+    """
+
+
+class SlotGroupError(BuildError):
     """
     Raised when a builder's local slot namespace is misused - wiring a name
     twice (as a slot or as a compose() root), or looking up a name that was
