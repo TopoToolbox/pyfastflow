@@ -199,7 +199,7 @@ def make_hillshade_group(backend: str, grid: FrozenGroup, *, topology: str = "D8
     for name in grid_param_names:
         share_leaf(group, name)
 
-    return group.close()
+    return group.freeze()
 
 
 def make_hillshade_parameters(

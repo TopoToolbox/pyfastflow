@@ -174,7 +174,7 @@ def make_grid_group(
     if outlet == "mask":
         share_leaf(group, "OUTLET_MASK")
 
-    return group.close()
+    return group.freeze()
 
 
 def make_grid_parameters(

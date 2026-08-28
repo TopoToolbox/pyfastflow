@@ -44,7 +44,7 @@ from .bound import _Bound, _walk
 from .builder import _Builder
 from .compile_shared import CompileError, check_unmet
 from .ctx import CTX_PARAM_NAME
-from .frozen import _Frozen
+from .frozen import _Frozen, _FrozenLeaf
 from .slot import SlotKind
 
 _LEGAL_HOST_ACCESSORS = ("get", "set", "read")
@@ -115,7 +115,7 @@ class HostBlockBuilder(_Builder):
         return FrozenHostBlock(template, slots, composed, contract)
 
 
-class FrozenHostBlock(_Frozen):
+class FrozenHostBlock(_FrozenLeaf):
     """
     The frozen result of a HostBlockBuilder's ingest(). See the module
     docstring. `composed` is always empty (compose() raises during build), so
@@ -127,7 +127,7 @@ class FrozenHostBlock(_Frozen):
     def build(self) -> "BoundHostBlock":
         """
         Mint one bindable address per wired PARAM slot and return a
-        BoundHostBlock. Overrides `_Frozen.build()` (frozen.py), whose own
+        BoundHostBlock. Overrides `_FrozenLeaf.build()` (frozen.py), whose own
         dispatch (bound.py's `build()`) only knows FrozenKernel/FrozenHelper
         and would hand back a BoundHelper here, the wrong type. Reuses
         bound.py's `_walk` directly instead - it only needs `.slots`/

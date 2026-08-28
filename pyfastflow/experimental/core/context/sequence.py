@@ -45,8 +45,8 @@ form on its own.
 Addressing
 -----------
 `build()` walks every composed block's own tree under that block's compose()
-name: bound.py's `_walk` directly for a FrozenKernel or FrozenHostBlock (both
-real `_Frozen` objects), and, for a FrozenRoutine, one more level of
+name: bound.py's `walk_frozen` directly for a FrozenKernel or FrozenHostBlock
+(both real `_Frozen` objects), and, for a FrozenRoutine, one more level of
 recursion through its own `.composed` steps - so a routine composed under
 `saddlesort` and internally stepping `label`/`sort` reaches
 `saddlesort.label.*`/`saddlesort.sort.*`, exactly the address a standalone
@@ -88,9 +88,9 @@ Author: B.G (08/2026)
 from typing import Any
 
 from ..pool.base import new_uid
-from .bound import Address, BindError, _Bound, _walk, _walk_group, format_address, parse_address
+from .bound import Address, BindError, _Bound, format_address, parse_address, walk_frozen
 from .compile_shared import CompileError, check_unmet
-from .frozen import FrozenBuilderError, FrozenHelper, FrozenKernel
+from .frozen import FrozenBuilderError, FrozenHelper, FrozenKernel, _Frozen
 from .host_block import BoundHostBlock, FrozenHostBlock
 from .routine import BoundRoutine, FrozenRoutine
 from .slot import BuildError
@@ -106,38 +106,22 @@ class SequenceBuilderError(BuildError):
     """
 
 
-def _walk_leaf(prefix: Address, frozen: Any, table: dict) -> None:
-    """
-    `_walk` a single frozen object (FrozenKernel or FrozenHostBlock),
-    honouring its own top-level `.shared` (`_Builder.share()`, builder.py)
-    exactly as bound.py's own top-level `build()` does for a standalone
-    object - dispatching to `_walk_group` rather than plain `_walk` when it
-    has any - so a block composed with its own share() declarations
-    collapses identically whether built standalone or as part of a
-    sequence/routine.
-
-    Author: B.G (08/2026)
-    """
-    if frozen.shared:
-        _walk_group(prefix, frozen, table, {}, frozenset())
-    else:
-        _walk(prefix, frozen, table)
-
-
 def _walk_block(prefix: Address, frozen: Any, table: dict) -> None:
     """
     Populate `table` with every PARAM/DATA leaf reachable from `frozen`, at
     its full path under `prefix` - dispatching on which of the three
     supported block kinds `frozen` is. See the module docstring's
-    "Addressing" section.
+    "Addressing" section. A FrozenKernel/FrozenHostBlock is walked directly
+    (bound.py's `walk_frozen`, which honours its own top-level `.shared`); a
+    FrozenRoutine one level deeper, through its own `.composed` steps.
 
     Author: B.G (08/2026)
     """
     if isinstance(frozen, FrozenRoutine):
         for name, step_frozen in frozen.composed.items():
-            _walk_leaf(prefix + (name,), step_frozen, table)
+            walk_frozen(prefix + (name,), step_frozen, table)
     else:
-        _walk_leaf(prefix, frozen, table)
+        walk_frozen(prefix, frozen, table)
 
 
 class SequenceBuilder:
@@ -278,25 +262,23 @@ class SequenceBuilder:
         return FrozenSequence(self._composed, self._order, self._launch)
 
 
-class FrozenSequence:
+class FrozenSequence(_Frozen):
     """
     The frozen result of a SequenceBuilder's freeze(): an immutable
     {name: block} composition, each block's own launch-kwargs override, plus
-    the ordered step/loop list. See the module docstring.
+    the ordered step/loop list. A `_Frozen` (frozen.py) - the minimal
+    identity/immutability base, not `_FrozenLeaf`, since a sequence is an
+    ordered composite with no template/contract/slots of its own. See the
+    module docstring.
 
     Author: B.G (08/2026)
     """
 
     def __init__(self, composed: dict, order: list, launch: "dict | None" = None):
-        self._uid = new_uid()
-        self._composed = dict(composed)
-        self._launch = dict(launch) if launch else {}
-        self._order = list(order)
-
-    @property
-    def uid(self) -> int:
-        """Process-wide identity assigned at construction. See Parameter.uid (parameter.py)."""
-        return self._uid
+        super().__init__()
+        object.__setattr__(self, "_composed", dict(composed))
+        object.__setattr__(self, "_launch", dict(launch) if launch else {})
+        object.__setattr__(self, "_order", list(order))
 
     @property
     def composed(self) -> dict:
@@ -364,10 +346,7 @@ class BoundSequence(_Bound):
                 return compiled_blocks[name]
             child = frozen.composed[name]
             child_bound = child.build()
-            for local_addr in child_bound.addresses():
-                val = self.value_at((name,) + local_addr)
-                if val is not None:
-                    child_bound.bind(local_addr, val)
+            self.bind_into(child_bound, (name,))
             block_kwargs = {**kwargs, **frozen.launch.get(name, {})}
             compiled = child_bound.compile() if isinstance(child, FrozenHostBlock) else child_bound.compile(backend, **block_kwargs)
             compiled_blocks[name] = compiled

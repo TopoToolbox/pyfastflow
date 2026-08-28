@@ -108,8 +108,9 @@ class _Builder:
     def _check_mutable(self) -> None:
         if self._frozen:
             raise FrozenBuilderError(
-                f"{type(self).__name__}(uid={self._uid}) has already been ingest()-ed and is "
-                f"frozen - build a new {type(self).__name__} instead of reusing this one"
+                f"{type(self).__name__}(uid={self._uid}) has already closed its build phase "
+                f"(ingest()/freeze()) and is frozen - build a new {type(self).__name__} "
+                f"instead of reusing this one"
             )
 
     def _wire(self, slot: Slot) -> "_Builder":
@@ -567,7 +568,7 @@ class GroupBuilder(_Builder):
             "wire_data on whichever KernelBuilder eventually composes this group."
         )
 
-    def close(self) -> FrozenGroup:
+    def freeze(self) -> FrozenGroup:
         """
         Close out the build phase and return the resulting FrozenGroup.
         Unlike KernelBuilder.ingest()/HelperBuilder.ingest(), there is no

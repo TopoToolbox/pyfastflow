@@ -189,7 +189,7 @@ def make_noise_group(backend: str, *, kind: str = "perlin") -> FrozenGroup:
         share_leaf(group, "OCTAVES")
         share_leaf(group, "PERSISTENCE")
 
-    return group.close()
+    return group.freeze()
 
 
 def make_hash_u32(backend: str) -> FrozenHelper:

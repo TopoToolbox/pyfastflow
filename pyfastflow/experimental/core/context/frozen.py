@@ -1,9 +1,15 @@
 """
-FrozenKernel / FrozenHelper: what ingest() (builder.py) hands back - the
-immutable, value-like result of a KernelBuilder/HelperBuilder's build phase.
+FrozenKernel / FrozenHelper / FrozenGroup: what ingest()/freeze() (builder.py)
+hands back - the immutable, value-like result of a builder's build phase.
 
-Both are produced only by KernelBuilder.ingest() / HelperBuilder.ingest()
-(builder.py), never constructed directly. Each holds:
+`_Frozen` is the minimal identity/immutability base every frozen build-phase
+result shares (FrozenRoutine/FrozenSequence subclass it directly);
+`_FrozenLeaf` adds the structure the leaf kinds carry. `isinstance(x,
+_Frozen)` is therefore true for a Routine and a Sequence as well.
+
+The leaf kinds are produced only by KernelBuilder.ingest() /
+HelperBuilder.ingest() / GroupBuilder.freeze() (builder.py), never
+constructed directly. Each holds:
 
   template   the ingested template, unchanged (a python def or CUDA text).
   slots      a SlotGroup snapshot (slot.py) - this builder's own wired
@@ -88,8 +94,54 @@ class FrozenBuilderError(BuildError):
 
 class _Frozen:
     """
-    Shared base of FrozenKernel/FrozenHelper. Not instantiated directly - see
-    the module docstring.
+    Minimal immutable base shared by every frozen build-phase result: the
+    leaf kinds (FrozenKernel/FrozenHelper/FrozenGroup/FrozenHostBlock,
+    through `_FrozenLeaf`) and the ordered-composite kinds
+    (FrozenRoutine/FrozenSequence - routine.py/sequence.py - directly). It
+    carries only process-wide identity and the mutation guard, so
+    `isinstance(x, _Frozen)` holds for all of them. Not instantiated
+    directly.
+
+    Author: B.G (08/2026)
+    """
+
+    def __init__(self):
+        object.__setattr__(self, "_uid", new_uid())
+
+    @property
+    def uid(self) -> int:
+        """
+        Process-wide identity assigned at construction, from the same
+        counter as Parameter/Bag (parameter.py, bag.py). Two references to
+        one frozen object share a uid; composing "the same" frozen object
+        into two builders never changes it.
+
+        Author: B.G (08/2026)
+        """
+        return self._uid
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise FrozenBuilderError(
+            f"{type(self).__name__}(uid={self._uid}) is frozen and cannot be mutated - "
+            f"build a new {type(self).__name__} instead"
+        )
+
+    def __delattr__(self, name: str) -> None:
+        raise FrozenBuilderError(
+            f"{type(self).__name__}(uid={self._uid}) is frozen and cannot be mutated - "
+            f"build a new {type(self).__name__} instead"
+        )
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(uid={self._uid})"
+
+
+class _FrozenLeaf(_Frozen):
+    """
+    Base of the leaf frozen results - FrozenKernel/FrozenHelper/FrozenGroup/
+    FrozenHostBlock: pure structure (template, slots, composed, contract,
+    split, shared) with no ordered sub-blocks of their own. See the module
+    docstring for every field.
 
     Author: B.G (08/2026)
     """
@@ -103,25 +155,13 @@ class _Frozen:
         split: "dict[str, frozenset] | None" = None,
         shared: "dict[str, list] | None" = None,
     ):
+        super().__init__()
         object.__setattr__(self, "template", template)
         object.__setattr__(self, "slots", slots)
         object.__setattr__(self, "composed", dict(composed))
         object.__setattr__(self, "contract", contract)
         object.__setattr__(self, "split", {k: frozenset(v) for k, v in (split or {}).items()})
         object.__setattr__(self, "shared", {k: frozenset(v) for k, v in (shared or {}).items()})
-        object.__setattr__(self, "_uid", new_uid())
-
-    @property
-    def uid(self) -> int:
-        """
-        Process-wide identity assigned at construction, from the same
-        counter as Parameter/Bag (parameter.py, bag.py). Two references to
-        one FrozenKernel/FrozenHelper share a uid; composing "the same"
-        frozen object into two builders never changes it.
-
-        Author: B.G (08/2026)
-        """
-        return self._uid
 
     @property
     def provides(self) -> set[str]:
@@ -150,23 +190,11 @@ class _Frozen:
 
         return _build(self)
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        raise FrozenBuilderError(
-            f"{type(self).__name__}(uid={self._uid}) is frozen and cannot be mutated - "
-            f"build a new {type(self).__name__} instead"
-        )
-
-    def __delattr__(self, name: str) -> None:
-        raise FrozenBuilderError(
-            f"{type(self).__name__}(uid={self._uid}) is frozen and cannot be mutated - "
-            f"build a new {type(self).__name__} instead"
-        )
-
     def __repr__(self) -> str:
         return f"{type(self).__name__}(uid={self._uid}, provides={sorted(self.provides)})"
 
 
-class FrozenKernel(_Frozen):
+class FrozenKernel(_FrozenLeaf):
     """
     The frozen result of a KernelBuilder's ingest(). See the module
     docstring.
@@ -175,7 +203,7 @@ class FrozenKernel(_Frozen):
     """
 
 
-class FrozenHelper(_Frozen):
+class FrozenHelper(_FrozenLeaf):
     """
     The frozen result of a HelperBuilder's ingest(). See the module
     docstring.
@@ -184,9 +212,9 @@ class FrozenHelper(_Frozen):
     """
 
 
-class FrozenGroup(_Frozen):
+class FrozenGroup(_FrozenLeaf):
     """
-    The frozen result of a GroupBuilder's close() (builder.py): a
+    The frozen result of a GroupBuilder's freeze() (builder.py): a
     non-callable, navigable composite - PARAM/HELPER slots and composed
     sub-structures only, `template` always None, never itself the target of
     a device call. `ctx.grid.NX.get(0)` (a PARAM leaf reached through it) and
@@ -201,7 +229,7 @@ class FrozenGroup(_Frozen):
     with no further segment.
 
     `.contract` is always empty (a group's own build phase derives nothing -
-    see GroupBuilder.close()), which is exactly right for
+    see GroupBuilder.freeze()), which is exactly right for
     compile_shared.check_legal_accessors' walk: it recurses into a
     FrozenGroup's own composed children (where real contracts live) but
     finds no PARAM chain of the group's own to check.

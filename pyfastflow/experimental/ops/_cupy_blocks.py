@@ -119,7 +119,7 @@ __device__ int {t}_unpack_index(long long packed) {{
     group.wire_helper("pack").compose("pack", pack)
     group.wire_helper("unpack_value").compose("unpack_value", unpack_value)
     group.wire_helper("unpack_index").compose("unpack_index", unpack_index)
-    return group.close()
+    return group.freeze()
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +161,7 @@ __device__ float {t}_nextafter(float x, float y) {{
     group = GroupBuilder()
     group.wire_helper("atan").compose("atan", atan)
     group.wire_helper("nextafter").compose("nextafter", nextafter)
-    return group.close()
+    return group.freeze()
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +337,7 @@ __device__ float {t}_slope_dir(const float* z, int i, int k) {{
     for name in grid_param_names:
         _share_leaf(group, name)
 
-    return group.close()
+    return group.freeze()
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +369,7 @@ __device__ float {t}_block_reduce_sum(float val) {{
     )
     group = GroupBuilder()
     group.wire_helper("sum").compose("sum", sum_helper)
-    return group.close()
+    return group.freeze()
 
 
 # ---------------------------------------------------------------------------

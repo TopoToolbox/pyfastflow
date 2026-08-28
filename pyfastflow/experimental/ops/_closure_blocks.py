@@ -121,7 +121,7 @@ def build_bitpack_group() -> "FrozenGroup":
     group.wire_helper("pack").compose("pack", pack)
     group.wire_helper("unpack_value").compose("unpack_value", unpack_value)
     group.wire_helper("unpack_index").compose("unpack_index", unpack_index)
-    return group.close()
+    return group.freeze()
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +162,7 @@ def build_math_group() -> "FrozenGroup":
     group = GroupBuilder()
     group.wire_helper("atan").compose("atan", atan)
     group.wire_helper("nextafter").compose("nextafter", nextafter)
-    return group.close()
+    return group.freeze()
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +304,7 @@ def build_slope_group(grid) -> "FrozenGroup":
     for name in grid_param_names:
         _share_leaf(group, name)
 
-    return group.close()
+    return group.freeze()
 
 
 # ---------------------------------------------------------------------------

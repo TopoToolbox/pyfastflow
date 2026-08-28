@@ -56,9 +56,9 @@ Author: B.G (08/2026)
 from typing import Any
 
 from ..pool.base import new_uid
-from .bound import Address, BindError, _Bound, _walk, _walk_group, format_address, parse_address
+from .bound import Address, BindError, _Bound, format_address, parse_address, walk_frozen
 from .compile_shared import CompileError, check_unmet
-from .frozen import FrozenBuilderError, FrozenHelper, FrozenKernel
+from .frozen import FrozenBuilderError, FrozenHelper, FrozenKernel, _Frozen
 from .slot import BuildError
 
 
@@ -150,25 +150,22 @@ class RoutineBuilder:
         return FrozenRoutine(self._order, self._composed, self._launch)
 
 
-class FrozenRoutine:
+class FrozenRoutine(_Frozen):
     """
     The frozen result of a RoutineBuilder's freeze(): an ordered, immutable
-    {name: FrozenKernel}, plus each step's own launch-kwargs override. See
-    the module docstring.
+    {name: FrozenKernel}, plus each step's own launch-kwargs override. A
+    `_Frozen` (frozen.py) - the minimal identity/immutability base, not
+    `_FrozenLeaf`, since a routine is an ordered composite with no template/
+    contract/slots of its own. See the module docstring.
 
     Author: B.G (08/2026)
     """
 
     def __init__(self, order: list, composed: dict, launch: "dict | None" = None):
-        self._uid = new_uid()
-        self._order = tuple(order)
-        self._composed = dict(composed)
-        self._launch = dict(launch) if launch else {}
-
-    @property
-    def uid(self) -> int:
-        """Process-wide identity assigned at construction. See Parameter.uid (parameter.py)."""
-        return self._uid
+        super().__init__()
+        object.__setattr__(self, "_order", tuple(order))
+        object.__setattr__(self, "_composed", dict(composed))
+        object.__setattr__(self, "_launch", dict(launch) if launch else {})
 
     @property
     def order(self) -> tuple:
@@ -199,11 +196,7 @@ class FrozenRoutine:
         """
         table: dict[Address, Any] = {}
         for name in self._order:
-            step = self._composed[name]
-            if step.shared:
-                _walk_group((name,), step, table, {}, frozenset())
-            else:
-                _walk((name,), step, table)
+            walk_frozen((name,), self._composed[name], table)
         return BoundRoutine(self, table)
 
     def __repr__(self) -> str:
@@ -241,10 +234,7 @@ class BoundRoutine(_Bound):
         for name in frozen.order:
             step_frozen = frozen.composed[name]
             step_bound = step_frozen.build()
-            for local_addr in step_bound.addresses():
-                val = self.value_at((name,) + local_addr)
-                if val is not None:
-                    step_bound.bind(local_addr, val)
+            self.bind_into(step_bound, (name,))
             step_kwargs = {**kwargs, **frozen.launch.get(name, {})}
             compiled = step_bound.compile(backend, **step_kwargs)
             steps.append((name, compiled))

@@ -343,6 +343,12 @@ def _walk_group(
         full = prefix + (name,)
         canonical = _resolve_shared(full, scopes)
         if canonical is not None:
+            if canonical in redirect:
+                raise BindError(
+                    f"sharing invariant violated at {format_address(full)!r}: its canonical "
+                    f"{format_address(canonical)!r} is itself a redirect target - a canonical "
+                    f"address must never be redirected"
+                )
             redirect[full] = canonical
         else:
             table[full] = _LeafInfo(SlotKind.PARAM, None)
@@ -386,6 +392,12 @@ def _walk_group_subtree(
         full = prefix + (name,)
         canonical = _resolve_shared(full, scopes)
         if canonical is not None:
+            if canonical in redirect:
+                raise BindError(
+                    f"sharing invariant violated at {format_address(full)!r}: its canonical "
+                    f"{format_address(canonical)!r} is itself a redirect target - a canonical "
+                    f"address must never be redirected"
+                )
             redirect[full] = canonical
         else:
             table[full] = _LeafInfo(SlotKind.PARAM, None)
@@ -406,6 +418,48 @@ def _walk_group_subtree(
             _walk_group(addr, child, table, redirect, child_split, scopes=scopes)
         else:
             _walk_group_subtree(addr, child, table, redirect, scopes)
+
+
+def _check_redirect_invariant(redirect: dict[Address, Address]) -> None:
+    """
+    Assert the invariant `_resolve_shared` rests on: no redirect target is
+    itself a redirect key, so every collapsed address points straight at a
+    real (minted) canonical and `value_at`'s single redirect hop always
+    lands on a table entry. Enforced by outermost-first resolution order;
+    checked here so a violation is an immediate build error rather than a
+    wrong-terrain miscompute several composition layers up.
+
+    Author: B.G (08/2026)
+    """
+    for full, canonical in redirect.items():
+        if canonical in redirect:
+            raise BindError(
+                f"sharing invariant violated: {format_address(full)!r} redirects to "
+                f"{format_address(canonical)!r}, which is itself redirected - a redirect "
+                f"target must be a minted canonical, never another collapsed address"
+            )
+
+
+def walk_frozen(prefix: Address, frozen: _Frozen, table: dict[Address, _LeafInfo]) -> None:
+    """
+    Populate `table` with every PARAM/DATA leaf reachable from `frozen` at
+    its full path under `prefix`, honouring `frozen`'s own top-level
+    `.shared` (`_Builder.share()`, builder.py) exactly as top-level `build()`
+    does - `_walk_group` when it has any, plain `_walk` otherwise.
+
+    The redirect table group sharing needs is built and dropped here:
+    `build()` below inlines the same dispatch because it keeps that table;
+    the routine.py/sequence.py layers only ever want the reduced `table`, and
+    call this.
+
+    Author: B.G (08/2026)
+    """
+    if frozen.shared:
+        redirect: dict[Address, Address] = {}
+        _walk_group(prefix, frozen, table, redirect, frozenset())
+        _check_redirect_invariant(redirect)
+    else:
+        _walk(prefix, frozen, table)
 
 
 def build(frozen: _Frozen) -> "BoundKernel | BoundHelper":
@@ -439,6 +493,7 @@ def build(frozen: _Frozen) -> "BoundKernel | BoundHelper":
         _walk_group((), frozen, table, redirect, frozenset())
     else:
         _walk((), frozen, table, redirect)
+    _check_redirect_invariant(redirect)
     cls = BoundKernel if isinstance(frozen, FrozenKernel) else BoundHelper
     return cls(frozen, table, redirect)
 
@@ -535,6 +590,11 @@ class _Bound:
         Read-only counterpart to bind() - for the compile phase's use, and
         for anything else that wants to read a binding without going
         through inspect()'s formatted report.
+
+        `None` unambiguously means "unbound": `bind()` rejects `None`, so no
+        bound value can ever collide with that sentinel. The copy-down in
+        `bind_into` relies on this - skipping a `None` there is provably
+        "skip unbound slots", nothing else.
 
         `addr` may be a build-phase-collapsed address (module docstring,
         "Build-phase sharing") even though it is not one of `.addresses()`'
@@ -647,10 +707,16 @@ class _Bound:
         Raises
         ------
         BindError
-            `addr` is unknown, or `obj` is the wrong kind/dtype for its slot.
+            `addr` is unknown, `obj` is `None` (reserved to mean "unbound" -
+            see value_at), or `obj` is the wrong kind/dtype for its slot.
 
         Author: B.G (08/2026)
         """
+        if obj is None:
+            raise BindError(
+                f"{format_address(self._addr(addr))!r}: cannot bind None - None is reserved "
+                f"to mean 'unbound' (see value_at). Rebind a real object, or leave the slot unset."
+            )
         a = self._addr(addr)
         r = self._find(a)
         info = self._table[r]
@@ -673,6 +739,25 @@ class _Bound:
                     )
         self._values[r] = obj
         return self
+
+    def bind_into(self, child_bound: "_Bound", prefix: Address) -> None:
+        """
+        Copy every value bound on this object at `prefix + local` down onto
+        `child_bound` at `local`, for each address `child_bound` minted. An
+        unbound slot (`value_at` returns None - and `None` is reserved to
+        mean exactly that, see `bind`) is skipped.
+
+        The shared copy-down step BoundRoutine.compile()/BoundSequence.compile()
+        (routine.py/sequence.py) run to fill a freshly-built per-step/per-block
+        bound object from this outer object's address space before compiling
+        it.
+
+        Author: B.G (08/2026)
+        """
+        for local_addr in child_bound.addresses():
+            val = self.value_at(prefix + local_addr)
+            if val is not None:
+                child_bound.bind(local_addr, val)
 
     def bind_leaf(self, mapping: dict[str, Any], *, prefix: "Address | str" = (), strict: bool = False) -> "_Bound":
         """
