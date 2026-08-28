@@ -665,12 +665,20 @@ def build_reroute_carve_vanilla(*, backend: str, backend_mod, bitpack, copy_fiel
     return rb, kernels
 
 
-def build_reroute_carve_optimized(*, backend: str, backend_mod, bitpack):
+def build_reroute_carve_optimized(*, backend: str, backend_mod, bitpack, n_flat: int):
     """
     carve_basins_serial KernelBuilder - one launch, one serial thread per
     basin walking `rec` from the saddle node to the pit reversing links,
-    then saddle -> outlet. Distinct basins' chains are node-disjoint so the
-    writes never race.
+    then saddle -> outlet.
+
+    The saddle->pit walk is bounded by a `guard < n_flat` counter: distinct
+    basins' chains are expected node-disjoint (so the reversals never race),
+    but the shared saddlesort's `find_saddlenode` is non-atomic on ties, and a
+    racy saddlenode can produce overlapping/non-terminating chains. The guard
+    turns that rare case into an incomplete carve (a pit survives to the next
+    round) rather than an unbounded in-kernel hang - the same bound
+    label_basins_walk already applies to its own per-thread walk. (`vanilla`'s
+    pointer-jump carve is inherently bounded and needs no such guard.)
 
     Data args (rec, basin_saddlenode, outlet). Composes `bitpack`.
 
@@ -681,6 +689,8 @@ def build_reroute_carve_optimized(*, backend: str, backend_mod, bitpack):
     backend_mod
         The bound `ti`/`qd` module.
     bitpack : FrozenGroup
+    n_flat : int
+        Walk guard bound.
 
     Returns
     -------
@@ -689,6 +699,7 @@ def build_reroute_carve_optimized(*, backend: str, backend_mod, bitpack):
     Author: B.G (08/2026)
     """
     T = _tensor_annotation(backend_mod, backend)
+    NFLAT = n_flat
 
     def carve_basins_serial_tmpl(ctx, rec: T, basin_saddlenode: T, outlet: T):
         invalid = ctx.bitpack.pack(1e8, 42)
@@ -700,11 +711,13 @@ def build_reroute_carve_optimized(*, backend: str, backend_mod, bitpack):
             node = s
             nxt = rec[node]
             rec[node] = out_node
-            while nxt != node:
+            guard = 0
+            while nxt != node and guard < NFLAT:
                 nnxt = rec[nxt]
                 rec[nxt] = node
                 node = nxt
                 nxt = nnxt
+                guard += 1
 
     return (
         KernelBuilder().compose("bitpack", bitpack)

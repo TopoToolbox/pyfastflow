@@ -694,13 +694,12 @@ def make_depressions(
     out["copy_field"] = copy_field
     out["depression_counter"] = depression_counter
 
-    # basin labelling - route-based for BOTH methods: basin identity carried
-    # across rounds in basin_route (label from it, not from the carved
-    # receivers) plus the merge kernel that folds each resolved basin into its
-    # receiver. The original FastFlow construction that keeps the carved graph
-    # a forest every round - the property both carve variants need (the serial
-    # optimized carve's saddle->pit walk only terminates on a forest). See
-    # _closure_depressions.py.
+    # basin labelling - route-based for both methods: basin identity carried
+    # across rounds in basin_route (label from it, not the carved receivers) +
+    # a merge kernel folding each resolved basin into its receiver. The full
+    # logn+1 pointer-jump contraction every round is load-bearing: it is what
+    # keeps the carved graph a forest, which the serial optimized carve's
+    # saddle->pit walk requires to terminate. See _closure_depressions.py.
     if closure:
         lb_rb, lb_kernels = blocks.build_basin_labelling_route(
             backend=backend, backend_mod=backend_mod, grid=grid, logn=logn,
@@ -744,7 +743,7 @@ def make_depressions(
                 out[f"reroute_{name}"] = kb
         else:  # optimized
             if closure:
-                out["reroute"] = blocks.build_reroute_carve_optimized(backend=backend, backend_mod=backend_mod, bitpack=bitpack)
+                out["reroute"] = blocks.build_reroute_carve_optimized(backend=backend, backend_mod=backend_mod, bitpack=bitpack, n_flat=n_flat_resolved)
             else:
                 out["reroute"] = blocks.build_reroute_carve_optimized(bitpack=bitpack, n_flat=n_flat_resolved)
     else:  # jump
@@ -973,8 +972,8 @@ def make_depression_solver(
     # (a bare FrozenKernel on closure, a 3-step FrozenRoutine on cupy)
     # uniformly. copy_field's own generic "src"/"dst" leaves are ambiguous
     # across occurrences, so that one path is bound explicitly.
-    # route labelling (both methods): contract steps use `rec_jump`, label uses
-    # `basin_route`; both bound to the carried basin_route buffer.
+    # route labelling: contract steps use `rec_jump`, label uses `basin_route`;
+    # both bound to the carried basin_route buffer.
     bound.bind_leaf(
         {"rec_jump": basin_route, "basin_route": basin_route, "bid": bid},
         prefix=("label_basins",),

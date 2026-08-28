@@ -784,11 +784,13 @@ __global__ void {t}_carve_basins_serial(int* rec, const int* basin_saddlenode, c
     int node = s;
     int nxt = rec[node];
     rec[node] = out_node;
-    while (nxt != node) {{
+    int guard = 0;
+    while (nxt != node && guard < {n_flat}) {{
         int nnxt = rec[nxt];
         rec[nxt] = node;
         node = nxt;
         nxt = nnxt;
+        guard++;
     }}
 }}
 """
