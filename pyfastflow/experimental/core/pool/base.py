@@ -10,9 +10,19 @@ Author: B.G (07/2026)
 
 import itertools
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import Any
 
 _uid_counter = itertools.count()
+
+
+class PoolError(RuntimeError):
+    """
+    Raised on a pool lifecycle misuse: releasing a foreign or already-free
+    handle, or clearing a pool that still has handles in use.
+
+    Author: B.G (08/2026)
+    """
 
 
 def new_uid() -> int:
@@ -39,8 +49,6 @@ class DataHandle(ABC):
     pool for reuse without freeing memory; `destroy()` actually frees it.
 
     Attributes:
-        alloc_id: Per-backend allocation counter, assigned by the backend - used
-            for pool bookkeeping and not unique across backends.
         uid: Process-wide identity from the shared counter (new_uid()) - unique
             across every Parameter, Bag, Helper and DataHandle regardless of
             backend. Concrete handles set self._uid in their own __init__.
@@ -48,13 +56,9 @@ class DataHandle(ABC):
         shape: Resource dimensions. () for a scalar.
         in_use: True between acquire() and release().
 
-    Two handles from different pools can share an alloc_id; only uid identifies
-    a handle on its own.
-
     Author: B.G (07/2026)
     """
 
-    alloc_id: int
     dtype: Any
     shape: tuple[int, ...]
     in_use: bool
@@ -148,9 +152,29 @@ class Pool(ABC):
         """
         Return a handle to the pool for reuse.
 
+        Raises on a handle this pool never minted, and on a double release (a
+        handle already marked available) - either would let the same backing
+        buffer be handed out to two owners at once.
+
         Author: B.G (07/2026)
         """
         ...
+
+    @contextmanager
+    def data(self, dtype, shape):
+        """
+        Scoped acquire/release: `with pool.data(dtype, shape) as h:` checks a
+        handle out and returns it on block exit, including on exception. The
+        primary acquisition API - use `get_data`/`release_data` directly only
+        when a handle must outlive the acquiring scope.
+
+        Author: B.G (08/2026)
+        """
+        handle = self.get_data(dtype, shape)
+        try:
+            yield handle
+        finally:
+            self.release_data(handle)
 
     @abstractmethod
     def clear_unused(self) -> None:
@@ -162,9 +186,13 @@ class Pool(ABC):
         ...
 
     @abstractmethod
-    def clear_all(self) -> None:
+    def clear_all(self, force: bool = False) -> None:
         """
-        Destroy and drop every handle, regardless of in_use state.
+        Destroy and drop every handle.
+
+        Raises if any handle is still `in_use` unless `force=True` is passed -
+        destroying a live handle leaves its holder with a dangling device
+        resource.
 
         Author: B.G (07/2026)
         """

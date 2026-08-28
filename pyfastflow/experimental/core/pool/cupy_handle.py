@@ -18,16 +18,12 @@ class CupyDataHandle(DataHandle):
     Author: B.G (07/2026)
     """
 
-    _next_id = 0
-
     def __init__(self, dtype: Any, shape: tuple[int, ...]):
         """
         Allocate a cupy ndarray of the given dtype/shape.
 
         Author: B.G (07/2026)
         """
-        CupyDataHandle._next_id += 1
-        self.alloc_id = CupyDataHandle._next_id
         self._uid = new_uid()
         self.dtype = dtype
         self.shape = tuple(shape)

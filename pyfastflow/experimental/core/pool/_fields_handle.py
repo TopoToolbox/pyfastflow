@@ -4,6 +4,13 @@ Shared DataHandle implementation for FieldsBuilder-based backends.
 Taichi and Quadrants expose an identical field/FieldsBuilder API; subclasses
 only pin `_backend` to their module (ti or qd).
 
+Known cost - Taichi offline cache: each handle finalizes its own
+FieldsBuilder/SNode tree, and Taichi's kernel cache key includes field
+identity, so churning pooled buffers makes Taichi recompile textually
+identical kernels. No fix here; revisit only if Taichi cold-start compile
+time becomes a real problem. The cupy path has no equivalent issue (its
+constant-block machinery was made field-identity-robust).
+
 Author: B.G (07/2026)
 """
 
@@ -24,7 +31,6 @@ class FieldsBuilderDataHandle(DataHandle):
     """
 
     _backend: ClassVar[Any]
-    _next_id = 0
 
     def __init__(self, dtype: Any, shape: tuple[int, ...]):
         """
@@ -34,9 +40,6 @@ class FieldsBuilderDataHandle(DataHandle):
 
         Author: B.G (07/2026)
         """
-        cls = type(self)
-        cls._next_id += 1
-        self.alloc_id = cls._next_id
         self._uid = new_uid()
         self.dtype = dtype
         self.shape = tuple(shape)

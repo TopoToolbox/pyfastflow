@@ -6,7 +6,7 @@ Author: B.G (07/2026)
 
 from typing import Any, ClassVar
 
-from .base import DataHandle, Pool
+from .base import DataHandle, Pool, PoolError
 
 
 class BucketedPool(Pool):
@@ -35,6 +35,17 @@ class BucketedPool(Pool):
         return handle
 
     def release_data(self, handle: DataHandle) -> None:
+        bucket = self._buckets.get((handle.dtype, tuple(handle.shape)), [])
+        if not any(h is handle for h in bucket):
+            raise PoolError(
+                f"release_data: handle uid={handle.uid} (dtype={handle.dtype}, "
+                f"shape={tuple(handle.shape)}) was not minted by this pool"
+            )
+        if not handle.in_use:
+            raise PoolError(
+                f"release_data: handle uid={handle.uid} is already available - "
+                f"double release would let its buffer be handed out twice"
+            )
         handle.release()
 
     def clear_unused(self) -> None:
@@ -44,7 +55,14 @@ class BucketedPool(Pool):
                     handle.destroy()
                     bucket.remove(handle)
 
-    def clear_all(self) -> None:
+    def clear_all(self, force: bool = False) -> None:
+        if not force:
+            in_use = [h.uid for bucket in self._buckets.values() for h in bucket if h.in_use]
+            if in_use:
+                raise PoolError(
+                    f"clear_all: {len(in_use)} handle(s) still in use (uids {in_use}); "
+                    f"release them or pass force=True"
+                )
         for bucket in self._buckets.values():
             for handle in bucket[:]:
                 handle.destroy()
