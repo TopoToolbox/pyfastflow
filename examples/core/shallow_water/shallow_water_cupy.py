@@ -31,13 +31,13 @@ import cupy as cp
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyfastflow.experimental.core.context.bag import Bag
-from pyfastflow.experimental.core.context.cupy_backend import (
+from pyfastflow.core.context.bag import Bag
+from pyfastflow.core.context.cupy_backend import (
     CupyHelperBuilder,
     CupyKernelBuilder,
     CupyParameter,
 )
-from pyfastflow.experimental.core.pool.cupy_pool import CupyPool
+from pyfastflow.core.pool.cupy_pool import CupyPool
 
 # ---------------------------------------------------------------------------
 # host-side constants

@@ -1,9 +1,9 @@
 """
 GraphFlood on a real DEM (topotoolbox's "greenriver") - any backend, any
-`kind` (pyfastflow.experimental.graphflood.make_graphflood's own dispatch:
+`kind` (pyfastflow.graphflood.make_graphflood's own dispatch:
 "vanilla_sfd" with fill_method="jump"|"reconstruct", "unstable", or the
 cupy-only "vanilla_mfd" - see make_graphflood's own module docstring,
-pyfastflow/experimental/graphflood/__init__.py, for what each does).
+pyfastflow/graphflood/__init__.py, for what each does).
 
 Only the buffers the selected `kind`/`fill_method` combination actually
 needs are allocated - make_graphflood takes no pool and allocates nothing
@@ -34,9 +34,9 @@ import numpy as np
 import topotoolbox as ttb
 from matplotlib.colors import LightSource
 
-from pyfastflow.experimental.core.context.backends import backend_classes
-from pyfastflow.experimental.grid import make_grid_group, make_grid_parameters
-from pyfastflow.experimental.graphflood import make_graphflood
+from pyfastflow.core.context.backends import backend_classes
+from pyfastflow.grid import make_grid_group, make_grid_parameters
+from pyfastflow.graphflood import make_graphflood
 
 BACKEND = sys.argv[1] if len(sys.argv) > 1 else "taichi"
 KIND = sys.argv[2] if len(sys.argv) > 2 else "vanilla_sfd"
@@ -48,13 +48,13 @@ if KIND == "vanilla_mfd" and BACKEND != "cupy":
 if BACKEND == "taichi":
     import taichi as ti
     ti.init(arch=ti.gpu)
-    from pyfastflow.experimental.core.pool.taichi_pool import TaichiPool as PoolCls
+    from pyfastflow.core.pool.taichi_pool import TaichiPool as PoolCls
 elif BACKEND == "quadrants":
     import quadrants as qd
     qd.init(arch=qd.gpu)
-    from pyfastflow.experimental.core.pool.quadrants_pool import QuadrantsPool as PoolCls
+    from pyfastflow.core.pool.quadrants_pool import QuadrantsPool as PoolCls
 elif BACKEND == "cupy":
-    from pyfastflow.experimental.core.pool.cupy_pool import CupyPool as PoolCls
+    from pyfastflow.core.pool.cupy_pool import CupyPool as PoolCls
 else:
     raise ValueError(f"unknown backend {BACKEND!r}, expected 'taichi', 'quadrants' or 'cupy'")
 
@@ -69,7 +69,7 @@ NX, NY, DX = dem.columns, dem.rows, dem.cellsize
 n_flat = NX * NY
 N_NEIGHBOURS = 8  # D8
 
-_, ParamCls, _, dtypes = backend_classes(BACKEND)
+_bk = backend_classes(BACKEND); ParamCls, dtypes = _bk.ParameterCls, _bk.dtypes
 i32, i64, f32, u8 = dtypes["i32"], dtypes["i64"], dtypes["f32"], dtypes["u8"]
 pool = PoolCls()
 

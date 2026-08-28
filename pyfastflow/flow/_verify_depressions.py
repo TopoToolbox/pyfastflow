@@ -56,9 +56,9 @@ Pass counts actually taken are read off `Sequence.last_trip_counts` and
 reported per combination - the number a Sequence exists to make observable.
 
 Run:
-    python -m pyfastflow.experimental.flow._verify_depressions taichi
-    python -m pyfastflow.experimental.flow._verify_depressions quadrants
-    python -m pyfastflow.experimental.flow._verify_depressions cupy
+    python -m pyfastflow.flow._verify_depressions taichi
+    python -m pyfastflow.flow._verify_depressions quadrants
+    python -m pyfastflow.flow._verify_depressions cupy
 
 Author: B.G (07/2026)
 """

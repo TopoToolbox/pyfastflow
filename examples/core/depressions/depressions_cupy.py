@@ -2,7 +2,7 @@
 Perlin terrain -> receivers -> carve depressions -> drainage area, on cupy.
 
 The shortest path through the flow stack, on the new builder/frozen/bound
-stack (pyfastflow/experimental/core/context/builder.py, frozen.py, bound.py):
+stack (pyfastflow/core/context/builder.py, frozen.py, bound.py):
 noise fills z inline in the init kernel (make_noise_group composes an `at(i)`
 device helper, never a field), one make_receivers pass builds the D8
 receiver graph, make_depression_solver resolves every pit by carving, and
@@ -23,17 +23,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LightSource
 
-from pyfastflow.experimental.core.context.builder import KernelBuilder
-from pyfastflow.experimental.core.context.cupy_backend import CupyParameter
-from pyfastflow.experimental.core.pool.cupy_pool import CupyPool
-from pyfastflow.experimental.flow import (
+from pyfastflow.core.context.builder import KernelBuilder
+from pyfastflow.core.context.cupy_backend import CupyParameter
+from pyfastflow.core.pool.cupy_pool import CupyPool
+from pyfastflow.flow import (
     make_accumulation,
     make_depression_solver,
     make_depressions,
     make_receivers,
 )
-from pyfastflow.experimental.grid import make_grid_group, make_grid_parameters
-from pyfastflow.experimental.noise import make_noise_group, make_noise_parameters
+from pyfastflow.grid import make_grid_group, make_grid_parameters
+from pyfastflow.noise import make_noise_group, make_noise_parameters
 
 N = 2048
 DX = 50.0

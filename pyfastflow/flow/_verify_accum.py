@@ -44,10 +44,9 @@ whenever the accumulated total stays under 2**24 - agreement there is a
 mathematical fact about IEEE-754, not evidence the three summation orders
 are equivalent in general. The noninteger pass is the actual check of that.
 
-Run:
-    python -m pyfastflow.experimental.flow._verify_accum taichi
-    python -m pyfastflow.experimental.flow._verify_accum quadrants
-    python -m pyfastflow.experimental.flow._verify_accum cupy
+Run (either form works - a plain path self-bootstraps its package context):
+    python -m pyfastflow.flow._verify_accum taichi
+    python pyfastflow/flow/_verify_accum.py taichi
 
 Author: B.G (07/2026)
 """
@@ -568,6 +567,17 @@ def run_mfd_cupy():
     source_p.destroy()
 
     return n, max_abs, max_rel, max_got, max_ref, n_stuck
+
+
+if __name__ == "__main__" and __package__ in (None, ""):
+    # Run as a plain path (`python .../_verify_accum.py taichi`): restore the
+    # package context the deferred `from ..` / `from .` imports below need.
+    import os
+
+    _root = os.path.abspath(os.path.join(os.path.dirname(__file__), *[os.pardir] * 2))
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    __package__ = "pyfastflow.flow"
 
 
 if __name__ == "__main__":

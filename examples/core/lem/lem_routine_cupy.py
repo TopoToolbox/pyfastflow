@@ -55,14 +55,14 @@ import cupy as cp
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyfastflow.experimental.core.context.bag import Bag, merge
-from pyfastflow.experimental.core.context.cupy_backend import (
+from pyfastflow.core.context.bag import Bag, merge
+from pyfastflow.core.context.cupy_backend import (
     CupyHelperBuilder,
     CupyKernelBuilder,
     CupyParameter,
     CupyRoutineBuilder,
 )
-from pyfastflow.experimental.core.pool.cupy_pool import CupyPool
+from pyfastflow.core.pool.cupy_pool import CupyPool
 
 # ---------------------------------------------------------------------------
 # host-side constants (grid size, launch config, timing)

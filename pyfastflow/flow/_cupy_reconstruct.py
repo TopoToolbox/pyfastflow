@@ -221,7 +221,7 @@ def build_fill_reconstruct_relax(*, grid, n_flat: int):
     sized input half of `frontier`, relaxing each active cell against its
     neighbours and pushing any neighbour whose candidate could still improve
     into the output half, deduplicated per pass via `queued_gen` +
-    atomicExch. See ../../../experimental/LM/fill_reconstruct_optimised.py's
+    atomicExch. See ../../experimental/LM/fill_reconstruct_optimised.py's
     module docstring for the push-gate correctness argument (an update at i
     only pushes a neighbour j when i's own contribution alone could still
     improve j - never a missed real activation, only a provably-futile push

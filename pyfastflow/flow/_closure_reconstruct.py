@@ -214,7 +214,7 @@ def build_fill_reconstruct_relax(*, backend: str, backend_mod, grid, n_flat: int
     pushing any neighbour whose candidate could still improve into the
     output half, deduplicated per pass via `queued_gen` + atomic_max (see
     the module docstring). See
-    ../../../experimental/LM/fill_reconstruct_optimised.py's module docstring
+    ../../experimental/LM/fill_reconstruct_optimised.py's module docstring
     for the push-gate correctness argument.
 
     `P` is this kernel's own wired PARAM slot (mode "scalar" - the host

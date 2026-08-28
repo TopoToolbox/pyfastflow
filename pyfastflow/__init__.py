@@ -1,54 +1,47 @@
 """
 PyFastFlow package root.
 
-At this stage the top-level surface only exposes the modules that have already
-been migrated to the new context-driven API. Older subpackages remain in the
-repository but are intentionally left out of the root namespace until they are
-reworked.
+GPU geomorphology / hydraulics on a flat 1D-indexed grid, backend-agnostic
+across Taichi, Quadrants and cupy.
 
-Author: B.G (02/2026)
+Layout:
+  core         the machinery only - `core.context` (the kernel build ->
+               freeze -> bind -> compile metaprogramming layer) and
+               `core.pool` (device-buffer pooling). Nothing domain-specific.
+  grid, noise, flow, graphflood, ops, visu
+               the feature layer built on `core`: each a set of
+               `make_*_group` / `make_*_parameters` factories returning pure
+               structure plus caller-owned Parameters, no stateful context
+               classes.
+  legacy       the pre-rewrite single-backend codebase, dead code kept for
+               reference (see CONTEXT_legacy.md). Not imported here.
+  experimental empty landing space for in-progress work.
+
+Author: B.G (08/2026)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "B.G."
 
-# Lazy submodule loading to avoid heavy side effects at import time.
+# Lazy submodule loading to avoid heavy backend side effects at import time.
 _LAZY_SUBMODULES = [
-    "erodep",
-    "general_algorithms",
+    "core",
     "grid",
     "noise",
-    "pool",
-    "rastermanip",
+    "flow",
+    "graphflood",
+    "ops",
     "visu",
 ]
 
 __all__ = list(_LAZY_SUBMODULES)
-__all__ += ["taipool", "tp"]
-
-# LEGACY:
-# "cli",
-# "constants",
-# "erodep",
-# "flood",
-# "flow",
-# "io",
-# "misc",
-# "visuGL",
 
 
 def __getattr__(name):
     if name in _LAZY_SUBMODULES:
         import importlib
+
         mod = importlib.import_module(f".{name}", __name__)
         globals()[name] = mod
         return mod
-    if name == "taipool" or name == "tp":
-        import importlib
-
-        mod = importlib.import_module(".pool", __name__)
-        globals()["pool"] = mod
-        globals()["taipool"] = mod.taipool
-        globals()["tp"] = mod.taipool
-        return mod.taipool
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

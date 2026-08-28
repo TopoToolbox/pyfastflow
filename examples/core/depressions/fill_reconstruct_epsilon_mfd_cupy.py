@@ -6,14 +6,14 @@ Perlin terrain -> fill by grayscale morphological reconstruction ->
 Mirrors fill_reconstruct_cupy.py, swapping its single-flow-direction
 `make_accumulation(method="atomic")` step for multiple-flow-direction
 accumulation over the SAME fill_reconstruct result - see
-pyfastflow/experimental/graphflood/__init__.py's module docstring,
+pyfastflow/graphflood/__init__.py's module docstring,
 "kind='vanilla_mfd'" section, for the full algorithm this example runs by
 hand (make_graphflood's own kind="vanilla_mfd" wraps exactly this pipeline
 plus the graphflood-specific friction/divergence steps this example has no
 use for, computing drainage area rather than water depth).
 
 Why "reconstruct_epsilon" rather than plain `filled`: MFD topology
-(pyfastflow/experimental/graphflood/_cupy_mfd_topology.py) derives
+(pyfastflow/graphflood/_cupy_mfd_topology.py) derives
 `dirs`/`mfd_w` from `slope(filled[i], filled[j]) > 0` between neighbours -
 exactly 0 for every pair inside a resolved depression's flat lake bottom,
 which gives every cell in there zero outgoing MFD edges and stalls
@@ -21,7 +21,7 @@ accumulation at the flat's boundary. SFD accumulation (fill_reconstruct_
 cupy.py's own `accum_bound.bind("rec", parent.data)`) never has this
 problem because it walks `parent` directly rather than re-deriving edges
 from `filled`'s elevation values. "reconstruct_epsilon"
-(pyfastflow/experimental/graphflood/_cupy_reconstruct_epsilon.py) fixes
+(pyfastflow/graphflood/_cupy_reconstruct_epsilon.py) fixes
 this without touching _cupy_mfd_topology.py's own slope-based logic at
 all: `filled_eps[i] = filled[i] + MFD_EPSILON * hops[i]`, where `hops[i]`
 is i's distance to the outlet along `parent` (pointer-jumping, double-
@@ -40,15 +40,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LightSource
 
-from pyfastflow.experimental.core.context.builder import KernelBuilder
-from pyfastflow.experimental.core.context.cupy_backend import CupyParameter
-from pyfastflow.experimental.core.pool.cupy_pool import CupyPool
-from pyfastflow.experimental.flow import make_fill_reconstruct, make_fill_reconstruct_solver
-from pyfastflow.experimental.flow._cupy_mfd_accum import build_persistent_mfd, init_frontier_mfd, persistent_grid_block
-from pyfastflow.experimental.grid import make_grid_group, make_grid_parameters
-from pyfastflow.experimental.graphflood._cupy_mfd_topology import build_mfd_topology
-from pyfastflow.experimental.graphflood._cupy_reconstruct_epsilon import build_apply_epsilon, build_hops_init, build_hops_jump
-from pyfastflow.experimental.noise import make_noise_group, make_noise_parameters
+from pyfastflow.core.context.builder import KernelBuilder
+from pyfastflow.core.context.cupy_backend import CupyParameter
+from pyfastflow.core.pool.cupy_pool import CupyPool
+from pyfastflow.flow import make_fill_reconstruct, make_fill_reconstruct_solver
+from pyfastflow.flow._cupy_mfd_accum import build_persistent_mfd, init_frontier_mfd, persistent_grid_block
+from pyfastflow.grid import make_grid_group, make_grid_parameters
+from pyfastflow.graphflood._cupy_mfd_topology import build_mfd_topology
+from pyfastflow.graphflood._cupy_reconstruct_epsilon import build_apply_epsilon, build_hops_init, build_hops_jump
+from pyfastflow.noise import make_noise_group, make_noise_parameters
 
 N = 2048
 DX = 50.0

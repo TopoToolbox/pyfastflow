@@ -57,12 +57,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import quadrants as qd
 
-from pyfastflow.experimental.core.context.quadrants_backend import (
+from pyfastflow.core.context.quadrants_backend import (
     QuadrantsKernelBuilder,
     QuadrantsParameter,
 )
-from pyfastflow.experimental.grid import make_grid
-from pyfastflow.experimental.core.pool.quadrants_pool import QuadrantsPool
+from pyfastflow.grid import make_grid
+from pyfastflow.core.pool.quadrants_pool import QuadrantsPool
 
 qd.init(arch=qd.gpu)
 

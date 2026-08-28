@@ -45,14 +45,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import taichi as ti
 
-from pyfastflow.experimental.core.context.bag import Bag, merge
-from pyfastflow.experimental.core.context.taichi_backend import (
+from pyfastflow.core.context.bag import Bag, merge
+from pyfastflow.core.context.taichi_backend import (
     TaichiHelperBuilder,
     TaichiKernelBuilder,
     TaichiParameter,
     TaichiRoutineBuilder,
 )
-from pyfastflow.experimental.core.pool.taichi_pool import TaichiPool
+from pyfastflow.core.pool.taichi_pool import TaichiPool
 
 ti.init(arch=ti.gpu)
 

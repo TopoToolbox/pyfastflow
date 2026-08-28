@@ -64,9 +64,9 @@ import topotoolbox as ttb
 from matplotlib.colors import LightSource
 from scipy.ndimage import binary_dilation
 
-from pyfastflow.experimental.core.context.backends import backend_classes
-from pyfastflow.experimental.grid import make_grid_group, make_grid_parameters
-from pyfastflow.experimental.graphflood import make_graphflood
+from pyfastflow.core.context.backends import backend_classes
+from pyfastflow.grid import make_grid_group, make_grid_parameters
+from pyfastflow.graphflood import make_graphflood
 
 FRICTION_EXPONENT = 2.0 / 3.0
 N_NEIGHBOURS = 8  # D8
@@ -107,13 +107,13 @@ def main():
     if backend == "taichi":
         import taichi as ti
         ti.init(arch=ti.gpu)
-        from pyfastflow.experimental.core.pool.taichi_pool import TaichiPool as PoolCls
+        from pyfastflow.core.pool.taichi_pool import TaichiPool as PoolCls
     elif backend == "quadrants":
         import quadrants as qd
         qd.init(arch=qd.gpu)
-        from pyfastflow.experimental.core.pool.quadrants_pool import QuadrantsPool as PoolCls
+        from pyfastflow.core.pool.quadrants_pool import QuadrantsPool as PoolCls
     else:
-        from pyfastflow.experimental.core.pool.cupy_pool import CupyPool as PoolCls
+        from pyfastflow.core.pool.cupy_pool import CupyPool as PoolCls
 
     dem = ttb.read_tif(args.dem)
     NX, NY, DX = dem.columns, dem.rows, dem.cellsize
@@ -137,7 +137,7 @@ def main():
 
     outlet_mode = "mask" if has_nodata else "edge"
 
-    _, ParamCls, _, dtypes = backend_classes(backend)
+    _bk = backend_classes(backend); ParamCls, dtypes = _bk.ParameterCls, _bk.dtypes
     i32, i64, f32, u8 = dtypes["i32"], dtypes["i64"], dtypes["f32"], dtypes["u8"]
     pool = PoolCls()
 

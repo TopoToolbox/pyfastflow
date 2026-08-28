@@ -17,13 +17,13 @@ import numpy as np
 import topotoolbox as ttb
 from matplotlib.colors import LightSource
 
-from pyfastflow.experimental.core.context.cupy_backend import CupyParameter
-from pyfastflow.experimental.core.pool.cupy_pool import CupyPool
-from pyfastflow.experimental.flow import make_fill_reconstruct, make_fill_reconstruct_solver
-from pyfastflow.experimental.flow._cupy_mfd_accum import build_persistent_mfd, init_frontier_mfd, persistent_grid_block
-from pyfastflow.experimental.grid import make_grid_group, make_grid_parameters
-from pyfastflow.experimental.graphflood._cupy_mfd_topology import build_mfd_topology
-from pyfastflow.experimental.graphflood._cupy_reconstruct_epsilon import build_apply_epsilon, build_hops_init, build_hops_jump
+from pyfastflow.core.context.cupy_backend import CupyParameter
+from pyfastflow.core.pool.cupy_pool import CupyPool
+from pyfastflow.flow import make_fill_reconstruct, make_fill_reconstruct_solver
+from pyfastflow.flow._cupy_mfd_accum import build_persistent_mfd, init_frontier_mfd, persistent_grid_block
+from pyfastflow.grid import make_grid_group, make_grid_parameters
+from pyfastflow.graphflood._cupy_mfd_topology import build_mfd_topology
+from pyfastflow.graphflood._cupy_reconstruct_epsilon import build_apply_epsilon, build_hops_init, build_hops_jump
 
 dem = ttb.load_dem("greenriver")
 N_NEIGHBOURS = 8  # D8

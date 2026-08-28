@@ -51,12 +51,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import taichi as ti
 
-from pyfastflow.experimental.core.context.taichi_backend import (
+from pyfastflow.core.context.taichi_backend import (
     TaichiKernelBuilder,
     TaichiParameter,
 )
-from pyfastflow.experimental.grid import make_grid
-from pyfastflow.experimental.core.pool.taichi_pool import TaichiPool
+from pyfastflow.grid import make_grid
+from pyfastflow.core.pool.taichi_pool import TaichiPool
 
 ti.init(arch=ti.gpu)
 

@@ -24,10 +24,10 @@ Writing flexible GPU kernels for physics simulation can be time-consuming. Perfo
 
 ```python
 import taichi as ti; ti.init(arch=ti.gpu)
-from pyfastflow.experimental.core.context.taichi_backend import (
+from pyfastflow.core.context.taichi_backend import (
     TaichiKernelBuilder, TaichiParameter,
 )
-from pyfastflow.experimental.core.pool.taichi_pool import TaichiPool
+from pyfastflow.core.pool.taichi_pool import TaichiPool
 
 pool = TaichiPool()
 D = TaichiParameter("D", ti.f32, mode="scalar", value=1e-2, pool=pool)

@@ -18,9 +18,9 @@ a real (Gaussian-blurred i.i.d.) terrain with a constant rain source:
     there directly rather than routing through the friction law).
 
 Run:
-    python -m pyfastflow.experimental.graphflood._verify_graphflood taichi
-    python -m pyfastflow.experimental.graphflood._verify_graphflood quadrants
-    python -m pyfastflow.experimental.graphflood._verify_graphflood cupy
+    python -m pyfastflow.graphflood._verify_graphflood taichi
+    python -m pyfastflow.graphflood._verify_graphflood quadrants
+    python -m pyfastflow.graphflood._verify_graphflood cupy
 
 Author: B.G (08/2026)
 """

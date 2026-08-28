@@ -3,11 +3,11 @@ Perlin terrain -> fill by grayscale morphological reconstruction ->
 drainage area, on Taichi.
 
 The reconstruction alternative to depressions_taichi.py's carve/label/saddle
-loop, on the new builder/frozen/bound stack (pyfastflow/experimental/core/
+loop, on the new builder/frozen/bound stack (pyfastflow/core/
 context/builder.py, frozen.py, bound.py): make_fill_reconstruct/
 make_fill_reconstruct_solver converge `filled`/`parent` (the receiver graph)
 directly to a fixed point - no basin ids, no saddle search, no outlet
-routing. See pyfastflow/experimental/flow/__init__.py's module docstring and
+routing. See pyfastflow/flow/__init__.py's module docstring and
 experimental/LM/fill_reconstruct_optimised.py for the algorithm.
 
 Every buffer the solver touches is allocated here: the factory takes no pool
@@ -29,12 +29,12 @@ import numpy as np
 import taichi as ti
 from matplotlib.colors import LightSource
 
-from pyfastflow.experimental.core.context.builder import KernelBuilder
-from pyfastflow.experimental.core.context.taichi_backend import TaichiParameter
-from pyfastflow.experimental.core.pool.taichi_pool import TaichiPool
-from pyfastflow.experimental.flow import make_accumulation, make_fill_reconstruct, make_fill_reconstruct_solver
-from pyfastflow.experimental.grid import make_grid_group, make_grid_parameters
-from pyfastflow.experimental.noise import make_noise_group, make_noise_parameters
+from pyfastflow.core.context.builder import KernelBuilder
+from pyfastflow.core.context.taichi_backend import TaichiParameter
+from pyfastflow.core.pool.taichi_pool import TaichiPool
+from pyfastflow.flow import make_accumulation, make_fill_reconstruct, make_fill_reconstruct_solver
+from pyfastflow.grid import make_grid_group, make_grid_parameters
+from pyfastflow.noise import make_noise_group, make_noise_parameters
 
 ti.init(arch=ti.gpu)
 

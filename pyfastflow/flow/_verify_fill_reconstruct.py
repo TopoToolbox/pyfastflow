@@ -32,9 +32,9 @@ priority queue), so its own cost, not the GPU solver's, sets the practical
 grid size for a script meant to be run once and read.
 
 Run:
-    python -m pyfastflow.experimental.flow._verify_fill_reconstruct taichi
-    python -m pyfastflow.experimental.flow._verify_fill_reconstruct quadrants
-    python -m pyfastflow.experimental.flow._verify_fill_reconstruct cupy
+    python -m pyfastflow.flow._verify_fill_reconstruct taichi
+    python -m pyfastflow.flow._verify_fill_reconstruct quadrants
+    python -m pyfastflow.flow._verify_fill_reconstruct cupy
 
 Author: B.G (07/2026)
 """

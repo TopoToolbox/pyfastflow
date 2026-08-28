@@ -5,7 +5,7 @@ with open("README.md", encoding="utf-8") as fh:
 
 setup(
     name="pyfastflow",
-    version="0.0.1",
+    version="0.2.0",
     author="Boris Gailleton",
     author_email="boris.gailleton@univ-rennes.fr",
     description="GPU geomorphological and hydraulic flow routines",
@@ -65,13 +65,13 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "pff-raster2npy=pyfastflow.cli.raster_commands:raster2npy",
-            "pff-upscale=pyfastflow.cli.rastermanip_commands:raster_upscale",
-            "pff-downscale=pyfastflow.cli.rastermanip_commands:raster_downscale",
-            "pff-dem2png=pyfastflow.cli.dem2png_commands:dem2png",
-            "pff-boundary-gui=pyfastflow.cli.grid_commands:boundary_gui",
-            "pff-precip-gui=pyfastflow.cli.precip_commands:precipitation_gui",
-            "pff-terrain3d=pyfastflow.cli.terrain3d_cli:main",
+            "pff-raster2npy=pyfastflow.legacy.cli.raster_commands:raster2npy",
+            "pff-upscale=pyfastflow.legacy.cli.rastermanip_commands:raster_upscale",
+            "pff-downscale=pyfastflow.legacy.cli.rastermanip_commands:raster_downscale",
+            "pff-dem2png=pyfastflow.legacy.cli.dem2png_commands:dem2png",
+            "pff-boundary-gui=pyfastflow.legacy.cli.grid_commands:boundary_gui",
+            "pff-precip-gui=pyfastflow.legacy.cli.precip_commands:precipitation_gui",
+            "pff-terrain3d=pyfastflow.legacy.cli.terrain3d_cli:main",
         ],
     },
 )

@@ -45,14 +45,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import quadrants as qd
 
-from pyfastflow.experimental.core.context.bag import Bag, merge
-from pyfastflow.experimental.core.context.quadrants_backend import (
+from pyfastflow.core.context.bag import Bag, merge
+from pyfastflow.core.context.quadrants_backend import (
     QuadrantsHelperBuilder,
     QuadrantsKernelBuilder,
     QuadrantsParameter,
     QuadrantsRoutineBuilder,
 )
-from pyfastflow.experimental.core.pool.quadrants_pool import QuadrantsPool
+from pyfastflow.core.pool.quadrants_pool import QuadrantsPool
 
 qd.init(arch=qd.gpu)
 
