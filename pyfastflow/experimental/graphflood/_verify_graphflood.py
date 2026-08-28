@@ -56,7 +56,7 @@ def run(backend: str, fill_method: str) -> None:
     from ..grid import make_grid_group, make_grid_parameters
     from . import make_graphflood
 
-    _, ParamCls, _, dtypes = backend_classes(backend)
+    _bk = backend_classes(backend); ParamCls, dtypes = _bk.ParameterCls, _bk.dtypes
     i32, i64, f32 = dtypes["i32"], dtypes["i64"], dtypes["f32"]
 
     if backend == "taichi":

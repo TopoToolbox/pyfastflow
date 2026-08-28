@@ -369,7 +369,7 @@ def make_receivers(
     hash_u32 = make_hash_u32(backend) if mode == "stochastic" else None
 
     if backend in ("taichi", "quadrants"):
-        backend_mod, _, _, _ = backend_classes(backend)
+        backend_mod = backend_classes(backend).module
         return blocks.build_receivers(
             backend=backend,
             backend_mod=backend_mod,
@@ -505,7 +505,7 @@ def make_accumulation(
             )
         blocks = _blocks_for(backend, "accum")
         if backend in ("taichi", "quadrants"):
-            backend_mod, _, _, _ = backend_classes(backend)
+            backend_mod = backend_classes(backend).module
             return {"accum": blocks.build_atomic(backend=backend, backend_mod=backend_mod, n_flat=int(n_flat))}
         return blocks.build_atomic(n_flat=int(n_flat))
 
@@ -561,7 +561,7 @@ def make_accumulation(
                 "grid is a bare FrozenGroup with no bound values to read it off"
             )
         if closure:
-            backend_mod, _, _, _ = backend_classes(backend)
+            backend_mod = backend_classes(backend).module
             sb, kernels = blocks.build_rake_compress(
                 backend=backend, backend_mod=backend_mod, n_neighbours=int(n_neighbours), logn=logn,
             )
@@ -572,7 +572,7 @@ def make_accumulation(
         if rounds % 2 != 0:
             rounds += 1
         if closure:
-            backend_mod, _, _, _ = backend_classes(backend)
+            backend_mod = backend_classes(backend).module
             sb, kernels = blocks.build_pointer_jump_push(backend=backend, backend_mod=backend_mod, rounds=rounds)
         else:
             sb, kernels = blocks.build_pointer_jump_push(rounds=rounds, n_flat=n_flat_resolved)
@@ -673,7 +673,7 @@ def make_depressions(
     if reroute not in _DEP_REROUTES:
         raise ValueError(f"make_depressions: reroute must be one of {sorted(_DEP_REROUTES)}, got {reroute!r}")
 
-    backend_mod, _, _, _ = backend_classes(backend)
+    backend_mod = backend_classes(backend).module
     blocks = _blocks_for(backend, "depressions")
     n_flat_resolved = int(n_flat)
     closure = backend in ("taichi", "quadrants")
@@ -1079,7 +1079,7 @@ def make_fill_reconstruct(
 
     Author: B.G (08/2026)
     """
-    backend_mod, _, _, _ = backend_classes(backend)
+    backend_mod = backend_classes(backend).module
     blocks = _blocks_for(backend, "reconstruct")
     n_flat_resolved = int(nx) * int(ny)
     closure = backend in ("taichi", "quadrants")

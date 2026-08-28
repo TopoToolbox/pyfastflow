@@ -124,25 +124,7 @@ class ClosureBkNode:
 
     def __init__(self, backend: Any):
         self._backend = backend
-        self._fns = {
-            "sqrt": backend.sqrt,
-            "atan2": backend.atan2,
-            "cos": backend.cos,
-            "sin": backend.sin,
-            "floor": backend.floor,
-            "u32": backend.u32,
-            "bit_cast": backend.bit_cast,
-            "select": backend.select,
-            "cast": backend.cast,
-            "atomic_min": backend.atomic_min,
-            "atomic_max": backend.atomic_max,
-            "atomic_add": backend.atomic_add,
-            "i32": backend.i32,
-            "i64": backend.i64,
-            "f32": backend.f32,
-            "grouped": backend.grouped,
-            "Vector": backend.Vector,
-        }
+        self._fns = {n: getattr(backend, n) for n in _BK_METHOD_NAMES}
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):

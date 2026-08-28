@@ -586,7 +586,7 @@ def make_graphflood(
     launch = {} if closure else {"grid": ((int(n_flat) + block_size - 1) // block_size,), "block": (block_size,)}
     core_blocks = _core_blocks_for(backend)
     if closure:
-        backend_mod, _, _, _ = backend_classes(backend)
+        backend_mod = backend_classes(backend).module
 
     if kind == "unstable":
         _require("kind='unstable'", Q_next=Q_next)
@@ -831,7 +831,7 @@ def make_graphflood(
     launch = {} if closure else {"grid": ((int(n_flat) + block_size - 1) // block_size,), "block": (block_size,)}
     core_blocks = _core_blocks_for(backend)
     if closure:
-        backend_mod, _, _, _ = backend_classes(backend)
+        backend_mod = backend_classes(backend).module
 
     # ------------------------------------------------------------------
     # 1. routing + local-minima resolution

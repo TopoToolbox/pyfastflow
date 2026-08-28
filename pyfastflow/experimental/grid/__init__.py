@@ -258,7 +258,7 @@ def make_grid_parameters(
     if dx_mode not in ("const", "scalar", "field"):
         raise ValueError(f"make_grid_parameters: dx_mode must be 'const', 'scalar' or 'field', got {dx_mode!r}")
 
-    _, ParamCls, _, dtypes = backend_classes(backend)
+    _bk = backend_classes(backend); ParamCls, dtypes = _bk.ParameterCls, _bk.dtypes
     n_flat = int(nx) * int(ny)
 
     nx_p = ParamCls("GRID_NX", dtype=dtypes["i32"], mode=nx_mode, value=int(nx), pool=pool)

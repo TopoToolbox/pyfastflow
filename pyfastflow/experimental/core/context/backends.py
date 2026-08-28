@@ -16,10 +16,33 @@ its own blocks, this module does not know they exist.
 Author: B.G (07/2026)
 """
 
+from typing import Any, NamedTuple
+
 import numpy as np
 
 
-def backend_classes(backend: str):
+class Backend(NamedTuple):
+    """
+    What `backend_classes()` returns for one backend name.
+
+    module : module or None
+        `ti`/`qd` for the closure backends, `None` for cupy - cupy blocks
+        call plain C, never a bound backend module.
+    ParameterCls : type
+        The backend's Parameter subclass.
+    dtypes : dict
+        Maps "i32"/"i64"/"f32"/"u8"/"u32" to that backend's own dtype
+        objects (ti.*/qd.* for the closure backends, numpy dtypes for cupy).
+
+    Author: B.G (08/2026)
+    """
+
+    module: Any
+    ParameterCls: type
+    dtypes: dict
+
+
+def backend_classes(backend: str) -> Backend:
     """
     Look up the module, Parameter subclass and dtype table for one backend.
 
@@ -30,17 +53,8 @@ def backend_classes(backend: str):
 
     Returns
     -------
-    module : module or None
-        `ti`/`qd` for the closure backends, `None` for cupy - cupy blocks
-        call plain C, never a bound backend module.
-    ParameterCls : type
-        The backend's Parameter subclass.
-    unused : None
-        Reserved, always None - kept so `_, ParamCls, _, dtypes =
-        backend_classes(backend)` call sites stay stable.
-    dtypes : dict
-        Maps "i32"/"i64"/"f32"/"u8"/"u32" to that backend's own dtype
-        objects (ti.*/qd.* for the closure backends, numpy dtypes for cupy).
+    Backend
+        A `(module, ParameterCls, dtypes)` named tuple - see `Backend`.
 
     No blocks module is returned - each factory (grid, noise, ...) has its
     own private block module and picks it itself.
@@ -52,21 +66,21 @@ def backend_classes(backend: str):
 
         from .taichi_backend import TaichiParameter
 
-        return ti, TaichiParameter, None, {
+        return Backend(ti, TaichiParameter, {
             "i32": ti.i32, "i64": ti.i64, "f32": ti.f32, "u8": ti.u8, "u32": ti.u32,
-        }
+        })
     if backend == "quadrants":
         import quadrants as qd
 
         from .quadrants_backend import QuadrantsParameter
 
-        return qd, QuadrantsParameter, None, {
+        return Backend(qd, QuadrantsParameter, {
             "i32": qd.i32, "i64": qd.i64, "f32": qd.f32, "u8": qd.u8, "u32": qd.u32,
-        }
+        })
     if backend == "cupy":
         from .cupy_backend import CupyParameter
 
-        return None, CupyParameter, None, {
+        return Backend(None, CupyParameter, {
             "i32": np.int32, "i64": np.int64, "f32": np.float32, "u8": np.uint8, "u32": np.uint32,
-        }
+        })
     raise ValueError(f"unknown backend {backend!r}, expected 'taichi', 'quadrants' or 'cupy'")

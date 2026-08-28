@@ -71,6 +71,15 @@ private block exactly as it is from the kernel's own template. See bk.py's
 module docstring for why this namespace exists and contract.py for why it
 never appears as a slot requirement.
 
+No memoization
+--------------
+Every composed helper is retraced per `BoundKernel.compile()` and
+`_compile_dropping_ctx` `exec()`s a fresh function each call - nothing is
+cached across compiles. This is a deliberate compile-once-run-many choice:
+everything in the tree today compiles once at setup and launches many times,
+so a memo table would only add a cache-key surface with no payoff. Revisit
+only if anything ever compiles per-frame.
+
 Author: B.G (08/2026)
 """
 

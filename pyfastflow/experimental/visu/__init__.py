@@ -259,7 +259,7 @@ def make_hillshade_parameters(
         if mode not in _MODES:
             raise ValueError(f"make_hillshade_parameters: {label} must be 'const' or 'scalar', got {mode!r}")
 
-    _, ParamCls, _, dtypes = backend_classes(backend)
+    _bk = backend_classes(backend); ParamCls, dtypes = _bk.ParameterCls, _bk.dtypes
 
     azimuth_p = ParamCls("HS_AZIMUTH", dtype=dtypes["f32"], mode=azimuth_mode, value=float(azimuth), pool=pool)
     altitude_p = ParamCls("HS_ALTITUDE", dtype=dtypes["f32"], mode=altitude_mode, value=float(altitude), pool=pool)

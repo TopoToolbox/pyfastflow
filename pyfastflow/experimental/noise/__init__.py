@@ -294,7 +294,7 @@ def make_noise_parameters(
         if mode not in _MODES:
             raise ValueError(f"make_noise_parameters: {label} must be 'const' or 'scalar', got {mode!r}")
 
-    _, ParamCls, _, dtypes = backend_classes(backend)
+    _bk = backend_classes(backend); ParamCls, dtypes = _bk.ParameterCls, _bk.dtypes
 
     amplitude_p = ParamCls(
         "NOISE_AMPLITUDE", dtype=dtypes["f32"], mode=amplitude_mode, value=float(amplitude), pool=pool

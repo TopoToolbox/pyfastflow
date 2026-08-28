@@ -192,7 +192,7 @@ def make_elementwise(backend: str, *, n: "int | None" = None) -> dict:
         if n is None:
             raise ValueError("make_elementwise: cupy requires n (the buffer length)")
         return blocks.build_elementwise(n)
-    backend_mod, _, _, _ = backend_classes(backend)
+    backend_mod = backend_classes(backend).module
     return blocks.build_elementwise(backend, backend_mod)
 
 
@@ -322,7 +322,7 @@ def make_scan(backend: str, pool, n: int) -> Scan:
 
     Author: B.G (08/2026)
     """
-    _, ParamCls, _, dtypes = backend_classes(backend)
+    _bk = backend_classes(backend); ParamCls, dtypes = _bk.ParameterCls, _bk.dtypes
     blocks = _blocks_for(backend)
 
     if backend == "cupy":
@@ -353,7 +353,7 @@ def make_scan(backend: str, pool, n: int) -> Scan:
         return Scan(inclusive_fn, compact_fn, count_p)
 
     # Taichi / Quadrants
-    backend_mod, _, _, _ = backend_classes(backend)
+    backend_mod = backend_classes(backend).module
     work_size = blocks.next_pow2(n)
     work_h = pool.get_data(dtypes["i32"], (work_size,))
     scan_out_scratch = pool.get_data(dtypes["i32"], (n,))
@@ -500,7 +500,7 @@ def make_reduce(backend: str, pool, n: int) -> Reduce:
 
     Author: B.G (08/2026)
     """
-    _, _, _, dtypes = backend_classes(backend)
+    dtypes = backend_classes(backend).dtypes
 
     if backend == "cupy":
         import cupy as cp
@@ -532,7 +532,7 @@ def make_reduce(backend: str, pool, n: int) -> Reduce:
         return Reduce(sum_h, min_h, max_h, argmin_h, run, host)
 
     # Taichi / Quadrants
-    backend_mod, _, _, _ = backend_classes(backend)
+    backend_mod = backend_classes(backend).module
     blocks = _blocks_for(backend)
 
     sum_h = pool.get_data(dtypes["f32"], ())

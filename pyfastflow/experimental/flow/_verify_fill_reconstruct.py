@@ -143,7 +143,7 @@ def run(backend: str):
     from ..grid import make_grid_group, make_grid_parameters
     from . import make_fill_reconstruct, make_fill_reconstruct_solver
 
-    _, ParamCls, _, dtypes = backend_classes(backend)
+    _bk = backend_classes(backend); ParamCls, dtypes = _bk.ParameterCls, _bk.dtypes
     i32, f32 = dtypes["i32"], dtypes["f32"]
 
     if backend == "taichi":

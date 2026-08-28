@@ -259,7 +259,7 @@ def run(backend: str):
     from ..grid import make_grid_group, make_grid_parameters
     from . import make_depression_solver, make_depressions, make_receivers
 
-    _, ParamCls, _, dtypes = backend_classes(backend)
+    _bk = backend_classes(backend); ParamCls, dtypes = _bk.ParameterCls, _bk.dtypes
     i32, i64, f32, u8 = dtypes["i32"], dtypes["i64"], dtypes["f32"], dtypes["u8"]
 
     if backend == "taichi":
