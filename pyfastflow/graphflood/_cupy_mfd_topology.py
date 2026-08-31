@@ -40,6 +40,13 @@ never set) and an all-zero `mfd_w` row - the same "this is where routing
 stops" role `rec[i] = i` plays for SFD receivers, just expressed as "sends
 nowhere" instead of "sends to itself" (persistent_mfd's own frontier/
 indegree walk has no self-loop concept to exploit the SFD convention with).
+A nodata node gets the identical `dirs[i] = 0` / all-zero `mfd_w` treatment
+(via `ctx.grid.nodata(i)` in the same guard): its `filled` is a raster-sweep
+sentinel far above the live terrain, so without the guard it would compute a
+large positive slope to every live neighbour and route the spurious source
+_cupy_mfd_accum.py's q_init seeds it with (which q_init itself gates to 0)
+into the live ring. Live cells never route _into_ a nodata cell -
+`ctx.grid.neighbour(i, k)` already returns -1 for a nodata target.
 
 Author: B.G (08/2026)
 """
@@ -120,7 +127,7 @@ extern "C" __global__ void {t}_mfd_dirs_weights(const float* filled, const float
     unsigned char mask = 0;
     float slopes[8];
     float sum_s = 0.0f;
-    if (!$ctx.grid.can_out(i)$) {{
+    if (!$ctx.grid.can_out(i)$ && !$ctx.grid.nodata(i)$) {{
         for (int k = 0; k < nk; k++) {{
             int j = $ctx.grid.neighbour(i, k)$;
             float s = 0.0f;

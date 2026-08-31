@@ -172,6 +172,7 @@ persistent = build_persistent_mfd(grid=grid_group, n_flat=n_flat, n_neighbours=N
 q_init_bound = persistent["q_init"].build()
 q_init_bound.bind("SOURCE", source)
 q_init_bound.bind("accum", q.data)
+q_init_bound.bind_leaf(grid_params, prefix=("grid",))
 q_init = q_init_bound.compile("cupy", **LAUNCH)
 
 accum_bound = persistent["accum"].build()

@@ -756,6 +756,7 @@ def make_graphflood(
         qi_bound = persistent["q_init"].build()
         qi_bound.bind("SOURCE", source_p)
         qi_bound.bind("accum", Q_in)
+        qi_bound.bind_leaf(grid_params, prefix=("grid",))
         persistent_q_init_kernel = qi_bound.compile(backend, **launch)
 
         pa_bound = persistent["accum"].build()

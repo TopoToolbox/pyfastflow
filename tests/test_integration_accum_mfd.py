@@ -23,8 +23,9 @@ Checks:
     number of live (non-nodata) cells, to a small relative tolerance (MFD
     weights are fractional f32).
 
-Note: `q_init` seeds every cell including nodata (no nodata gate in it), so
-this test zeros accum at nodata cells after q_init before accumulating.
+Both `q_init` (nodata cells seed 0 source) and `dirs_weights` (nodata cells
+get `dirs == 0`, no outgoing edges) gate on nodata, so no host-side
+workaround is needed here - nodata cells are source-free no-ops.
 
 Author: B.G (08/2026)
 """
@@ -209,13 +210,8 @@ def test_accum_mfd(boundary, nodata, custom_outlet):
     qib = accum["q_init"].build()
     qib.bind("SOURCE", source_p)
     qib.bind("accum", accum_h.data)
+    qib.bind_leaf(gp, prefix=("grid",))
     qib.compile("cupy", **launch)()
-
-    # q_init has no nodata gate - zero the spurious source at nodata cells
-    if nodata:
-        a = accum_h.to_numpy()
-        a[nodata_np == 1] = 0.0
-        accum_h.from_numpy(a)
 
     n0 = init_frontier_mfd(indegree.data, frontier0.data)
     count.data[0] = n0

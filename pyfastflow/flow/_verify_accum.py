@@ -533,6 +533,7 @@ def run_mfd_cupy():
     q_init_bound = accum["q_init"].build()
     q_init_bound.bind("SOURCE", source_p)
     q_init_bound.bind("accum", accum_h.data)
+    q_init_bound.bind_leaf(grid_params, prefix=("grid",))
     q_init_bound.compile("cupy", grid=launch_grid, block=launch_block)()
 
     n0 = init_frontier_mfd(indegree.data, frontier0.data)

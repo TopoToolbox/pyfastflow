@@ -140,15 +140,19 @@ def build_persistent_mfd(
     fr_stage: int = 2048,
 ):
     """
-    Two FrozenKernels (new builder/frozen/bound stack): "q_init" (data arg
-    (accum,), ordinary grid-stride over n_flat: accum[i] = SOURCE.get(i))
-    and "accum" (data args (frontier0, frontier1, count, barrier, dirs,
+    Two FrozenKernels (new builder/frozen/bound stack): "q_init" (composes
+    `grid`, data arg (accum,), ordinary grid-stride over n_flat: accum[i] =
+    nodata(i) ? 0 : SOURCE.get(i) - the nodata gate keeps a nodata cell's
+    sentinel `filled` from injecting a spurious source unit into the live
+    domain, so a caller must bind q_init's own `grid` PARAM leaves too, not
+    just SOURCE/accum) and "accum" (data args (frontier0, frontier1, count,
+    barrier, dirs,
     mfd_w, accum, indegree), the persistent kernel described in the module
     docstring). Both are bare FrozenKernels, not a Sequence - "q_init" is
     one ordinary n_flat-sized launch, "accum" is one persistent launch on
     `persistent_grid_block(...)`'s dims; there is no per-round host loop to
     sequence, unlike rake_compress/pointer_jump_push. A caller `.build()`s
-    each, binds "q_init"'s `SOURCE` PARAM slot and "accum"'s composed
+    each, binds "q_init"'s `SOURCE` PARAM slot and both kernels' composed
     `grid`, then `.compile("cupy", grid=..., block=...)`s each with its own
     launch dims (n_flat-sized for "q_init",
     `persistent_grid_block(blocks_per_sm=..., threads=...)` for "accum").
@@ -177,6 +181,7 @@ def build_persistent_mfd(
 
     q_init = (
         KernelBuilder()
+        .compose("grid", grid)
         .wire_param("SOURCE")
         .wire_data("accum")
         .ingest(
@@ -184,7 +189,7 @@ def build_persistent_mfd(
 extern "C" __global__ void {t}_q_init(float* accum) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
-    accum[i] = $ctx.SOURCE.get(i)$;
+    accum[i] = $ctx.grid.nodata(i)$ ? 0.0f : $ctx.SOURCE.get(i)$;
 }}
 """
         )
