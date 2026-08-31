@@ -127,13 +127,12 @@ elif KIND == "vanilla_mfd":
     anc = pool.get_data(i32, (n_flat,))
     dist2 = pool.get_data(f32, (n_flat,))
     anc2 = pool.get_data(i32, (n_flat,))
-    filled_eps = pool.get_data(f32, (n_flat,))
     kwargs.update(
         surface=surface.data, filled=filled.data, parent=parent.data, frontier=frontier.data,
         counters=counters.data, queued_gen=queued_gen.data, pass_p=pass_p, active_p=active_p,
         max_passes=max_passes, dirs=dirs.data, mfd_w=mfd_w.data, indegree=indegree.data,
         frontier0=frontier0.data, frontier1=frontier1.data, count=count.data, barrier=barrier.data,
-        dist=dist.data, anc=anc.data, dist2=dist2.data, anc2=anc2.data, filled_eps=filled_eps.data,
+        dist=dist.data, anc=anc.data, dist2=dist2.data, anc2=anc2.data,
     )
 
 else:  # kind == "vanilla_sfd"

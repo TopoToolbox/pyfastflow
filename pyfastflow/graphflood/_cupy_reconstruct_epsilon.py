@@ -22,15 +22,23 @@ neighbour pair inside a flat region - every cell in a resolved lake gets
 real outlet on the far side.
 
 This module fixes that without touching _cupy_mfd_topology.py's own
-slope-based logic at all: it builds a second, `filled`-derived elevation
-array (`filled_eps`) that adds a strictly-increasing-with-distance-from-
-the-outlet perturbation on top of `filled`, using the exact direction
-`parent` already established (never re-derived from slope), then hands
-`filled_eps` - not `filled` - to build_mfd_topology's own dirs_weights
-kernel as its elevation input. `filled` itself (used by h_from_filled to
-derive the real, un-perturbed depth field) is untouched - only
-`filled_eps` is synthetic, and only ever consumed by build_mfd_topology's
-dirs_weights kernel.
+slope-based logic at all: it builds a per-cell perturbation `dist` that
+grows strictly with distance-from-the-outlet along the exact direction
+`parent` already established (never re-derived from slope), and hands
+`dist` - alongside the real `filled` - to build_mfd_topology's own
+dirs_weights kernel. That kernel feeds `dist` into the slope helper's
+second additive term (its `h` argument):
+`slope(filled[i], dist[i], filled[j], dist[j], k)` =
+`((filled[i] - filled[j]) + (dist[i] - dist[j])) / d`, so the tie on a
+numerically-flat lake surface (`filled[i] == filled[j]`) is broken by
+`dist[i] - dist[j]` alone. Crucially `dist` is never added into `filled`
+here: the two only ever meet as a *difference* inside the slope helper,
+evaluated at `dist`'s own ~1e-7 magnitude. Folding `dist` up into
+`filled`'s magnitude (0.3 ... 1e3 on a real DEM) would quantise the per-
+hop signal - exactly one ULP of `filled` - to whole multiples of that ULP
+and collapse adjacent hops to the same value; keeping the addition out of
+`filled` is what avoids that. `filled` itself (used by h_from_filled to
+derive the real, un-perturbed depth field) is untouched.
 
 Why the perturbation is self-scaling (ULP-based), not a fixed constant
 --------------------------------------------------------------------------
@@ -183,43 +191,6 @@ extern "C" __global__ void {t}_hops_jump(
         dist_out[i] = dist_in[i];
         anc_out[i] = a;
     }}
-}}
-"""
-        )
-    )
-
-
-def build_apply_epsilon(*, n_flat: int) -> FrozenKernel:
-    """
-    apply_epsilon FrozenKernel, data args (filled, dist, filled_eps):
-    filled_eps[i] = filled[i] + dist[i] - `dist[i]` is already the fully
-    self-scaled, converged cumulative perturbation (see build_hops_init's
-    own docstring), so no further scaling happens here. See the module
-    docstring for why `dist` must already be converged (every
-    build_hops_jump round run) before this is meaningful, and why the
-    result is written to a separate buffer rather than overwriting
-    `filled` in place (h_from_filled must see the real, un-perturbed fill).
-
-    Parameters
-    ----------
-    n_flat : int
-
-    Returns
-    -------
-    FrozenKernel
-
-    Author: B.G (08/2026)
-    """
-    t = f"gfe{new_uid()}"
-    return (
-        KernelBuilder()
-        .wire_data("filled").wire_data("dist").wire_data("filled_eps")
-        .ingest(
-            f"""
-extern "C" __global__ void {t}_apply_epsilon(const float* filled, const float* dist, float* filled_eps) {{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= {n_flat}) return;
-    filled_eps[i] = filled[i] + dist[i];
 }}
 """
         )

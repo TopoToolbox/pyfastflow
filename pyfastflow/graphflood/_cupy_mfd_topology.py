@@ -20,10 +20,20 @@ so there is no reason for a closure-backend variant to exist independently.
 make_graphflood's kind="vanilla_mfd" always passes the fill_reconstruct
 surface (the resolved, monotonic z+h fill), never bare z or z+h directly:
 MFD's per-node weight split needs every node to have somewhere to send
-water, which an unresolved depression does not guarantee. Slopes are plain
-z-only (`slope(filled[i], 0.0, filled[j], 0.0, k)`, h passed as 0 both
-sides) since `filled` already is the effective water surface - there is no
-separate h to add on top of it here, unlike compute_qo's own h-aware slope.
+water, which an unresolved depression does not guarantee. `dist` is the
+companion per-cell perturbation ../graphflood/_cupy_reconstruct_epsilon.py
+accumulates along the `parent` chain - a strictly-toward-the-outlet, ULP-
+scaled tie-break carrier. The slope helper's own second additive term (its
+`h` argument) is exactly where it belongs:
+`slope(filled[i], dist[i], filled[j], dist[j], k)` computes
+`((filled[i] - filled[j]) + (dist[i] - dist[j])) / d` - the real relief
+drop plus the perturbation drop, in one call. Inside a resolved depression
+the `filled` drop is exactly 0 for every neighbour pair (a real lake
+surface IS flat), and the `dist` drop - evaluated at its own ~1e-7
+magnitude, never folded up into `filled`'s magnitude where it would round
+away - is what gives every flat cell a downslope edge toward the outlet.
+On genuine relief the `dist` drop is negligible against the real drop, so
+it perturbs neither the direction set nor the weights there.
 
 A can_out node gets `dirs[i] = 0` (no outgoing directions at all, mask
 never set) and an all-zero `mfd_w` row - the same "this is where routing
@@ -62,8 +72,9 @@ def _share_leaf(builder, canonical: str) -> None:
 
 def build_mfd_topology(*, grid, n_flat: int, topology: str, diagonal_partition_correction: bool) -> dict:
     """
-    Three FrozenKernels: "dirs_weights" (data args (filled, dirs, mfd_w):
-    the bitmask/weight computation described in the module docstring),
+    Three FrozenKernels: "dirs_weights" (data args (filled, dist, dirs,
+    mfd_w): the bitmask/weight computation described in the module
+    docstring),
     "indegree_reset" (data arg (indegree,): indegree[i] = 0 - must run
     before "indegree_count" every call, dirs/mfd_w/indegree all being
     recomputed fresh every GraphFlood step as the surface evolves) and
@@ -102,7 +113,7 @@ def build_mfd_topology(*, grid, n_flat: int, topology: str, diagonal_partition_c
     t = f"gfm{new_uid()}"
 
     dirs_weights_body = f"""
-extern "C" __global__ void {t}_mfd_dirs_weights(const float* filled, unsigned char* dirs, float* mfd_w) {{
+extern "C" __global__ void {t}_mfd_dirs_weights(const float* filled, const float* dist, unsigned char* dirs, float* mfd_w) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
     int nk = $ctx.grid.N_NEIGHBOURS.get(0)$;
@@ -114,7 +125,7 @@ extern "C" __global__ void {t}_mfd_dirs_weights(const float* filled, unsigned ch
             int j = $ctx.grid.neighbour(i, k)$;
             float s = 0.0f;
             if (j != -1) {{
-                s = $ctx.slope(filled[i], 0.0f, filled[j], 0.0f, k)$;
+                s = $ctx.slope(filled[i], dist[i], filled[j], dist[j], k)$;
                 if (s < 0.0f) s = 0.0f;
             }}
             slopes[k] = s;
@@ -133,7 +144,7 @@ extern "C" __global__ void {t}_mfd_dirs_weights(const float* filled, unsigned ch
     for name in grid_param_names:
         dirs_weights_kb.wire_param(name)
     dirs_weights_kb.compose("grid", grid).compose("slope", slope)
-    dirs_weights_kb.wire_data("filled").wire_data("dirs").wire_data("mfd_w")
+    dirs_weights_kb.wire_data("filled").wire_data("dist").wire_data("dirs").wire_data("mfd_w")
     for name in grid_param_names:
         _share_leaf(dirs_weights_kb, name)
 

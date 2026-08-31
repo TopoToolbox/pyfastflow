@@ -1,7 +1,8 @@
 """
 Perlin terrain -> fill by grayscale morphological reconstruction ->
-"reconstruct_epsilon" (a parent-hop-distance-scaled epsilon added on top of
-`filled`) -> persistent-kernel MFD accumulation on that surface, on cupy.
+"reconstruct_epsilon" (a parent-hop-distance perturbation `dist`, handed to
+MFD topology as a flat tie-break carrier) -> persistent-kernel MFD
+accumulation on that surface, on cupy.
 
 Mirrors fill_reconstruct_cupy.py, swapping its single-flow-direction
 `make_accumulation(method="atomic")` step for multiple-flow-direction
@@ -23,12 +24,16 @@ problem because it walks `parent` directly rather than re-deriving edges
 from `filled`'s elevation values. "reconstruct_epsilon"
 (pyfastflow/graphflood/_cupy_reconstruct_epsilon.py) fixes
 this without touching _cupy_mfd_topology.py's own slope-based logic at
-all: `filled_eps[i] = filled[i] + MFD_EPSILON * hops[i]`, where `hops[i]`
-is i's distance to the outlet along `parent` (pointer-jumping, double-
-buffered - see build_hops_jump's own docstring for why an earlier,
-in-place version of this raced and gave wrong distances). Real slopes are
-unaffected; a flat gets a small but strictly monotonic, acyclic synthetic
-gradient along the direction `parent` already established.
+all: it builds a per-cell `dist[i]` = i's ULP-scaled distance to the
+outlet along `parent` (pointer-jumping, double-buffered - see
+build_hops_jump's own docstring for why an earlier, in-place version of
+this raced and gave wrong distances), and hands it to dirs_weights
+alongside `filled`. dirs_weights feeds `dist` into the slope helper's own
+additive `h` term (`slope(filled[i], dist[i], filled[j], dist[j], k)`), so
+a flat gets a small, strictly monotonic, acyclic synthetic gradient along
+the direction `parent` already established - without `dist` ever being
+folded up into `filled`'s magnitude, where the per-hop signal would round
+away. Real slopes are unaffected.
 
 Every buffer every step touches is allocated here - none of these
 factories take a pool or allocate anything themselves.
@@ -47,7 +52,7 @@ from pyfastflow.flow import make_fill_reconstruct, make_fill_reconstruct_solver
 from pyfastflow.flow._cupy_mfd_accum import build_persistent_mfd, init_frontier_mfd, persistent_grid_block
 from pyfastflow.grid import make_grid_group, make_grid_parameters
 from pyfastflow.graphflood._cupy_mfd_topology import build_mfd_topology
-from pyfastflow.graphflood._cupy_reconstruct_epsilon import build_apply_epsilon, build_hops_init, build_hops_jump
+from pyfastflow.graphflood._cupy_reconstruct_epsilon import build_hops_init, build_hops_jump
 from pyfastflow.noise import make_noise_group, make_noise_parameters
 
 N = 2048
@@ -75,7 +80,6 @@ dist = pool.get_data(np.float32, (n_flat,))
 anc = pool.get_data(np.int32, (n_flat,))
 dist2 = pool.get_data(np.float32, (n_flat,))
 anc2 = pool.get_data(np.int32, (n_flat,))
-filled_eps = pool.get_data(np.float32, (n_flat,))
 
 dirs = pool.get_data(np.uint8, (n_flat,))
 mfd_w = pool.get_data(np.float32, (n_flat * N_NEIGHBOURS,))
@@ -113,7 +117,7 @@ solver = make_fill_reconstruct_solver(
     n_flat=n_flat, nx=N, ny=N, block_size=BLOCK, max_passes=MAX_PASSES,
 )
 
-# --- reconstruct_epsilon: hops-to-outlet along parent, then filled_eps -----
+# --- reconstruct_epsilon: hops-to-outlet along parent -> dist --------------
 hops_init_bound = build_hops_init(n_flat=n_flat).build()
 hops_init_bound.bind("parent", parent.data)
 hops_init_bound.bind("filled", filled.data)
@@ -141,18 +145,13 @@ HOPS_ROUNDS = int(np.ceil(np.log2(max(2, n_flat)))) + 1
 if HOPS_ROUNDS % 2 != 0:
     HOPS_ROUNDS += 1
 
-apply_epsilon_bound = build_apply_epsilon(n_flat=n_flat).build()
-apply_epsilon_bound.bind("filled", filled.data)
-apply_epsilon_bound.bind("dist", dist.data)
-apply_epsilon_bound.bind("filled_eps", filled_eps.data)
-apply_epsilon = apply_epsilon_bound.compile("cupy", **LAUNCH)
-
-# --- MFD topology on filled_eps, then persistent-kernel accumulation -------
+# --- MFD topology on filled (dist as the flat tie-break), then accumulation -
 topo = build_mfd_topology(
     grid=grid_group, n_flat=n_flat, topology="D8", diagonal_partition_correction=True,
 )
 dirs_weights_bound = topo["dirs_weights"].build()
-dirs_weights_bound.bind("filled", filled_eps.data)
+dirs_weights_bound.bind("filled", filled.data)
+dirs_weights_bound.bind("dist", dist.data)
 dirs_weights_bound.bind("dirs", dirs.data)
 dirs_weights_bound.bind("mfd_w", mfd_w.data)
 dirs_weights_bound.bind_leaf(grid_params)
@@ -198,7 +197,6 @@ hops_init()
 for _ in range(HOPS_ROUNDS // 2):
     hops_jump_fwd()
     hops_jump_bwd()
-apply_epsilon()
 
 indegree_reset()
 dirs_weights()
