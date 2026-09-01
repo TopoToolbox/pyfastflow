@@ -10,6 +10,7 @@ Author: B.G (02/2026)
 
 import taichi as ti
 
+from .. import constants as cte
 from .f32_i32_struct import pack_float_index, unpack_float_index
 
 
@@ -83,10 +84,18 @@ def saddlesort_kernel(
     basin_saddle: ti.template(),
     basin_saddlenode: ti.template(),
     outlet: ti.template(),
+    b_rcv: ti.template(),
     z: ti.template(),
 ):
     """
-    Identify basin borders, saddles, and outlets.
+    Identify basin borders, saddles, outlets and receiver basins.
+
+    Per basin: the lowest saddle (basin_saddle), the border node achieving it
+    (basin_saddlenode), the outlet node it drains through (outlet, packed) and
+    the receiver basin id it drains into (b_rcv), the last two chosen by
+    lexicographic (crossing height, receiver-basin id) - matching the original
+    FastFlow compute_p_b_rcv. b_rcv feeds the mutual-pair keep test run as a
+    separate pass (set_keep_kernel).
 
     Author: B.G (02/2026)
     """
@@ -115,6 +124,7 @@ def saddlesort_kernel(
         basin_saddle[i] = invalid
         outlet[i] = invalid
         basin_saddlenode[i] = -1
+        b_rcv[i] = 0
 
     for i in bid:
         if not is_border[i]:
@@ -153,38 +163,91 @@ def saddlesort_kernel(
 
         tbid = i
         node = basin_saddlenode[tbid]
-        tz = 1e9
+        best_z = ti.cast(1e9, cte.FLOAT_TYPE_TI)
+        best_b = ti.i32(2147483647)
         rec_out = -1
 
         for k in ti.static(range(n_neighbours)):
             j = gridctx.tfunc.neighbour_flat(node, k)
-            if j != -1 and bid[j] != tbid and tz > z[j]:
-                tz = z[j]
-                rec_out = j
+            if j != -1 and bid[j] != tbid:
+                cz = ti.max(z[node], z[j])
+                bj = bid[j]
+                if cz < best_z or (cz == best_z and bj < best_b):
+                    best_z = cz
+                    best_b = bj
+                    rec_out = j
 
         if rec_out > -1:
-            candidate = pack_float_index(tz, rec_out)
-            ti.atomic_min(outlet[tbid], candidate)
+            outlet[tbid] = pack_float_index(best_z, rec_out)
+            b_rcv[tbid] = bid[rec_out]
 
+
+@ti.kernel
+def set_keep_kernel(
+    bid: ti.template(),
+    b_rcv: ti.template(),
+    outlet: ti.template(),
+    basin_saddle: ti.template(),
+    basin_saddlenode: ti.template(),
+):
+    """
+    Drop one basin per mutual pair so the carved set is a forest.
+
+    The original FastFlow set_keep_b rule: basin b is dropped iff its receiver
+    basin points back at it and has the larger id
+    (b_rcv[b_rcv[b]] == b and b_rcv[b] > b). Dropped basins have their outlet /
+    saddle invalidated so the carve skips them; they re-form and resolve on a
+    later pass. Combined with the basin_route merge this keeps the receiver
+    graph a forest, so the theorem forbids cycles longer than 2.
+
+    Author: B.G (08/2026)
+    """
+    invalid = _invalid_pack()
     for i in bid:
-        bid_d = i
-        if bid_d == 0 or outlet[bid_d] == invalid:
+        if i == 0 or outlet[i] == invalid:
             continue
+        brd = b_rcv[i]
+        if brd != 0 and b_rcv[brd] == i and brd > i:
+            outlet[i] = invalid
+            basin_saddle[i] = invalid
+            basin_saddlenode[i] = -1
 
-        _, rec_out = unpack_float_index(outlet[bid_d])
-        bid_d_prime = bid[rec_out]
 
-        if bid_d_prime == 0:
+@ti.kernel
+def label_from_route_kernel(bid: ti.template(), basin_route: ti.template()):
+    """
+    Label each node by the basin it reaches through basin_route.
+
+    basin_route (contracted to a fixed point beforehand) carries basin
+    identity across rounds via the accumulated merges - unlike re-deriving from
+    the carved receivers, which mislabels carved channels. bid = 0 for
+    outlet-rooted nodes, root + 1 otherwise.
+
+    Author: B.G (08/2026)
+    """
+    for i in bid:
+        root = basin_route[i]
+        bid[i] = 0 if gridctx.tfunc.can_out_flat(root) else root + 1
+
+
+@ti.kernel
+def merge_basin_route_kernel(outlet: ti.template(), basin_route: ti.template()):
+    """
+    Merge every kept basin into the outlet node it drains through.
+
+    For each surviving basin (valid outlet), point its pit's basin_route entry
+    at the outlet node in the receiver basin. Contraction then folds the whole
+    resolved basin into its receiver (or into the boundary), so the basin graph
+    strictly shrinks each round - the original FastFlow update_basin_route.
+
+    Author: B.G (08/2026)
+    """
+    invalid = _invalid_pack()
+    for i in outlet:
+        if i == 0 or outlet[i] == invalid:
             continue
-
-        _, rec_out_prime = unpack_float_index(outlet[bid_d_prime])
-        bid_d_prime_prime = bid[rec_out_prime]
-
-        if bid_d_prime_prime == bid_d:
-            if bid_d_prime < bid_d:
-                outlet[bid_d] = invalid
-                basin_saddle[bid_d] = invalid
-                basin_saddlenode[bid_d] = -1
+        _, p_rcv = unpack_float_index(outlet[i])
+        basin_route[i - 1] = p_rcv
 
 
 @ti.kernel
