@@ -85,6 +85,36 @@ def test_program_data_dtype_can_follow_configuration(compact, expected):
         prog.close()
 
 
+def test_program_auto_parameter_specialises_from_constructor():
+    ti.init(arch=ti.cpu)
+    P = (
+        ProgramBuilder("AutoParameterProgram")
+        .dim("ny").dim("nx")
+        .config("ny").config("nx")
+        .param("rate", "auto", "f32", value=0.5,
+               shape=(Dim("ny"), Dim("nx")))
+        .freeze()
+    )
+
+    scalar = P(Backend.from_name("taichi"), nx=3, ny=2)
+    constant = P(Backend.from_name("taichi"), nx=3, ny=2, rate=0.25)
+    field_values = np.arange(6, dtype=np.float32).reshape(2, 3)
+    field = P(Backend.from_name("taichi"), nx=3, ny=2, rate=field_values)
+    try:
+        scalar.rate.set(0.75)
+        assert scalar.rate.read() == pytest.approx(0.75)
+        assert constant.rate.read() == pytest.approx(0.25)
+        with pytest.raises(ProgramError, match="constant parameter"):
+            constant.rate.set(0.5)
+        np.testing.assert_array_equal(field.rate.to_numpy(), field_values)
+        snapshot = field.state()
+        field.rate.from_numpy(np.zeros_like(field_values))
+        field.load_state(snapshot)
+        np.testing.assert_array_equal(field.rate.to_numpy(), field_values)
+    finally:
+        scalar.close(); constant.close(); field.close()
+
+
 def _grid_structure(be, *, nx, ny):
     return make_grid_group(be, topology="D8", boundary="normal", outlet="edge")
 

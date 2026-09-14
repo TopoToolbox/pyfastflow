@@ -186,7 +186,8 @@ def build_sfd_flow_program() -> type:
         default="pointer_jump_push",
     )
     b.config("dx", default=1.0)
-    b.param("source", "scalar", "f32", value=1.0)
+    b.param("source", "auto", "f32", value=1.0,
+            shape=(Dim("ny"), Dim("nx")))
     b.param("ndep", "scalar", "i32", value=0)
     b.param("pass_index", "scalar", "i32", value=0)
     b.param("active", "scalar", "i32", value=0)

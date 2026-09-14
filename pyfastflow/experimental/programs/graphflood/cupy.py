@@ -13,11 +13,19 @@ carved receiver-rank gate; ``"fill_cordonnier"`` instead converts the carved
 paths into a filled hydraulic surface and runs ordinary MFD on that surface;
 ``"reconstruct_epsilon"`` uses morphological reconstruction plus its epsilon
 flat ordering and does not run Cordonnier.
+
+``run_n_step_analytical(n)`` is an opt-in nonlinear steady-state pipeline.
+It inverts the configured friction law so that the frozen-graph target depth
+has ``Qo == Qi``, then pressure-couples that depth correction over the full D8
+neighbourhood.  The coupling is applied to the correction rather than to
+``h`` itself, so it vanishes at the same hydraulic fixed point.
 """
 
 import math
 
-from pyfastflow.core import KernelBuilder, RoutineBuilder, SequenceBuilder
+from pyfastflow.core import (
+    HostBlockBuilder, KernelBuilder, RoutineBuilder, SequenceBuilder,
+)
 from pyfastflow.core.context.program import Dim, ProgramBuilder
 from pyfastflow.flow import (
     depression_binding_plan,
@@ -454,7 +462,7 @@ def _accumulation_factory(be, bundles, config):
             if (i >= {n}) return;
             float dx = $ctx.grid.DX.get(0)$;
             Qi[i] = $ctx.grid.nodata(i)$ ? 0.0f
-                : $ctx.PRECIPITATION.get(0)$ * dx * dx;
+                : $ctx.PRECIPITATION.get(i)$ * dx * dx;
         }}''', domain=n,
     ).compose("grid", bundles["grid"]).freeze()
     accum = make_accumulation(
@@ -485,14 +493,207 @@ def _update_factory(be, bundles, config):
                 h[i] = 0.0f;
                 return;
             }}
-            float qout = $ctx.friction(h[i], steepest_slope[i])$
+            float qout = $ctx.friction(h[i], steepest_slope[i], i)$
                 * h[i] * flow_width[i];
             Qo[i] = qout;
             float dx = $ctx.grid.DX.get(0)$;
-            float next = h[i] + (Qi[i] - qout) / (dx * dx) * $ctx.DT.get(0)$;
+            float next = h[i] + (Qi[i] - qout) / (dx * dx) * $ctx.DT.get(i)$;
             h[i] = next > 0.0f ? next : 0.0f;
         }}''', domain=n,
     ).compose("grid", bundles["grid"]).compose("friction", friction).freeze()
+
+
+def _analytical_update_factory(be, bundles, config):
+    """Manning inversion followed by an implicit D8 pressure correction."""
+    _cupy_only(be)
+    n = config["nx"] * config["ny"]
+    steps_param = bundles.param("pressure_smoothing_steps")
+    smoothing_steps = int(steps_param.value) if steps_param.mode == "const" else None
+    if smoothing_steps is not None and smoothing_steps < 0:
+        raise ValueError("pressure_smoothing_steps must be non-negative")
+    friction = build_friction_velocity(config["friction_law"])
+
+    analytical = KernelBuilder(
+        f'''extern "C" __global__ void graphflood_analytical_correction(
+                const float* h, const float* Qi,
+                const float* steepest_slope, const float* flow_width,
+                float* residual, float* correction) {{
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i >= {n}) return;
+            if ($ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$) {{
+                residual[i] = 0.0f;
+                correction[i] = 0.0f;
+                return;
+            }}
+
+            // Exact inverse of the program's frozen-slope closure:
+            // Qo = width / n * h^(1 + exponent) * sqrt(slope).
+            float q = fmaxf(Qi[i], 0.0f);
+            float slope = fmaxf(steepest_slope[i], 1.0e-5f);
+            float width = fmaxf(flow_width[i], 1.0e-9f);
+            float manning = fmaxf($ctx.MANNING.get(i)$, 1.0e-9f);
+            float power = 1.0f / fmaxf(1.0f + $ctx.EXPO.get(i)$, 1.0e-3f);
+            float target = q > 0.0f
+                ? powf(q * manning / (width * sqrtf(slope)), power)
+                : 0.0f;
+            float delta = target - fmaxf(h[i], 0.0f);
+            residual[i] = delta;
+            correction[i] = delta;
+        }}''', domain=n,
+    ).compose("grid", bundles["grid"]).freeze()
+
+    # Jacobi relaxation of (I + lambda L) correction = residual.  This is an
+    # implicit diffusion/pressure reconstruction: it is stable for arbitrary
+    # lambda, spans every valid D8 edge rather than the selected drainage
+    # graph, and retains correction == 0 as the exact Qi == Qo fixed point.
+    pressure = KernelBuilder(
+        f'''extern "C" __global__ void graphflood_pressure_correction(
+                const float* residual, const float* correction_in,
+                float* correction_out) {{
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i >= {n}) return;
+            if ($ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$) {{
+                correction_out[i] = 0.0f;
+                return;
+            }}
+
+            float neighbour_sum = 0.0f;
+            float conductance_sum = 0.0f;
+            float dx = $ctx.grid.DX.get(0)$;
+            int nk = $ctx.grid.N_NEIGHBOURS.get(0)$;
+            #pragma unroll
+            for (int k = 0; k < 8; ++k) {{
+                if (k >= nk) break;
+                int j = $ctx.grid.neighbour(i, k)$;
+                if (j == -1 || $ctx.grid.nodata(j)$) continue;
+                float conductance = dx / $ctx.grid.dist_from_k(k)$;
+                float neighbour = $ctx.grid.can_out(j)$
+                    ? 0.0f : correction_in[j];
+                neighbour_sum += conductance * neighbour;
+                conductance_sum += conductance;
+            }}
+            float coupling = fmaxf($ctx.PRESSURE_COUPLING.get(i)$, 0.0f);
+            correction_out[i] =
+                (residual[i] + coupling * neighbour_sum)
+                / (1.0f + coupling * conductance_sum);
+        }}''', domain=n,
+    ).compose("grid", bundles["grid"]).freeze()
+
+    def pressure_pairs(ctx):
+        steps = int(ctx.PRESSURE_STEPS.read())
+        if steps < 0:
+            raise ValueError("pressure_smoothing_steps must be non-negative")
+        return steps // 2
+
+    pressure_final = KernelBuilder(
+        f'''extern "C" __global__ void graphflood_pressure_final(
+                const float* residual, const float* correction_in,
+                float* correction_out) {{
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i >= {n}) return;
+            if (($ctx.PRESSURE_STEPS.get(0)$ & 1) == 0) {{
+                correction_out[i] = correction_in[i];
+                return;
+            }}
+            if ($ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$) {{
+                correction_out[i] = 0.0f;
+                return;
+            }}
+            float neighbour_sum = 0.0f;
+            float conductance_sum = 0.0f;
+            float dx = $ctx.grid.DX.get(0)$;
+            int nk = $ctx.grid.N_NEIGHBOURS.get(0)$;
+            #pragma unroll
+            for (int k = 0; k < 8; ++k) {{
+                if (k >= nk) break;
+                int j = $ctx.grid.neighbour(i, k)$;
+                if (j == -1 || $ctx.grid.nodata(j)$) continue;
+                float conductance = dx / $ctx.grid.dist_from_k(k)$;
+                float neighbour = $ctx.grid.can_out(j)$
+                    ? 0.0f : correction_in[j];
+                neighbour_sum += conductance * neighbour;
+                conductance_sum += conductance;
+            }}
+            float coupling = fmaxf($ctx.PRESSURE_COUPLING.get(i)$, 0.0f);
+            correction_out[i] =
+                (residual[i] + coupling * neighbour_sum)
+                / (1.0f + coupling * conductance_sum);
+        }}''', domain=n,
+    ).compose("grid", bundles["grid"]).freeze()
+
+    apply = KernelBuilder(
+        f'''extern "C" __global__ void graphflood_apply_analytical_correction(
+                float* h, const float* Qi, float* Qo,
+                const float* correction, const float* steepest_slope,
+                const float* flow_width) {{
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i >= {n}) return;
+            if ($ctx.grid.nodata(i)$) {{
+                h[i] = 0.0f;
+                Qo[i] = 0.0f;
+                return;
+            }}
+            if ($ctx.grid.can_out(i)$) {{
+                h[i] = 0.0f;
+                Qo[i] = Qi[i];
+                return;
+            }}
+            float relaxation = fminf(1.0f, fmaxf(0.0f,
+                $ctx.ANALYTICAL_RELAXATION.get(i)$));
+            float next = fmaxf(h[i] + relaxation * correction[i], 0.0f);
+            h[i] = next;
+            Qo[i] = $ctx.friction(next, steepest_slope[i], i)$
+                * next * flow_width[i];
+        }}''', domain=n,
+    ).compose("grid", bundles["grid"]).compose("friction", friction).freeze()
+
+    sequence = (SequenceBuilder().add("analytical", analytical)
+                .step("analytical"))
+    if smoothing_steps is None:
+        sequence.add("pressure_forward", pressure)
+        sequence.add("pressure_backward", pressure)
+        sequence.add("pressure_pairs", HostBlockBuilder(pressure_pairs).freeze())
+        sequence.loop(("pressure_forward", "pressure_backward"),
+                      max_times="pressure_pairs")
+        sequence.add("pressure_final", pressure_final).step("pressure_final")
+    else:
+        if smoothing_steps >= 2:
+            sequence.add("pressure_forward", pressure)
+            sequence.add("pressure_backward", pressure)
+            sequence.loop(("pressure_forward", "pressure_backward"),
+                          max_times=smoothing_steps // 2)
+        if smoothing_steps % 2:
+            sequence.add("pressure_final", pressure).step("pressure_final")
+    sequence.add("apply", apply).step("apply")
+    return sequence.freeze()
+
+
+def _analytical_update_plan(frozen, _be):
+    values = {
+        "h": "h", "Qi": "Qi", "Qo": "Qo",
+        "steepest_slope": "steepest_slope", "flow_width": "flow_width",
+        "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
+        "residual": "Qo", "correction": "z_prime",
+        "correction_in": "z_prime", "correction_out": "surface",
+        "PRESSURE_COUPLING": "pressure_coupling",
+        "ANALYTICAL_RELAXATION": "analytical_relaxation",
+        "PRESSURE_STEPS": "pressure_smoothing_steps",
+    }
+    plan = _grid_leaf_plan(frozen, values)
+    if "pressure_backward" in frozen.children:
+        plan.update({
+            "pressure_forward.correction_in": "z_prime",
+            "pressure_forward.correction_out": "surface",
+            "pressure_backward.correction_in": "surface",
+            "pressure_backward.correction_out": "z_prime",
+        })
+    if "pressure_final" in frozen.children:
+        plan.update({
+            "pressure_final.correction_in": "z_prime",
+            "pressure_final.correction_out": "surface",
+            "apply.correction": "surface",
+        })
+    return plan
 
 
 def _reset_h_factory(be, _bundles, config):
@@ -581,16 +782,19 @@ def build_graphflood_program() -> type:
         default="rank_cordonnier",
     )
 
-    b.param("precipitation", "scalar", "f32", value=0.0)
-    b.param("friction_coefficient", "scalar", "f32", value=0.033)
-    b.param("friction_exponent", "scalar", "f32", value=2.0 / 3.0)
-    b.param("dt", "scalar", "f32", value=1.0e-3)
+    flat = Dim("ny") * Dim("nx")
+    shape = (Dim("ny"), Dim("nx"))
+    b.param("precipitation", "auto", "f32", value=0.0, shape=shape)
+    b.param("friction_coefficient", "auto", "f32", value=0.033, shape=shape)
+    b.param("friction_exponent", "auto", "f32", value=2.0 / 3.0, shape=shape)
+    b.param("dt", "auto", "f32", value=1.0e-3, shape=shape)
+    b.param("analytical_relaxation", "auto", "f32", value=0.25, shape=shape)
+    b.param("pressure_coupling", "auto", "f32", value=4.0, shape=shape)
+    b.param("pressure_smoothing_steps", "auto", "i32", value=16)
     b.param("ndep", "scalar", "i32", value=0)
     b.param("pass_index", "scalar", "i32", value=0)
     b.param("active", "scalar", "i32", value=0)
 
-    flat = Dim("ny") * Dim("nx")
-    shape = (Dim("ny"), Dim("nx"))
     b.data("z", "f32", shape, role="input", shape_source=True)
     b.data("h", "f32", shape, role="state")
     b.data("Qi", "f32", shape, role="output")
@@ -715,10 +919,17 @@ def build_graphflood_program() -> type:
               "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
               "DT": "dt",
           }))
+    b.add("update_depth_analytical", _analytical_update_factory,
+          bind=_analytical_update_plan)
     b.pipeline("run_n_step", (
         "make_surface", "route_local_minima", "snapshot_local_minima",
         "resolve_minima", "prepare_mfd_surface", "build_topology",
         "prepare_frontier", "accumulate", "update_depth",
+    ))
+    b.pipeline("run_n_step_analytical", (
+        "make_surface", "route_local_minima", "snapshot_local_minima",
+        "resolve_minima", "prepare_mfd_surface", "build_topology",
+        "prepare_frontier", "accumulate", "update_depth_analytical",
     ))
     return b.freeze()
 

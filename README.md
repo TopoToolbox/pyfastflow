@@ -225,6 +225,11 @@ examples live under [`examples/core`](./examples/core), and a fully authored
 Program is shown in
 [`examples/core/program/sfd_drainage.py`](./examples/core/program/sfd_drainage.py).
 
+Parameters declared with mode `"auto"` specialise per Program instance. If
+omitted they are mutable device scalars; a scalar constructor value becomes a
+compiled constant, while a correctly shaped NumPy array becomes a mutable
+spatial field. The selected mode cannot change during that instance's life.
+
 ## Backends
 
 Create backends through `Backend.from_name(...)`; feature factories accept the

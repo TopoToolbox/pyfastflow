@@ -29,12 +29,12 @@ _LAWS = {"manning": _qo_manning}
 def _velocity_manning(t: str) -> FrozenHelper:
     return HelperBuilder(
         f"""
-__device__ float {t}_velocity_manning(float h, float slope) {{
+__device__ float {t}_velocity_manning(float h, float slope, int node) {{
     float hh = h > 0.0f ? h : 0.0f;
     float ss = slope > {_MIN_SLOPE}f ? slope : {_MIN_SLOPE}f;
-    float coeff = $ctx.MANNING.get(0)$;
+    float coeff = $ctx.MANNING.get(node)$;
     coeff = coeff > {_MIN_MANNING}f ? coeff : {_MIN_MANNING}f;
-    return powf(hh, $ctx.EXPO.get(0)$) / coeff * sqrtf(ss);
+    return powf(hh, $ctx.EXPO.get(node)$) / coeff * sqrtf(ss);
 }}
 """
     ).freeze()
