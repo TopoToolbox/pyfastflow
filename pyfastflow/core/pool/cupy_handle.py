@@ -16,7 +16,11 @@ class CupyDataHandle(DataHandle):
     @classmethod
     def normalize_dtype(cls, dtype):
         """Return a numpy dtype for a short tag or numpy-compatible dtype."""
-        tags = {"i32": np.int32, "i64": np.int64, "f32": np.float32, "u8": np.uint8, "u32": np.uint32}
+        tags = {
+            "i32": np.int32, "i64": np.int64,
+            "f32": np.float32, "f64": np.float64,
+            "u8": np.uint8, "u32": np.uint32,
+        }
         if isinstance(dtype, str):
             try:
                 return np.dtype(tags[dtype])
@@ -27,7 +31,11 @@ class CupyDataHandle(DataHandle):
     @classmethod
     def short_dtype(cls, dtype) -> str:
         """Return a numpy-compatible dtype's stable public short tag."""
-        names = {"int32": "i32", "int64": "i64", "float32": "f32", "uint8": "u8", "uint32": "u32"}
+        names = {
+            "int32": "i32", "int64": "i64",
+            "float32": "f32", "float64": "f64",
+            "uint8": "u8", "uint32": "u32",
+        }
         try:
             return names[np.dtype(dtype).name]
         except KeyError as exc:

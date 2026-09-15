@@ -7,7 +7,11 @@ import numpy as np
 from ..pool.base import DataHandle, new_uid
 
 _NAMES = ("taichi", "quadrants", "cupy")
-_NP_DTYPES = {"i32": np.int32, "i64": np.int64, "f32": np.float32, "u8": np.uint8, "u32": np.uint32}
+_NP_DTYPES = {
+    "i32": np.int32, "i64": np.int64,
+    "f32": np.float32, "f64": np.float64,
+    "u8": np.uint8, "u32": np.uint32,
+}
 
 
 class _ForeignDataHandle(DataHandle):
@@ -136,7 +140,9 @@ class Backend:
 
             return Backend(
                 "taichi", "closure", ti, TaichiParameter, TaichiPool,
-                {"i32": ti.i32, "i64": ti.i64, "f32": ti.f32, "u8": ti.u8, "u32": ti.u32},
+                {"i32": ti.i32, "i64": ti.i64,
+                 "f32": ti.f32, "f64": ti.f64,
+                 "u8": ti.u8, "u32": ti.u32},
                 _NP_DTYPES, ti.template(), make_closure_bk(ti),
             )
         if name == "quadrants":
@@ -148,7 +154,9 @@ class Backend:
 
             return Backend(
                 "quadrants", "closure", qd, QuadrantsParameter, QuadrantsPool,
-                {"i32": qd.i32, "i64": qd.i64, "f32": qd.f32, "u8": qd.u8, "u32": qd.u32},
+                {"i32": qd.i32, "i64": qd.i64,
+                 "f32": qd.f32, "f64": qd.f64,
+                 "u8": qd.u8, "u32": qd.u32},
                 _NP_DTYPES, qd.Tensor, make_closure_bk(qd),
             )
         # cupy

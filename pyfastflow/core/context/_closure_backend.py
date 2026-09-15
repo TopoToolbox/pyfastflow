@@ -150,6 +150,8 @@ class ClosureBackendParameter(Parameter):
             return np.int32
         if dtype == backend.i64:
             return np.int64
+        if dtype == backend.f64:
+            return np.float64
         return np.float32
 
     def _host_value(self):

@@ -10,7 +10,11 @@ from .frozen import Node
 from .host_block import FrozenHostBlock
 from .slot import ProgramBuilderError, ProgramError
 
-_NP_DTYPES = {"i32": np.int32, "i64": np.int64, "f32": np.float32, "u8": np.uint8, "u32": np.uint32}
+_NP_DTYPES = {
+    "i32": np.int32, "i64": np.int64,
+    "f32": np.float32, "f64": np.float64,
+    "u8": np.uint8, "u32": np.uint32,
+}
 _REQUIRED = object()
 
 

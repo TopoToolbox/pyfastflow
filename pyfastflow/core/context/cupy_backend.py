@@ -219,9 +219,11 @@ class CupyParameter(Parameter):
         if not isinstance(dtype, str):
             raise TypeError(f"{name}: dtype must be a short tag string, got {type(dtype).__name__}")
         try:
-            backend_dtype = {"i32": np.dtype(np.int32), "i64": np.dtype(np.int64),
-                             "f32": np.dtype(np.float32), "u8": np.dtype(np.uint8),
-                             "u32": np.dtype(np.uint32)}[dtype]
+            backend_dtype = {
+                "i32": np.dtype(np.int32), "i64": np.dtype(np.int64),
+                "f32": np.dtype(np.float32), "f64": np.dtype(np.float64),
+                "u8": np.dtype(np.uint8), "u32": np.dtype(np.uint32),
+            }[dtype]
         except KeyError as exc:
             raise ValueError(f"{name}: unknown dtype tag {dtype!r}") from exc
         shape = tuple(shape)
