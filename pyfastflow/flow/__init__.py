@@ -319,6 +319,48 @@ def make_accumulation(
     return out
 
 
+def make_subset_mfd_accumulation(
+    be: Backend, grid, *, n_flat: int, n_neighbours: int,
+    blocks_per_sm: int = 1, threads: int = 256,
+    quantized_weight: bool = False,
+):
+    """Return a CuPy persistent-MFD routine for a compact active subset.
+
+    The caller supplies a frozen full-domain discharge as the boundary
+    condition. Dependencies and propagation are restricted to active nodes.
+    """
+    be = require_backend(be)
+    if be.family != "cupy":
+        raise ValueError("make_subset_mfd_accumulation is cupy-only")
+    if int(n_flat) < 1 or int(n_neighbours) not in (4, 8):
+        raise ValueError("subset MFD requires n_flat > 0 and 4 or 8 neighbours")
+    from . import _cupy_mfd_accum
+
+    return _cupy_mfd_accum.build_persistent_subset_mfd(
+        grid=grid, n_flat=int(n_flat), n_neighbours=int(n_neighbours),
+        blocks_per_sm=blocks_per_sm, threads=threads,
+        quantized_weight=bool(quantized_weight),
+    )
+
+
+def make_mfd_distance(
+    be: Backend, grid, *, n_flat: int, n_neighbours: int,
+    blocks_per_sm: int = 1, threads: int = 256,
+):
+    """Return a CuPy persistent routine computing an outlet-to-source coordinate."""
+    be = require_backend(be)
+    if be.family != "cupy":
+        raise ValueError("make_mfd_distance is cupy-only")
+    if int(n_flat) < 1 or int(n_neighbours) not in (4, 8):
+        raise ValueError("MFD distance requires n_flat > 0 and 4 or 8 neighbours")
+    from ._cupy_mfd_distance import build_mfd_distance
+
+    return build_mfd_distance(
+        grid=grid, n_flat=int(n_flat), n_neighbours=int(n_neighbours),
+        blocks_per_sm=blocks_per_sm, threads=threads,
+    )
+
+
 # ---------------------------------------------------------------------------
 # depressions
 # ---------------------------------------------------------------------------

@@ -22,27 +22,12 @@ flat ordering and does not run Cordonnier.
 inversion; ``"bottom_up"`` mirrors the persistent Kahn walk from outlets to
 sources, constructs a complete receiver-consistent candidate, then damps that
 candidate globally. Repeating the pipeline rebuilds the graph between sweeps.
-``run_n_step_tau(n)`` instead performs a receiver-first backward-Euler solve.
-Its pseudo-time ``tau`` follows successive nonlinear residual reduction;
-flux-weighted receiver churn gates growth but does not by itself collapse the
-step size.
-``run_n_step_anderson(n)`` adds safeguarded depth-one Anderson mixing after
-each accepted pseudo-time step; it falls back to that step whenever the mixed
-candidate is invalid or does not improve the frozen-graph residual.
-``run_n_step_pressure(n)`` applies a screened local Newton correction and
-diffuses that correction, rather than water depth, over the hydraulic grid.
-It is an independent residual-driven alternative for cleaning or accelerating
-the explicit iteration and vanishes when ``Qi == Qo``.
 ``run_n_step_transient(n)`` is a conservative local-flux operator. It always
 uses raw ``z+h`` MFD without depression conditioning: sinks retain incoming
 water until their hydraulic surface develops a physical outlet. Its global
 explicit timestep is selected from the local Manning discharge sensitivity;
 ``transient_dt`` is its upper bound and ``transient_cfl`` its safety factor.
 Set ``adaptive_transient_dt=False`` to retain the fixed-step operator.
-``relax_hydraulic_surface(n)`` is a separate conservative grid-graph
-diffusive-wave relaxation; it is never part of either GraphFlood stepping
-pipeline. It only changes ``h``; the next flow step refreshes ``Qi`` and
-``Qo``.
 
 Receiver routing and unconditioned link gradients use an internal float64
 ``z + h`` surface. Depth, discharge, terrain, and accumulation remain
@@ -55,6 +40,13 @@ accepts ``"D4"`` or ``"D8"``; ``boundary`` accepts ``"normal"``,
 ``"periodic_EW"``, or ``"periodic_NS"``; and ``outlet`` accepts ``"edge"``
 or ``"mask"``. With masked outlets, set ``outlet_mask`` before running. Set
 ``nodata=True`` to additionally expose ``nodata_mask``.
+
+For ordered regional relaxation, ``prepare_distance_sweep()`` performs one
+Cordonnier fill, freezes global boundary discharge, and computes a fixed
+outlet-to-source coordinate. ``set_active_band(lower, upper)`` compacts the
+selected nodes. Use ``run_active_n_step()``,
+``run_active_n_step_analytical()``, or ``run_active_n_step_transient()``;
+``refresh_band_boundary()`` updates boundary discharge between full sweeps.
 """
 
 import math
@@ -70,11 +62,14 @@ from pyfastflow.flow import (
     make_accumulation,
     make_depression_solver,
     make_depressions,
+    make_mfd_distance,
     make_mfd_topology,
+    make_subset_mfd_accumulation,
 )
 from pyfastflow.flow._cupy_mfd_accum import persistent_grid_block
 from pyfastflow.graphflood._cupy_friction import build_friction_velocity
 from pyfastflow.grid import make_grid_group, make_grid_parameters
+from pyfastflow.ops import make_scan
 
 from ..flow.sfd import (
     BLOCK,
@@ -245,7 +240,8 @@ def _rank_plan(_frozen, _be):
     }
 
 
-def _cordonnier_surface_factory(be, _bundles, config, *, fill_depth):
+def _cordonnier_surface_factory(
+        be, _bundles, config, *, fill_depth, active_only=False):
     """Build Cordonnier's path-maximum routing potential."""
     _cupy_only(be)
     n = config["nx"] * config["ny"]
@@ -280,11 +276,16 @@ def _cordonnier_surface_factory(be, _bundles, config, *, fill_depth):
         }}''', domain=n,
     ).freeze()
     h_argument = "float* h, " if fill_depth else ""
-    h_update = "if (added_depth > 0.0f) h[i] += added_depth;" if fill_depth else ""
+    active_argument = "const unsigned char* active, " if active_only else ""
+    active_gate = "active[i] && " if active_only else ""
+    h_update = (
+        f"if ({active_gate}added_depth > 0.0f) h[i] += added_depth;"
+        if fill_depth else ""
+    )
     apply_name = "graphflood_apply_fill" if fill_depth else "graphflood_apply_carve"
     apply = KernelBuilder(
         f'''extern "C" __global__ void {apply_name}(
-                {h_argument}float* surface, const float* spill,
+                {h_argument}{active_argument}float* surface, const float* spill,
                 const int* rec_initial, const int* rec,
                 unsigned char* conditioned) {{
             int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -321,6 +322,12 @@ def _cordonnier_carve_factory(be, bundles, config):
     )
 
 
+def _active_cordonnier_fill_factory(be, bundles, config):
+    return _cordonnier_surface_factory(
+        be, bundles, config, fill_depth=True, active_only=True,
+    )
+
+
 def _cordonnier_fill_plan(_frozen, _be):
     return {
         "init.surface": "surface", "init.rec": "rec",
@@ -340,6 +347,12 @@ def _cordonnier_fill_plan(_frozen, _be):
         "apply.spill": "z_prime", "apply.rec_initial": "rec_initial",
         "apply.rec": "rec", "apply.conditioned": "is_border",
     }
+
+
+def _active_cordonnier_fill_plan(frozen, be):
+    plan = _cordonnier_fill_plan(frozen, be)
+    plan["apply.active"] = "active_mask"
+    return plan
 
 
 def _cordonnier_carve_plan(frozen, be):
@@ -747,7 +760,102 @@ def _accumulation_factory(be, bundles, config):
     return RoutineBuilder().step("q_init", q_init).step("accum", accum).freeze()
 
 
-def _transient_factory(be, bundles, config):
+def _subset_accumulation_factory(be, bundles, config):
+    _cupy_only(be)
+    return make_subset_mfd_accumulation(
+        be, bundles["grid"], n_flat=config["nx"] * config["ny"],
+        n_neighbours=8 if config["topology"] == "D8" else 4,
+        quantized_weight=config["quantized_weight"],
+    )
+
+
+def _subset_accumulation_plan(frozen, _be):
+    return _grid_leaf_plan(frozen, {
+        "active_ids": "active_ids", "active": "active_mask",
+        "dirs": "directions", "mfd_w": "weights",
+        "boundary": "Qi_boundary", "accum": "Qi",
+        "accumulation": "Qi", "remaining": "active_indegree",
+        "frontier": "mfd_frontier0", "frontier0": "mfd_frontier0",
+        "frontier1": "mfd_frontier1", "count": "mfd_count",
+        "barrier": "mfd_barrier", "SOURCE": "precipitation",
+        "ACTIVE_COUNT": "active_count",
+    })
+
+
+def _copy_flux_factory(be, _bundles, config):
+    _cupy_only(be)
+    n = config["nx"] * config["ny"]
+    return KernelBuilder(
+        f'''extern "C" __global__ void graphflood_copy_flux(
+                const float* source, float* destination) {{
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i < {n}) destination[i] = source[i];
+        }}''', domain=n,
+    ).freeze()
+
+
+def _distance_factory(be, bundles, config):
+    _cupy_only(be)
+    return make_mfd_distance(
+        be, bundles["grid"], n_flat=config["nx"] * config["ny"],
+        n_neighbours=8 if config["topology"] == "D8" else 4,
+    )
+
+
+def _distance_plan(frozen, _be):
+    plan = _grid_leaf_plan(frozen, {
+        "dirs": "directions", "upstream": "distance_upstream",
+        "downstream": "distance_downstream",
+        "position": "distance_position", "remaining": "distance_remaining",
+        "maximum": "distance_max",
+        "frontier": "distance_frontier0", "frontier0": "distance_frontier0",
+        "frontier1": "distance_frontier1", "count": "distance_count",
+        "barrier": "distance_barrier",
+    })
+    plan["walk_forward.distance"] = "distance_upstream"
+    plan["walk_reverse.distance"] = "distance_downstream"
+    return plan
+
+
+def _active_band_factory(be, bundles, config):
+    _cupy_only(be)
+    n = config["nx"] * config["ny"]
+    return KernelBuilder(
+        f'''extern "C" __global__ void graphflood_mark_active_band(
+                const float* position, int* flags, unsigned char* active) {{
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i >= {n}) return;
+            float x = position[i];
+            bool selected = !$ctx.grid.nodata(i)$ && x >= $ctx.BAND_MIN.get(0)$
+                         && x <= $ctx.BAND_MAX.get(0)$;
+            flags[i] = selected ? 1 : 0;
+            active[i] = selected ? 1u : 0u;
+        }}''', domain=n,
+    ).compose("grid", bundles["grid"]).freeze()
+
+
+def _active_work_factory(be, bundles, config):
+    _cupy_only(be)
+    n = config["nx"] * config["ny"]
+    return KernelBuilder(
+        f'''extern "C" __global__ void graphflood_mark_active_work(
+                const unsigned char* active,
+                int* flags, unsigned char* work) {{
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i >= {n}) return;
+            bool selected = active[i] != 0u;
+            int nk = $ctx.grid.N_NEIGHBOURS.get(0)$;
+            for (int k = 0; k < nk && !selected; ++k) {{
+                int j = $ctx.grid.neighbour(i, k)$;
+                selected = j != -1 && active[j] != 0u;
+            }}
+            flags[i] = selected ? 1 : 0;
+            work[i] = selected ? 1u : 0u;
+        }}''', domain=n,
+    ).compose("grid", bundles["grid"]).freeze()
+
+
+def _transient_factory(be, bundles, config, *, active_only=False):
     """Conservative local MFD transport with no depression conditioning."""
     _cupy_only(be)
     n = config["nx"] * config["ny"]
@@ -783,13 +891,31 @@ def _transient_factory(be, bundles, config):
         "? (float)(scores[k] / sum_score) : 0.0f;"
     )
 
+    work_arg = "const int* work_ids, " if active_only else ""
+    work_index = (
+        "int p = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        "            if (p >= $ctx.WORK_COUNT.get(0)$) return;\n"
+        "            int i = work_ids[p];"
+        if active_only else
+        f"int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        f"            if (i >= {n}) return;"
+    )
+    outflow_index = (
+        "int p = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        "            bool valid = p < $ctx.WORK_COUNT.get(0)$;\n"
+        "            int i = valid ? work_ids[p] : 0;"
+        if active_only else
+        f"int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        f"            bool valid = i < {n};"
+    )
+    work_domain = "work_ids" if active_only else n
+
     topology = KernelBuilder(
         f'''extern "C" __global__ void graphflood_transient_topology(
-                const double* hydraulic_surface, unsigned char* dirs,
+                {work_arg}const double* hydraulic_surface, unsigned char* dirs,
                 {weight_type}* weights, float* steepest_slope,
                 float* flow_width) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
+            {work_index}
             int nk = {nk};
             unsigned char mask = 0u;
             double scores[8];
@@ -822,7 +948,7 @@ def _transient_factory(be, bundles, config):
             dirs[i] = mask;
             steepest_slope[i] = (float)best_slope;
             flow_width[i] = best_width;
-        }}''', domain=n,
+        }}''', domain=work_domain,
     ).compose("grid", bundles["grid"]).freeze()
 
     init_dt = KernelBuilder(
@@ -836,13 +962,13 @@ def _transient_factory(be, bundles, config):
 
     outflow = KernelBuilder(
         f'''extern "C" __global__ void graphflood_transient_outflow(
-                const float* h, const unsigned char* dirs,
+                {work_arg}const float* h, const unsigned char* dirs,
                 const float* steepest_slope, const float* flow_width,
                 float* Qo, float* effective_dt) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            {outflow_index}
             float cap = fmaxf($ctx.TRANSIENT_DT.get(0)$, 1.0e-12f);
             float candidate = cap;
-            if (i < {n}) {{
+            if (valid) {{
                 Qo[i] = 0.0f;
                 if (!$ctx.grid.nodata(i)$ && !$ctx.grid.can_out(i)$
                         && dirs[i] != 0u) {{
@@ -872,14 +998,14 @@ def _transient_factory(be, bundles, config):
             if (threadIdx.x == 0)
                 atomicMin((unsigned int*)effective_dt,
                           __float_as_uint(block_min[0]));
-        }}''', domain=n, block=256,
+        }}''', domain=work_domain, block=256,
     ).compose("grid", bundles["grid"]).freeze()
 
     limit = KernelBuilder(
         f'''extern "C" __global__ void graphflood_transient_limit(
-                const float* h, float* Qo, const float* effective_dt) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
+                {work_arg}const float* h, float* Qo,
+                const float* effective_dt) {{
+            {work_index}
             float dx = $ctx.grid.DX.get(0)$;
             float area = dx * dx;
             float dt = fmaxf(effective_dt[0], 1.0e-12f);
@@ -887,16 +1013,24 @@ def _transient_factory(be, bundles, config):
                             * area * fmaxf(h[i], 0.0f) / dt
                             + fmaxf($ctx.PRECIPITATION.get(i)$, 0.0f) * area;
             Qo[i] = fminf(Qo[i], available);
-        }}''', domain=n,
+        }}''', domain=work_domain,
     ).compose("grid", bundles["grid"]).freeze()
 
+    update_args = "const int* active_ids, " if active_only else ""
+    update_index = (
+        "int p = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        "            if (p >= $ctx.ACTIVE_COUNT.get(0)$) return;\n"
+        "            int i = active_ids[p];"
+        if active_only else
+        f"int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        f"            if (i >= {n}) return;"
+    )
     update = KernelBuilder(
         f'''extern "C" __global__ void graphflood_transient_update(
-                float* h, float* Qi, float* Qo,
+                {update_args}float* h, float* Qi, float* Qo,
                 const unsigned char* dirs, const {weight_type}* weights,
                 const float* effective_dt) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
+            {update_index}
             if ($ctx.grid.nodata(i)$) {{
                 h[i] = 0.0f;
                 Qi[i] = 0.0f;
@@ -927,12 +1061,16 @@ def _transient_factory(be, bundles, config):
             }}
             float dt = fmaxf(effective_dt[0], 1.0e-12f);
             h[i] = fmaxf(h[i] + (qin - Qo[i]) * dt / area, 0.0f);
-        }}''', domain=n,
+        }}''', domain="active_ids" if active_only else n,
     ).compose("grid", bundles["grid"]).freeze()
 
     return (RoutineBuilder().step("topology", topology)
             .step("init_dt", init_dt).step("outflow", outflow)
             .step("limit", limit).step("update", update).freeze())
+
+
+def _active_transient_factory(be, bundles, config):
+    return _transient_factory(be, bundles, config, active_only=True)
 
 
 def _transient_plan(frozen, _be):
@@ -944,19 +1082,29 @@ def _transient_plan(frozen, _be):
         "EXPO": "friction_exponent", "PRECIPITATION": "precipitation",
         "TRANSIENT_DT": "transient_dt", "TRANSIENT_CFL": "transient_cfl",
         "effective_dt": "transient_dt_used",
+        "active_ids": "active_ids", "ACTIVE_COUNT": "active_count",
+        "work_ids": "work_ids", "WORK_COUNT": "work_count",
     })
 
 
-def _update_factory(be, bundles, config):
+def _update_factory(be, bundles, config, *, active_only=False):
     _cupy_only(be)
     n = config["nx"] * config["ny"]
     friction = build_friction_velocity(config["friction_law"])
+    args = "const int* active_ids, " if active_only else ""
+    index = (
+        "int p = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        "            if (p >= $ctx.ACTIVE_COUNT.get(0)$) return;\n"
+        "            int i = active_ids[p];"
+        if active_only else
+        f"int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        f"            if (i >= {n}) return;"
+    )
     return KernelBuilder(
         f'''extern "C" __global__ void graphflood_update_depth(
-                float* h, const float* Qi, float* Qo,
+                {args}float* h, const float* Qi, float* Qo,
                 const float* steepest_slope, const float* flow_width) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
+            {index}
             if ($ctx.grid.nodata(i)$) {{
                 h[i] = 0.0f;
                 Qo[i] = 0.0f;
@@ -973,147 +1121,33 @@ def _update_factory(be, bundles, config):
             float dx = $ctx.grid.DX.get(0)$;
             float next = h[i] + (Qi[i] - qout) / (dx * dx) * $ctx.DT.get(i)$;
             h[i] = next > 0.0f ? next : 0.0f;
-        }}''', domain=n,
+        }}''', domain="active_ids" if active_only else n,
     ).compose("grid", bundles["grid"]).compose("friction", friction).freeze()
 
 
-def _pressure_update_factory(be, bundles, config):
-    """One residual-driven, pressure-smoothed nonlinear correction."""
-    _cupy_only(be)
-    n = config["nx"] * config["ny"]
-
-    local = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_pressure_local(
-                const float* h, const float* Qi, float* Qo,
-                const float* steepest_slope, const float* flow_width,
-                float* correction) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            if ($ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$) {{
-                correction[i] = 0.0f;
-                Qo[i] = $ctx.grid.can_out(i)$ ? Qi[i] : 0.0f;
-                return;
-            }}
-            float depth = fmaxf(h[i], 0.0f);
-            float slope = fmaxf(steepest_slope[i], 1.0e-12f);
-            float width = fmaxf(flow_width[i], 1.0e-9f);
-            float manning = fmaxf($ctx.MANNING.get(i)$, 1.0e-9f);
-            float alpha = fmaxf(1.0f + $ctx.EXPO.get(i)$, 1.0e-3f);
-            float qout = width / manning * powf(depth, alpha)
-                       * sqrtf(slope);
-            Qo[i] = qout;
-
-            // Frozen-slope discharge Jacobian plus a storage screen. The
-            // screen turns a dry-cell Newton singularity into a finite
-            // pseudo-time step.
-            float dqdh = depth > 1.0e-12f
-                ? qout * alpha / depth : 0.0f;
-            float dx = $ctx.grid.DX.get(0)$;
-            float tau = fmaxf($ctx.PRESSURE_TAU.get(i)$, 1.0e-12f);
-            correction[i] = (Qi[i] - qout)
-                / fmaxf(dx * dx / tau + dqdh, 1.0e-20f);
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    diffuse = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_pressure_diffuse(
-                const float* h, const double* hydraulic_surface,
-                const float* correction, float* smoothed) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            if ($ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$) {{
-                smoothed[i] = 0.0f;
-                return;
-            }}
-            float alpha = fmaxf(1.0f + $ctx.EXPO.get(i)$, 1.0e-3f);
-            float weighted = 0.0f;
-            float sum_weight = 0.0f;
-            int nk = $ctx.grid.N_NEIGHBOURS.get(0)$;
-            for (int k = 0; k < nk; ++k) {{
-                int j = $ctx.grid.neighbour(i, k)$;
-                if (j == -1) continue;
-                float distance = $ctx.grid.dist_from_k(k)$;
-                float face_depth = fmaxf(
-                    0.5f * (fmaxf(h[i], 0.0f) + fmaxf(h[j], 0.0f)),
-                    1.0e-6f);
-                float face_slope = fmaxf((float)(fabs(
-                    hydraulic_surface[i] - hydraulic_surface[j])
-                    / (double)distance), 1.0e-6f);
-                // Linearised diffusive-wave pressure transmissivity. Only
-                // relative weights matter in this normalized Jacobi sweep.
-                float weight = powf(face_depth, alpha) / sqrtf(face_slope);
-                weighted += weight * correction[j];
-                sum_weight += weight;
-            }}
-            float neighbour_mean = sum_weight > 0.0f
-                ? weighted / sum_weight : correction[i];
-            float coupling = fminf(1.0f, fmaxf(
-                0.0f, $ctx.PRESSURE_DIFFUSION.get(i)$));
-            smoothed[i] = correction[i]
-                + coupling * (neighbour_mean - correction[i]);
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    apply = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_pressure_apply(
-                float* h, const float* smoothed) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            if ($ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$) {{
-                h[i] = 0.0f;
-                return;
-            }}
-            float relaxation = fminf(1.0f, fmaxf(
-                0.0f, $ctx.PRESSURE_RELAXATION.get(i)$));
-            h[i] = fmaxf(h[i] + relaxation * smoothed[i], 0.0f);
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    diagnostics = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_pressure_diagnostics(
-                const float* h, const float* Qi, float* Qo,
-                const float* steepest_slope, const float* flow_width) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            if ($ctx.grid.nodata(i)$) {{ Qo[i] = 0.0f; return; }}
-            if ($ctx.grid.can_out(i)$) {{ Qo[i] = Qi[i]; return; }}
-            float depth = fmaxf(h[i], 0.0f);
-            float slope = fmaxf(steepest_slope[i], 1.0e-12f);
-            float width = fmaxf(flow_width[i], 1.0e-9f);
-            float manning = fmaxf($ctx.MANNING.get(i)$, 1.0e-9f);
-            float alpha = fmaxf(1.0f + $ctx.EXPO.get(i)$, 1.0e-3f);
-            Qo[i] = width / manning * powf(depth, alpha) * sqrtf(slope);
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    return (RoutineBuilder().step("local", local).step("diffuse", diffuse)
-            .step("apply", apply).step("diagnostics", diagnostics).freeze())
+def _active_update_factory(be, bundles, config):
+    return _update_factory(be, bundles, config, active_only=True)
 
 
-def _pressure_update_plan(frozen, _be):
-    return _grid_leaf_plan(frozen, {
-        "h": "h", "Qi": "Qi", "Qo": "Qo",
-        "hydraulic_surface": "hydraulic_surface",
-        "steepest_slope": "steepest_slope", "flow_width": "flow_width",
-        "correction": "surface", "smoothed": "z_prime",
-        "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
-        "PRESSURE_TAU": "pressure_correction_tau",
-        "PRESSURE_DIFFUSION": "pressure_correction_diffusion",
-        "PRESSURE_RELAXATION": "pressure_correction_relaxation",
-    })
-
-
-def _local_analytical_update_factory(be, bundles, config):
+def _local_analytical_update_factory(be, bundles, config, *, active_only=False):
     """Original pointwise inverse of the frozen-slope discharge closure."""
     _cupy_only(be)
     n = config["nx"] * config["ny"]
     friction = build_friction_velocity(config["friction_law"])
+    args = "const int* active_ids, " if active_only else ""
+    index = (
+        "int p = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        "            if (p >= $ctx.ACTIVE_COUNT.get(0)$) return;\n"
+        "            int i = active_ids[p];"
+        if active_only else
+        f"int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+        f"            if (i >= {n}) return;"
+    )
     return KernelBuilder(
         f'''extern "C" __global__ void graphflood_local_analytical(
-                float* h, const float* Qi, float* Qo,
+                {args}float* h, const float* Qi, float* Qo,
                 const float* steepest_slope, const float* flow_width) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
+            {index}
             if ($ctx.grid.nodata(i)$) {{
                 h[i] = 0.0f;
                 Qo[i] = 0.0f;
@@ -1139,8 +1173,14 @@ def _local_analytical_update_factory(be, bundles, config):
                 h[i] + relaxation * (target - fmaxf(h[i], 0.0f)), 0.0f);
             h[i] = next_h;
             Qo[i] = $ctx.friction(next_h, slope, i)$ * next_h * width;
-        }}''', domain=n,
+        }}''', domain="active_ids" if active_only else n,
     ).compose("grid", bundles["grid"]).compose("friction", friction).freeze()
+
+
+def _active_local_analytical_update_factory(be, bundles, config):
+    return _local_analytical_update_factory(
+        be, bundles, config, active_only=True,
+    )
 
 
 def _local_analytical_update_plan(frozen, _be):
@@ -1149,6 +1189,7 @@ def _local_analytical_update_plan(frozen, _be):
         "steepest_slope": "steepest_slope", "flow_width": "flow_width",
         "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
         "ANALYTICAL_RELAXATION": "analytical_relaxation",
+        "active_ids": "active_ids", "ACTIVE_COUNT": "active_count",
     })
 
 
@@ -1439,811 +1480,6 @@ def _bottom_up_analytical_update_plan(frozen, _be):
     })
 
 
-def _tau_update_factory(be, bundles, config):
-    """Adaptive receiver-first backward-Euler pseudo-time step."""
-    _cupy_only(be)
-    n = config["nx"] * config["ny"]
-    nk = 8 if config["topology"] == "D8" else 4
-    persistent_grid, persistent_block = persistent_grid_block(
-        blocks_per_sm=1, threads=256,
-    )
-    resident_threads = persistent_grid[0] * persistent_block[0]
-    carve = config["mfd_local_minima"] == "carve_cordonnier"
-    cut_assignment = (
-        f"hydraulic_cut[i] = (control[i] < {nk} && best <= 0.0f) ? 1u : 0u;"
-        if carve else "hydraulic_cut[i] = 0u;"
-    )
-
-    clear = KernelBuilder(
-        '''extern "C" __global__ void graphflood_tau_clear(
-                int* count, unsigned int* barrier,
-                float* graph_metrics, float* residuals) {
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i < 2) {
-                count[i] = 0;
-                graph_metrics[i] = 0.0f;
-                residuals[i] = 0.0f;
-            }
-            if (i == 0) {
-                barrier[0] = 0u;
-                float lo = fmaxf($ctx.TAU_MIN.get(0)$, 1.0e-12f);
-                float hi = fmaxf($ctx.TAU_MAX.get(0)$, lo);
-                float value = fminf(hi, fmaxf(lo, $ctx.TAU.get(0)$));
-                $ctx.TAU.set_node(0, value)$;
-            }
-        }''', domain=2,
-    ).freeze()
-
-    prepare = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_tau_prepare(
-                const float* z, const float* h,
-                const float* Qi, const unsigned char* directions,
-                int* remaining,
-                unsigned char* control, unsigned char* hydraulic_cut,
-                const unsigned char* previous_control,
-                int* frontier, int* count,
-                float* graph_metrics) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            unsigned int mask = (unsigned int)directions[i];
-            control[i] = 255u;
-            float best = -3.402823466e+38f;
-            if (!$ctx.grid.nodata(i)$ && mask) {{
-                #pragma unroll
-                for (int k = 0; k < {nk}; ++k) {{
-                    if (!(mask & (1u << k))) continue;
-                    int r = $ctx.grid.neighbour_raw(i, k)$;
-                    float slope = ((z[i] - z[r]) + (h[i] - h[r]))
-                                / $ctx.grid.dist_from_k(k)$;
-                    if (slope > best) {{
-                        best = slope;
-                        control[i] = (unsigned char)k;
-                    }}
-                }}
-            }}
-            {cut_assignment}
-            remaining[i] = control[i] < {nk} ? 1 : 0;
-            if (!$ctx.grid.nodata(i)$ && remaining[i] == 0) {{
-                int p = atomicAdd(&count[0], 1);
-                frontier[p] = i;
-            }}
-            if (control[i] < {nk}) {{
-                float importance = fmaxf(Qi[i], 0.0f);
-                atomicAdd(&graph_metrics[0], importance);
-                if ($ctx.TAU_STEP.get(0)$ != 0u
-                        && previous_control[i] != control[i])
-                    atomicAdd(&graph_metrics[1], importance);
-            }}
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    solve = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_tau_solve(
-                int* __restrict__ frontier0, int* __restrict__ frontier1,
-                int* __restrict__ count, unsigned int* __restrict__ barrier,
-                const unsigned char* __restrict__ control,
-                const unsigned char* __restrict__ hydraulic_cut,
-                int* __restrict__ remaining, const float* __restrict__ z,
-                const float* __restrict__ h, const float* __restrict__ Qi,
-                float* __restrict__ candidate,
-                float* __restrict__ solved_slope) {{
-            __shared__ int staged[2048];
-            __shared__ int staged_n;
-            __shared__ unsigned int staged_base;
-
-            float dx = $ctx.grid.DX.get(0)$;
-            float storage = dx * dx / fmaxf($ctx.TAU.get(0)$, 1.0e-12f);
-            int* frontiers[2] = {{frontier0, frontier1}};
-            int parity = 0;
-            unsigned int level = 0;
-            while (true) {{
-                int size_in = *((volatile int*)&count[parity]);
-                if (size_in == 0) break;
-                int* fin = frontiers[parity];
-                int* fout = frontiers[1 - parity];
-                if (threadIdx.x == 0) staged_n = 0;
-                __syncthreads();
-
-                int tid = blockIdx.x * blockDim.x + threadIdx.x;
-                int stride = gridDim.x * blockDim.x;
-                for (int p = tid; p < size_in; p += stride) {{
-                    int u = fin[p];
-                    if ($ctx.grid.can_out(u)$) {{
-                        candidate[u] = 0.0f;
-                        solved_slope[u] = fmaxf(
-                            $ctx.CARVE_SLOPE.get(u)$, 1.0e-12f);
-                    }} else {{
-                        float target_q = fmaxf(Qi[u], 0.0f);
-                        float old_h = fmaxf(h[u], 0.0f);
-                        float manning = fmaxf(
-                            $ctx.MANNING.get(u)$, 1.0e-9f);
-                        float alpha = fmaxf(
-                            1.0f + $ctx.EXPO.get(u)$, 1.0e-3f);
-                        int k = (int)control[u];
-                        if (k >= {nk}) {{
-                            candidate[u] = old_h;
-                            solved_slope[u] = fmaxf(
-                                $ctx.CARVE_SLOPE.get(u)$, 1.0e-12f);
-                        }} else {{
-                            int r = $ctx.grid.neighbour_raw(u, k)$;
-                            float width = $ctx.grid.dist_from_k(k)$;
-                            bool cut = hydraulic_cut[u] != 0u;
-                            float inherited_slope = fmaxf(
-                                solved_slope[r],
-                                fmaxf($ctx.CARVE_SLOPE.get(u)$, 1.0e-12f));
-                            float receiver_h = cut ? 0.0f : candidate[r];
-                            float bed_drop = z[u] - z[r];
-                            float lo = cut ? 0.0f
-                                : fmaxf(receiver_h - bed_drop, 0.0f);
-                            float flo = storage * (lo - old_h) - target_q;
-                            if (flo >= 0.0f) {{
-                                candidate[u] = lo;
-                                solved_slope[u] = cut ? inherited_slope : 0.0f;
-                            }} else {{
-                                float old_slope = cut ? inherited_slope : fmaxf(
-                                    (bed_drop + old_h - receiver_h) / width,
-                                    1.0e-12f);
-                                float steady = target_q > 0.0f
-                                    ? powf(target_q * manning
-                                           / (width * sqrtf(old_slope)),
-                                           1.0f / alpha)
-                                    : lo;
-                                float hi = fmaxf(fmaxf(old_h, steady),
-                                                 lo + 1.0e-7f);
-                                #pragma unroll
-                                for (int it = 0; it < 32; ++it) {{
-                                    float slope = cut ? inherited_slope : fmaxf(
-                                        (bed_drop + hi - receiver_h) / width,
-                                        0.0f);
-                                    float q = width / manning
-                                            * powf(hi, alpha) * sqrtf(slope);
-                                    float fhi = storage * (hi - old_h)
-                                              + q - target_q;
-                                    if (fhi >= 0.0f) break;
-                                    hi = hi * 2.0f + 1.0e-6f;
-                                }}
-
-                                float x = fminf(fmaxf(old_h, lo), hi);
-                                #pragma unroll
-                                for (int it = 0; it < 16; ++it) {{
-                                    float slope = cut ? inherited_slope : fmaxf(
-                                        (bed_drop + x - receiver_h) / width,
-                                        0.0f);
-                                    float q = width / manning
-                                            * powf(x, alpha) * sqrtf(slope);
-                                    float value = storage * (x - old_h)
-                                                + q - target_q;
-                                    if (value < 0.0f) lo = x;
-                                    else hi = x;
-                                    float derivative = storage + q * alpha
-                                        / fmaxf(x, 1.0e-12f);
-                                    if (!cut && slope > 0.0f)
-                                        derivative += q * 0.5f
-                                            / (slope * width);
-                                    float trial = x - value
-                                        / fmaxf(derivative, 1.0e-20f);
-                                    if (!(trial > lo && trial < hi)
-                                            || !isfinite(trial))
-                                        trial = 0.5f * (lo + hi);
-                                    x = trial;
-                                }}
-                                candidate[u] = x;
-                                solved_slope[u] = cut ? inherited_slope : fmaxf(
-                                    (bed_drop + x - receiver_h) / width,
-                                    0.0f);
-                            }}
-                        }}
-                    }}
-
-                    __threadfence();
-                    #pragma unroll
-                    for (int k = 0; k < {nk}; ++k) {{
-                        int donor = $ctx.grid.neighbour(u, k)$;
-                        if (donor == -1) continue;
-                        if ((int)control[donor] != {nk - 1} - k) continue;
-                        int old = atomicAdd(&remaining[donor], -1);
-                        if (old == 1) {{
-                            int sp = atomicAdd(&staged_n, 1);
-                            if (sp < 2048) staged[sp] = donor;
-                            else {{
-                                int pos = atomicAdd(&count[1 - parity], 1);
-                                fout[pos] = donor;
-                            }}
-                        }}
-                    }}
-                }}
-
-                __syncthreads();
-                int flush_n = min(staged_n, 2048);
-                if (threadIdx.x == 0)
-                    staged_base = atomicAdd(
-                        (unsigned int*)&count[1 - parity],
-                        (unsigned int)flush_n);
-                __syncthreads();
-                for (int i = threadIdx.x; i < flush_n; i += blockDim.x)
-                    fout[staged_base + i] = staged[i];
-                __threadfence();
-
-                __syncthreads();
-                if (threadIdx.x == 0) {{
-                    if (blockIdx.x == 0) count[parity] = 0;
-                    unsigned int target = (level + 1)
-                                        * (unsigned int)gridDim.x;
-                    atomicAdd(barrier, 1u);
-                    unsigned int wait_ns = 32;
-                    while (*((volatile unsigned int*)barrier) < target) {{
-#if __CUDA_ARCH__ >= 700
-                        __nanosleep(wait_ns);
-                        if (wait_ns < 1024) wait_ns <<= 1;
-#endif
-                    }}
-                }}
-                __syncthreads();
-                level++;
-                parity = 1 - parity;
-            }}
-        }}''', domain=resident_threads, block=256,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    residual = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_tau_residual(
-                const float* z, const float* h, const float* Qi,
-                const float* candidate, const unsigned char* control,
-                const unsigned char* hydraulic_cut,
-                const float* solved_slope, float* residuals) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n} || $ctx.grid.nodata(i)$
-                    || $ctx.grid.can_out(i)$) return;
-            int k = (int)control[i];
-            if (k >= {nk}) return;
-            int r = $ctx.grid.neighbour_raw(i, k)$;
-            float width = $ctx.grid.dist_from_k(k)$;
-            float manning = fmaxf($ctx.MANNING.get(i)$, 1.0e-9f);
-            float alpha = fmaxf(1.0f + $ctx.EXPO.get(i)$, 1.0e-3f);
-            float old_depth = fmaxf(h[i], 0.0f);
-            float old_slope = hydraulic_cut[i] ? solved_slope[i] : fmaxf(
-                ((z[i] - z[r]) + (h[i] - h[r])) / width, 0.0f);
-            float old_q = width / manning * powf(old_depth, alpha)
-                        * sqrtf(old_slope);
-            float new_depth = fmaxf(candidate[i], 0.0f);
-            float new_slope = hydraulic_cut[i] ? solved_slope[i] : fmaxf(
-                ((z[i] - z[r]) + (candidate[i] - candidate[r])) / width,
-                0.0f);
-            float new_q = width / manning * powf(new_depth, alpha)
-                        * sqrtf(new_slope);
-            atomicAdd(&residuals[0], fabsf(old_q - Qi[i]));
-            atomicAdd(&residuals[1], fabsf(new_q - Qi[i]));
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    decide = KernelBuilder(
-        '''extern "C" __global__ void graphflood_tau_decide(
-                const float* graph_metrics, const float* residuals,
-                float* previous_residual, unsigned int* accepted) {
-            if (blockIdx.x != 0 || threadIdx.x != 0) return;
-            float old_residual = residuals[0];
-            float new_residual = residuals[1];
-            // Backward Euler is allowed to retain (or temporarily increase)
-            // the steady-state |Qo-Qi| residual: storage is precisely the
-            // missing term. Reject only a numerically invalid solve.
-            bool accept = isfinite(new_residual);
-            accepted[0] = accept ? 1u : 0u;
-
-            float churn = graph_metrics[0] > 0.0f
-                ? graph_metrics[1] / graph_metrics[0]
-                : 0.0f;
-            float target = fminf(1.0f, fmaxf(
-                0.0f, $ctx.TAU_CHURN.get(0)$));
-            float lower = fminf(1.0f, fmaxf(
-                1.0e-6f, $ctx.TAU_SHRINK.get(0)$));
-            float upper = fmaxf(1.0f, $ctx.TAU_GROWTH.get(0)$);
-            float factor;
-            if (!accept) factor = lower;
-            else if ($ctx.TAU_STEP.get(0)$ == 0u
-                    || !isfinite(previous_residual[0]))
-                factor = upper;
-            else if (old_residual <= 1.0e-20f)
-                factor = upper;
-            else
-                factor = fminf(upper, fmaxf(lower,
-                    previous_residual[0] / old_residual));
-            // Receiver switching means the nonlinear map itself changed.
-            // It may pause growth, but is not evidence that a valid implicit
-            // step should be undone or repeatedly reduced.
-            if (churn > target && factor > 1.0f) factor = 1.0f;
-            float lo = fmaxf($ctx.TAU_MIN.get(0)$, 1.0e-12f);
-            float hi = fmaxf($ctx.TAU_MAX.get(0)$, lo);
-            float next = fminf(hi, fmaxf(lo, $ctx.TAU.get(0)$ * factor));
-            $ctx.TAU.set_node(0, next)$;
-            if (isfinite(old_residual)) previous_residual[0] = old_residual;
-        }''', domain=1,
-    ).freeze()
-
-    apply = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_tau_apply(
-                const float* candidate, float* h,
-                const unsigned char* control,
-                unsigned char* previous_control,
-                const unsigned int* accepted) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            if ($ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$)
-                h[i] = 0.0f;
-            else if (accepted[0])
-                h[i] = fmaxf(candidate[i], 0.0f);
-            previous_control[i] = control[i];
-            if (i == 0) $ctx.TAU_STEP.set_node(0, 1u)$;
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    diagnostics = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_tau_diagnostics(
-                const float* z, const float* h, const float* Qi,
-                const unsigned char* control,
-                const unsigned char* hydraulic_cut,
-                const float* solved_slope, float* Qo) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            if ($ctx.grid.nodata(i)$) {{ Qo[i] = 0.0f; return; }}
-            if ($ctx.grid.can_out(i)$) {{ Qo[i] = Qi[i]; return; }}
-            int k = (int)control[i];
-            if (k >= {nk}) {{ Qo[i] = 0.0f; return; }}
-            int r = $ctx.grid.neighbour_raw(i, k)$;
-            float width = $ctx.grid.dist_from_k(k)$;
-            float slope = hydraulic_cut[i] ? solved_slope[i] : fmaxf(
-                ((z[i] - z[r]) + (h[i] - h[r])) / width, 0.0f);
-            float depth = fmaxf(h[i], 0.0f);
-            float manning = fmaxf($ctx.MANNING.get(i)$, 1.0e-9f);
-            float alpha = fmaxf(1.0f + $ctx.EXPO.get(i)$, 1.0e-3f);
-            Qo[i] = width / manning * powf(depth, alpha) * sqrtf(slope);
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    return (RoutineBuilder().step("clear", clear).step("prepare", prepare)
-            .step("solve", solve).step("residual", residual)
-            .step("decide", decide).step("apply", apply)
-            .step("diagnostics", diagnostics).freeze())
-
-
-def _tau_update_plan(frozen, _be):
-    return _grid_leaf_plan(frozen, {
-        "z": "z", "h": "h", "Qi": "Qi", "Qo": "Qo",
-        "candidate": "z_prime", "directions": "directions",
-        "remaining": "indegree", "control": "is_border",
-        "hydraulic_cut": "hydraulic_cut", "solved_slope": "steepest_slope",
-        "previous_control": "tau_previous_control",
-        "frontier": "mfd_frontier0", "frontier0": "mfd_frontier0",
-        "frontier1": "mfd_frontier1", "count": "mfd_count",
-        "barrier": "mfd_barrier", "graph_metrics": "tau_graph_metrics",
-        "residuals": "tau_residuals", "accepted": "tau_accepted",
-        "previous_residual": "tau_previous_residual",
-        "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
-        "CARVE_SLOPE": "carve_slope_min",
-        "TAU": "tau", "TAU_MIN": "tau_min", "TAU_MAX": "tau_max",
-        "TAU_GROWTH": "tau_growth", "TAU_SHRINK": "tau_shrink",
-        "TAU_CHURN": "tau_churn_threshold", "TAU_STEP": "tau_step",
-    })
-
-
-def _anderson_snapshot_factory(be, _bundles, config):
-    _cupy_only(be)
-    n = config["nx"] * config["ny"]
-    return KernelBuilder(
-        f'''extern "C" __global__ void graphflood_anderson_snapshot(
-                const float* h, float* input) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i < {n}) input[i] = h[i];
-        }}''', domain=n,
-    ).freeze()
-
-
-def _reset_anderson_history_factory(be, _bundles, _config):
-    _cupy_only(be)
-    return KernelBuilder(
-        '''extern "C" __global__ void graphflood_reset_anderson_history() {
-            if (blockIdx.x == 0 && threadIdx.x == 0)
-                $ctx.ANDERSON_STEP.set_node(0, 0u)$;
-        }''', domain=1,
-    ).freeze()
-
-
-def _reset_tau_history_factory(be, _bundles, _config):
-    _cupy_only(be)
-    return KernelBuilder(
-        '''extern "C" __global__ void graphflood_reset_tau_history() {
-            if (blockIdx.x == 0 && threadIdx.x == 0)
-                $ctx.TAU_STEP.set_node(0, 0u)$;
-        }''', domain=1,
-    ).freeze()
-
-
-def _anderson_factory(be, bundles, config):
-    """Depth-one Anderson mixing guarded by topology and flux residual."""
-    _cupy_only(be)
-    n = config["nx"] * config["ny"]
-    nk = 8 if config["topology"] == "D8" else 4
-
-    clear = KernelBuilder(
-        '''extern "C" __global__ void graphflood_anderson_clear(
-                double* reduction, float* residual,
-                unsigned int* flags) {
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i < 2) reduction[i] = 0.0;
-            if (i == 0) residual[0] = 0.0f;
-            if (i < 3) flags[i] = 0u;
-        }''', domain=3,
-    ).freeze()
-
-    reduce = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_anderson_reduce(
-                const float* input, const float* map,
-                const float* previous_input,
-                const float* previous_residual,
-                const unsigned int* tau_accepted, double* reduction) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n} || !tau_accepted[0]
-                    || $ctx.ANDERSON_STEP.get(0)$ == 0u
-                    || $ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$) return;
-            double f = (double)map[i] - (double)input[i];
-            double df = f - (double)previous_residual[i];
-            double dx = (double)input[i] - (double)previous_input[i];
-            atomicAdd(&reduction[0], f * df);
-            atomicAdd(&reduction[1], df * df);
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    coefficient = KernelBuilder(
-        '''extern "C" __global__ void graphflood_anderson_coefficient(
-                const double* reduction,
-                const float* graph_metrics,
-                const unsigned int* tau_accepted,
-                float* gamma, unsigned int* flags) {
-            if (blockIdx.x != 0 || threadIdx.x != 0) return;
-            float churn = graph_metrics[0] > 0.0f
-                ? graph_metrics[1] / graph_metrics[0]
-                : 0.0f;
-            bool enabled = tau_accepted[0]
-                && $ctx.ANDERSON_STEP.get(0)$ != 0u
-                && reduction[1] > 1.0e-30
-                && churn <= fminf(1.0f, fmaxf(
-                    0.0f, $ctx.TAU_CHURN.get(0)$));
-            float value = enabled
-                ? (float)(reduction[0] / reduction[1]) : 0.0f;
-            float limit = fmaxf($ctx.ANDERSON_GAMMA_MAX.get(0)$, 0.0f);
-            gamma[0] = fminf(limit, fmaxf(-limit, value));
-            flags[1] = enabled && isfinite(gamma[0]) ? 1u : 0u;
-        }''', domain=1,
-    ).freeze()
-
-    propose = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_anderson_propose(
-                const float* input, const float* map,
-                const float* previous_input,
-                const float* previous_residual, const float* gamma,
-                float* candidate, unsigned int* flags) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            if ($ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$) {{
-                candidate[i] = 0.0f;
-                return;
-            }}
-            float f = map[i] - input[i];
-            float df = f - previous_residual[i];
-            float dx = input[i] - previous_input[i];
-            float beta = fminf(1.0f, fmaxf(
-                0.0f, $ctx.ANDERSON_BETA.get(0)$));
-            float mixed = input[i] + beta * f
-                        - gamma[0] * (dx + beta * df);
-            candidate[i] = mixed;
-            float base_step = fabsf(f);
-            float mixed_step = fabsf(mixed - input[i]);
-            float max_factor = fmaxf(
-                1.0f, $ctx.ANDERSON_STEP_FACTOR.get(0)$);
-            if (!isfinite(mixed) || mixed < 0.0f
-                    || mixed_step > max_factor * fmaxf(base_step, 1.0e-8f))
-                atomicExch(&flags[0], 1u);
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    check = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_anderson_check(
-                const float* z, const float* Qi,
-                const float* candidate, const unsigned char* control,
-                const unsigned char* hydraulic_cut,
-                const float* solved_slope,
-                float* residual, unsigned int* flags) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n} || !flags[1] || $ctx.grid.nodata(i)$
-                    || $ctx.grid.can_out(i)$) return;
-            int k = (int)control[i];
-            if (k >= {nk}) return;
-            int r = $ctx.grid.neighbour_raw(i, k)$;
-            float width = $ctx.grid.dist_from_k(k)$;
-            float head_drop = (z[i] - z[r])
-                            + (candidate[i] - candidate[r]);
-            if (!hydraulic_cut[i]
-                    && (!isfinite(head_drop) || head_drop < -1.0e-6f)) {{
-                atomicExch(&flags[0], 1u);
-                return;
-            }}
-            float slope = hydraulic_cut[i] ? solved_slope[i]
-                : fmaxf(head_drop / width, 0.0f);
-            float depth = fmaxf(candidate[i], 0.0f);
-            float manning = fmaxf($ctx.MANNING.get(i)$, 1.0e-9f);
-            float alpha = fmaxf(1.0f + $ctx.EXPO.get(i)$, 1.0e-3f);
-            float q = width / manning * powf(depth, alpha) * sqrtf(slope);
-            atomicAdd(&residual[0], fabsf(q - Qi[i]));
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    decide = KernelBuilder(
-        '''extern "C" __global__ void graphflood_anderson_decide(
-                const float* residual, const float* tau_residuals,
-                unsigned int* flags) {
-            if (blockIdx.x != 0 || threadIdx.x != 0) return;
-            float limit = fmaxf(0.0f, $ctx.ANDERSON_SAFEGUARD.get(0)$)
-                        * tau_residuals[1] + 1.0e-20f;
-            flags[2] = flags[1] && !flags[0]
-                && isfinite(residual[0]) && residual[0] <= limit ? 1u : 0u;
-        }''', domain=1,
-    ).freeze()
-
-    apply_history = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_anderson_apply_history(
-                const float* input, const float* map,
-                const float* candidate, float* h,
-                float* previous_input, float* previous_residual,
-                const unsigned int* tau_accepted,
-                const unsigned int* flags) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            if (flags[2]) h[i] = candidate[i];
-            if (tau_accepted[0]) {{
-                previous_input[i] = input[i];
-                previous_residual[i] = map[i] - input[i];
-            }}
-            if (i == 0) $ctx.ANDERSON_STEP.set_node(
-                0, tau_accepted[0] ? 1u : 0u)$;
-        }}''', domain=n,
-    ).freeze()
-
-    diagnostics = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_anderson_diagnostics(
-                const float* z, const float* h, const float* Qi,
-                const unsigned char* control,
-                const unsigned char* hydraulic_cut,
-                const float* solved_slope, float* Qo) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            if ($ctx.grid.nodata(i)$) {{ Qo[i] = 0.0f; return; }}
-            if ($ctx.grid.can_out(i)$) {{ Qo[i] = Qi[i]; return; }}
-            int k = (int)control[i];
-            if (k >= {nk}) {{ Qo[i] = 0.0f; return; }}
-            int r = $ctx.grid.neighbour_raw(i, k)$;
-            float width = $ctx.grid.dist_from_k(k)$;
-            float slope = hydraulic_cut[i] ? solved_slope[i] : fmaxf(
-                ((z[i] - z[r]) + (h[i] - h[r])) / width, 0.0f);
-            float depth = fmaxf(h[i], 0.0f);
-            float manning = fmaxf($ctx.MANNING.get(i)$, 1.0e-9f);
-            float alpha = fmaxf(1.0f + $ctx.EXPO.get(i)$, 1.0e-3f);
-            Qo[i] = width / manning * powf(depth, alpha) * sqrtf(slope);
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    return (RoutineBuilder().step("clear", clear).step("reduce", reduce)
-            .step("coefficient", coefficient).step("propose", propose)
-            .step("check", check).step("decide", decide)
-            .step("apply_history", apply_history)
-            .step("diagnostics", diagnostics).freeze())
-
-
-def _anderson_plan(frozen, _be):
-    return _grid_leaf_plan(frozen, {
-        "z": "z", "h": "h", "Qi": "Qi", "Qo": "Qo",
-        "input": "anderson_input", "map": "z_prime",
-        "candidate": "surface", "previous_input": "anderson_previous_input",
-        "previous_residual": "anderson_previous_residual",
-        "control": "is_border", "hydraulic_cut": "hydraulic_cut",
-        "solved_slope": "steepest_slope",
-        "reduction": "anderson_reduction",
-        "residual": "anderson_residual", "flags": "anderson_flags",
-        "gamma": "anderson_gamma", "tau_accepted": "tau_accepted",
-        "tau_residuals": "tau_residuals",
-        "graph_metrics": "tau_graph_metrics",
-        "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
-        "TAU_CHURN": "tau_churn_threshold",
-        "ANDERSON_STEP": "anderson_step",
-        "ANDERSON_BETA": "anderson_beta",
-        "ANDERSON_GAMMA_MAX": "anderson_gamma_max",
-        "ANDERSON_SAFEGUARD": "anderson_safeguard",
-        "ANDERSON_STEP_FACTOR": "anderson_step_factor",
-    })
-
-
-def _hydraulic_relaxation_factory(be, bundles, config):
-    """One conservative, positivity-preserving grid diffusive-wave step."""
-    _cupy_only(be)
-    n = config["nx"] * config["ny"]
-    all_fluxes = (
-        "flux_east", "flux_south", "flux_southeast", "flux_southwest",
-    )
-    if config["topology"] == "D8":
-        # (stored flux, forward direction, incoming neighbour, reverse dir)
-        links = (
-            ("flux_east", 4, "west", 3),
-            ("flux_south", 6, "north", 1),
-            ("flux_southeast", 7, "northwest", 0),
-            ("flux_southwest", 5, "northeast", 2),
-        )
-    else:
-        links = (
-            ("flux_east", 2, "west", 1),
-            ("flux_south", 3, "north", 0),
-        )
-    directions = ", ".join(str(link[1]) for link in links)
-    clear_fluxes = "\n".join(f"                {name}[i] = 0.0f;"
-                               for name in all_fluxes)
-    store_fluxes = "\n".join(
-        f"            {name}[i] = "
-        + (f"face_flux[{face}];" if face < len(links) else "0.0f;")
-        for face, name in enumerate(all_fluxes)
-    )
-    own_outgoing = "\n                           + ".join(
-        f"fmaxf({name}[i], 0.0f)" for name, *_ in links
-    )
-    incoming_declarations = "\n".join(
-        f"            int {incoming} = $ctx.grid.neighbour(i, {reverse})$;"
-        for _, _, incoming, reverse in links
-    )
-    incoming_outgoing = "\n".join(
-        f"            if ({incoming} != -1) outgoing += "
-        f"fmaxf(-{name}[{incoming}], 0.0f);"
-        for name, _, incoming, _ in links
-    )
-    scale_own = "\n".join(
-        f"            if ({name}[i] > 0.0f) {name}[i] *= factor;"
-        for name, *_ in links
-    )
-    scale_incoming = "\n".join(
-        f"            if ({incoming} != -1 && {name}[{incoming}] < 0.0f)\n"
-        f"                {name}[{incoming}] *= factor;"
-        for name, _, incoming, _ in links
-    )
-    update_own = "\n".join(
-        f"""            q = {name}[i];
-            if (q > 0.0f) next -= q;
-            else if (q < 0.0f) next += -q;
-""" for name, *_ in links
-    )
-    update_incoming = "\n".join(
-        f"""            if ({incoming} != -1) {{
-                q = {name}[{incoming}];
-                if (q > 0.0f) next += q;
-                else if (q < 0.0f) next -= -q;
-            }}
-""" for name, _, incoming, _ in links
-    )
-
-    # Signed discharge on each unique forward graph link. The hydraulic
-    # surface drop is the well-balanced form of
-    # h_bar * grad(z) + grad(h^2 / 2), so a lake at rest has exactly zero
-    # driving force. The wetted depth above the higher bed prevents leakage
-    # through a dry topographic barrier. Link distance is also used as its
-    # effective width, consistently with the GraphFlood discharge law.
-    fluxes = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_diffusive_face_fluxes(
-                const float* z, const float* h,
-                float* flux_east, float* flux_south,
-                float* flux_southeast, float* flux_southwest) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            if ($ctx.grid.nodata(i)$) {{
-{clear_fluxes}
-                return;
-            }}
-            float hi = fmaxf(h[i], 0.0f);
-            double eta_i = (double)z[i] + (double)hi;
-            int directions[{len(links)}] = {{{directions}}};
-            float face_flux[4] = {{0.0f, 0.0f, 0.0f, 0.0f}};
-            #pragma unroll
-            for (int face = 0; face < {len(links)}; ++face) {{
-                int k = directions[face];
-                int j = $ctx.grid.neighbour(i, k)$;
-                if (j == -1 || $ctx.grid.nodata(j)$) continue;
-                float hj = fmaxf(h[j], 0.0f);
-                double eta_j = (double)z[j] + (double)hj;
-                double eta_drop = eta_i - eta_j;
-                double h_bar = 0.5 * ((double)hi + (double)hj);
-                if (eta_drop == 0.0 || h_bar <= 0.0) continue;
-
-                // h_bar * eta_drop equals
-                // h_bar * (z_i-z_j) + (h_i^2-h_j^2)/2.
-                double hydrostatic_force = h_bar * eta_drop;
-                double width = (double)$ctx.grid.dist_from_k(k)$;
-                double slope = fabs(hydrostatic_force) / (h_bar * width);
-                double eta_up = eta_drop > 0.0 ? eta_i : eta_j;
-                double face_depth = fmax(
-                    eta_up - fmax((double)z[i], (double)z[j]), 0.0);
-                if (face_depth <= 0.0) continue;
-                double manning = fmax(
-                    0.5 * ((double)$ctx.MANNING.get(i)$
-                         + (double)$ctx.MANNING.get(j)$), 1.0e-9);
-                double exponent = 1.0
-                    + 0.5 * ((double)$ctx.EXPO.get(i)$
-                           + (double)$ctx.EXPO.get(j)$);
-                double magnitude = width * pow(face_depth, exponent) / manning
-                                         * sqrt(slope);
-                face_flux[face] = (float)copysign(magnitude, eta_drop);
-            }}
-{store_fluxes}
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    # Convert discharge in place to a signed depth transfer. Exactly one
-    # thread (the donor) modifies each non-zero link, so this needs no atomics
-    # or fifth full-grid scratch array. The local cap prevents negative depth.
-    limiter = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_diffusive_limiter(
-                const float* h, float* flux_east, float* flux_south,
-                float* flux_southeast, float* flux_southwest) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            float outgoing = {own_outgoing};
-{incoming_declarations}
-{incoming_outgoing}
-            float dt = fmaxf($ctx.RELAX_DT.get(i)$, 0.0f);
-            float dx = $ctx.grid.DX.get(0)$;
-            float requested = outgoing * dt / (dx * dx);
-            float available = fminf(1.0f, fmaxf(0.0f,
-                $ctx.RELAX_CFL.get(i)$)) * fmaxf(h[i], 0.0f);
-            float factor = requested > 0.0f
-                ? dt / (dx * dx) * fminf(1.0f, available / requested)
-                : 0.0f;
-            if ($ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$) factor = 0.0f;
-
-{scale_own}
-{scale_incoming}
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    # Each internal link contributes the same donor-limited transfer with
-    # opposite signs to its endpoints. Edge outlet cells stay dry, so flux
-    # entering them leaves the model; nodata links were closed above.
-    update = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_diffusive_update(
-                float* h, const float* flux_east, const float* flux_south,
-                const float* flux_southeast,
-                const float* flux_southwest) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            if ($ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$) {{
-                h[i] = 0.0f;
-                return;
-            }}
-            float next = fmaxf(h[i], 0.0f);
-            float q;
-{update_own}
-{incoming_declarations}
-{update_incoming}
-            h[i] = fmaxf(next, 0.0f);
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-
-    return (RoutineBuilder().step("fluxes", fluxes)
-            .step("limiter", limiter).step("update", update).freeze())
-
-
-def _hydraulic_relaxation_plan(frozen, _be):
-    return _grid_leaf_plan(frozen, {
-        "z": "z", "h": "h", "flux_east": "surface",
-        "flux_south": "z_prime", "flux_southeast": "steepest_slope",
-        "flux_southwest": "flow_width",
-        "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
-        "RELAX_DT": "hydraulic_relaxation_dt",
-        "RELAX_CFL": "hydraulic_relaxation_cfl",
-    })
-
-
 def _reset_h_factory(be, _bundles, config):
     _cupy_only(be)
     n = config["nx"] * config["ny"]
@@ -2251,10 +1487,6 @@ def _reset_h_factory(be, _bundles, config):
         f'''extern "C" __global__ void graphflood_reset_h(float* h) {{
             int i = blockIdx.x * blockDim.x + threadIdx.x;
             if (i < {n}) h[i] = 0.0f;
-            if (i == 0) {{
-                $ctx.TAU_STEP.set_node(0, 0u)$;
-                $ctx.ANDERSON_STEP.set_node(0, 0u)$;
-            }}
         }}''', domain=n,
     ).freeze()
 
@@ -2287,6 +1519,24 @@ def _merge_fill_depth_factory(be, _bundles, config):
             float depth = filled[i] - z[i];
             conditioned[i] = depth > h[i] ? 1u : 0u;
             if (depth > h[i]) h[i] = depth;
+        }}''', domain=n,
+    ).freeze()
+
+
+def _merge_active_fill_depth_factory(be, _bundles, config):
+    """Apply reconstructed storage only where the current band is active."""
+    _cupy_only(be)
+    n = config["nx"] * config["ny"]
+    return KernelBuilder(
+        f'''extern "C" __global__ void graphflood_merge_active_fill(
+                const float* z, const float* filled,
+                const unsigned char* active, float* h,
+                unsigned char* conditioned) {{
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i >= {n}) return;
+            float depth = filled[i] - z[i];
+            conditioned[i] = depth > h[i] ? 1u : 0u;
+            if (active[i] && depth > h[i]) h[i] = depth;
         }}''', domain=n,
     ).freeze()
 
@@ -2360,40 +1610,12 @@ def build_graphflood_program() -> type:
     b.param("dt", "auto", "f32", value=1.0e-3, shape=shape)
     b.param("analytical_relaxation", "auto", "f32", value=0.1, shape=shape)
     b.param("carve_slope_min", "auto", "f32", value=1.0e-4, shape=shape)
-    b.param("tau", "scalar", "f32", value=1.0e-3)
-    b.param("tau_min", "auto", "f32", value=1.0e-6)
-    b.param("tau_max", "auto", "f32", value=1.0e6)
-    b.param("tau_growth", "auto", "f32", value=2.0)
-    b.param("tau_shrink", "auto", "f32", value=0.5)
-    b.param("tau_churn_threshold", "auto", "f32", value=0.1)
-    b.param("tau_step", "scalar", "u32", value=0)
-    b.param("anderson_beta", "auto", "f32", value=1.0)
-    b.param("anderson_gamma_max", "auto", "f32", value=4.0)
-    b.param("anderson_safeguard", "auto", "f32", value=1.0)
-    b.param("anderson_step_factor", "auto", "f32", value=4.0)
-    b.param("anderson_step", "scalar", "u32", value=0)
-    b.param(
-        "pressure_correction_tau", "auto", "f32", value=1.0,
-        shape=shape,
-    )
-    b.param(
-        "pressure_correction_diffusion", "auto", "f32", value=0.35,
-        shape=shape,
-    )
-    b.param(
-        "pressure_correction_relaxation", "auto", "f32", value=0.5,
-        shape=shape,
-    )
     b.param("transient_dt", "auto", "f32", value=1.0e-3)
     b.param("transient_cfl", "auto", "f32", value=0.5)
-    b.param(
-        "hydraulic_relaxation_dt", "auto", "f32", value=1.0,
-        shape=shape,
-    )
-    b.param(
-        "hydraulic_relaxation_cfl", "auto", "f32", value=0.25,
-        shape=shape,
-    )
+    b.param("band_min", "scalar", "f32", value=0.0)
+    b.param("band_max", "scalar", "f32", value=1.0)
+    b.param("active_count", "scalar", "i32", value=0)
+    b.param("work_count", "scalar", "i32", value=0)
     b.param("ndep", "scalar", "i32", value=0)
     b.param("pass_index", "scalar", "i32", value=0)
     b.param("active", "scalar", "i32", value=0)
@@ -2405,6 +1627,7 @@ def build_graphflood_program() -> type:
     b.data("surface", "f32", shape, role="internal")
     b.data("hydraulic_surface", "f64", shape, role="internal")
     b.data("rec", "i32", shape, role="output")
+    b.data("distance_position", "f32", shape, role="output")
 
     def grid_structure(be, *, topology, boundary, outlet, nodata, **_):
         _cupy_only(be)
@@ -2429,10 +1652,15 @@ def build_graphflood_program() -> type:
         "rec_initial", "rank_ancestor", "rank_ancestor_alt", "rank", "rank_alt",
         "bid", "basin_saddlenode", "basin_route", "b_rcv",
         "mfd_frontier0", "mfd_frontier1", "indegree",
+        "active_flags", "active_indegree", "work_ids", "work_flags",
+        "distance_remaining", "distance_frontier0", "distance_frontier1",
     ):
         b.data(name, "i32", (flat,), role="internal")
+    b.data("active_ids", "i32", (flat,), role="output")
     for name in ("z_prime", "steepest_slope", "flow_width"):
         b.data(name, "f32", (flat,), role="internal")
+    for name in ("Qi_boundary", "distance_upstream", "distance_downstream"):
+        b.data(name, "f32", shape, role="output")
     b.data(
         "weights",
         lambda config: "u8" if config["quantized_weight"] else "f32",
@@ -2442,25 +1670,16 @@ def build_graphflood_program() -> type:
         "is_border", "directions", "hydraulic_conditioned", "hydraulic_cut",
     ):
         b.data(name, "u8", (flat,), role="internal")
-    b.data("tau_previous_control", "u8", (flat,), role="internal")
+    b.data("active_mask", "u8", shape, role="output")
+    b.data("work_mask", "u8", shape, role="output")
     for name in ("basin_saddle", "basin_outlet"):
         b.data(name, "i64", (flat,), role="internal")
     b.data("mfd_count", "i32", (2,), role="internal")
     b.data("mfd_barrier", "u32", (1,), role="internal")
-    b.data("tau_graph_metrics", "f32", (2,), role="internal")
-    b.data("tau_residuals", "f32", (2,), role="internal")
-    b.data("tau_previous_residual", "f32", (1,), role="internal")
-    b.data("tau_accepted", "u32", (1,), role="internal")
+    b.data("distance_count", "i32", (2,), role="internal")
+    b.data("distance_barrier", "u32", (1,), role="internal")
+    b.data("distance_max", "f32", (1,), role="output")
     b.data("transient_dt_used", "f32", (1,), role="output")
-    for name in (
-        "anderson_input", "anderson_previous_input",
-        "anderson_previous_residual",
-    ):
-        b.data(name, "f32", (flat,), role="internal")
-    b.data("anderson_reduction", "f64", (2,), role="internal")
-    b.data("anderson_residual", "f32", (1,), role="internal")
-    b.data("anderson_gamma", "f32", (1,), role="internal")
-    b.data("anderson_flags", "u32", (3,), role="internal")
 
     # One-shot fill initialization scratch. Keeping every field temporary
     # releases it back to the program pool as soon as the operation returns.
@@ -2471,11 +1690,7 @@ def build_graphflood_program() -> type:
         b.data(name, "f32", (flat,), lifetime="temp")
     b.data("fill_frontier", "i32", (2 * flat,), lifetime="temp")
 
-    b.add("reset_h", _reset_h_factory,
-          bind={
-              "h": "h", "TAU_STEP": "tau_step",
-              "ANDERSON_STEP": "anderson_step",
-          })
+    b.add("reset_h", _reset_h_factory, bind={"h": "h"})
     b.add("reconstruct_fill_surface", _reconstruct_epsilon_factory,
           bind=_fill_surface_plan("z", "surface"))
     b.add("copy_fill_depth", _copy_fill_depth_factory,
@@ -2533,6 +1748,8 @@ def build_graphflood_program() -> type:
     b.add("compute_rank", _rank_factory, bind=_rank_plan)
     b.add("compute_cordonnier_fill", _cordonnier_fill_factory,
           bind=_cordonnier_fill_plan)
+    b.add("compute_active_cordonnier_fill", _active_cordonnier_fill_factory,
+          bind=_active_cordonnier_fill_plan)
     b.add("compute_cordonnier_carve", _cordonnier_carve_factory,
           bind=_cordonnier_carve_plan)
     b.dispatch("prepare_mfd_surface", on="mfd_local_minima", cases={
@@ -2540,6 +1757,17 @@ def build_graphflood_program() -> type:
         "fill_cordonnier": "compute_cordonnier_fill",
         "carve_cordonnier": "compute_cordonnier_carve",
         "reconstruct_epsilon": "copy_hydraulic_fill_depth",
+    })
+    b.add("copy_active_hydraulic_fill_depth", _merge_active_fill_depth_factory,
+          bind={
+              "z": "z", "filled": "z_prime", "active": "active_mask",
+              "h": "h", "conditioned": "is_border",
+          })
+    b.dispatch("prepare_active_mfd_surface", on="mfd_local_minima", cases={
+        "rank_cordonnier": "compute_rank",
+        "fill_cordonnier": "compute_active_cordonnier_fill",
+        "carve_cordonnier": "compute_cordonnier_carve",
+        "reconstruct_epsilon": "copy_active_hydraulic_fill_depth",
     })
     b.add("build_rank_topology", _topology_factory, bind=_topology_plan)
     b.add("build_fill_topology", _filled_topology_factory,
@@ -2567,6 +1795,23 @@ def build_graphflood_program() -> type:
               "dirs": "directions", "mfd_w": "weights", "accum": "Qi",
               "indegree": "indegree",
           }))
+    b.add("accumulate_active", _subset_accumulation_factory,
+          bind=_subset_accumulation_plan)
+    b.add("snapshot_boundary_flux", _copy_flux_factory,
+          bind={"source": "Qi", "destination": "Qi_boundary"})
+    b.add("compute_distance_position", _distance_factory,
+          bind=_distance_plan)
+    b.add("mark_active_band", _active_band_factory,
+          bind=lambda f, be: _grid_leaf_plan(f, {
+              "position": "distance_position", "flags": "active_flags",
+              "active": "active_mask", "BAND_MIN": "band_min",
+              "BAND_MAX": "band_max",
+          }))
+    b.add("mark_active_work", _active_work_factory,
+          bind=lambda f, be: _grid_leaf_plan(f, {
+              "active": "active_mask", "flags": "work_flags",
+              "work": "work_mask",
+          }))
     b.add("update_depth", _update_factory,
           bind=lambda f, be: _grid_leaf_plan(f, {
               "h": "h", "Qi": "Qi", "Qo": "Qo",
@@ -2574,9 +1819,17 @@ def build_graphflood_program() -> type:
               "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
               "DT": "dt",
           }))
-    b.add("update_depth_pressure", _pressure_update_factory,
-          bind=_pressure_update_plan)
+    b.add("update_active_depth", _active_update_factory,
+          bind=lambda f, be: _grid_leaf_plan(f, {
+              "active_ids": "active_ids", "ACTIVE_COUNT": "active_count",
+              "h": "h", "Qi": "Qi", "Qo": "Qo",
+              "steepest_slope": "steepest_slope", "flow_width": "flow_width",
+              "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
+              "DT": "dt",
+          }))
     b.add("transport_transient", _transient_factory, bind=_transient_plan)
+    b.add("transport_active_transient", _active_transient_factory,
+          bind=_transient_plan)
     b.add("update_depth_analytical_local", _local_analytical_update_factory,
           bind=_local_analytical_update_plan)
     b.add(
@@ -2584,59 +1837,142 @@ def build_graphflood_program() -> type:
         _bottom_up_analytical_update_factory,
         bind=_bottom_up_analytical_update_plan,
     )
-    b.add("update_depth_tau", _tau_update_factory, bind=_tau_update_plan)
-    b.add("snapshot_anderson_input", _anderson_snapshot_factory,
-          bind={"h": "h", "input": "anderson_input"})
-    b.add("reset_anderson_history", _reset_anderson_history_factory,
-          bind={"ANDERSON_STEP": "anderson_step"})
-    b.add("reset_tau_history", _reset_tau_history_factory,
-          bind={"TAU_STEP": "tau_step"})
-    b.add("apply_anderson", _anderson_factory, bind=_anderson_plan)
+    b.add("update_active_depth_analytical",
+          _active_local_analytical_update_factory,
+          bind=_local_analytical_update_plan)
     b.dispatch("update_depth_analytical", on="analytical_solver", cases={
         "local": "update_depth_analytical_local",
         "bottom_up": "update_depth_analytical_bottom_up",
     })
-    b.add("relax_hydraulic_surface", _hydraulic_relaxation_factory,
-          bind=_hydraulic_relaxation_plan)
     b.pipeline("run_n_step", (
-        "reset_anderson_history", "make_surface", "route_local_minima",
-        "snapshot_local_minima",
+        "make_surface", "route_local_minima", "snapshot_local_minima",
         "resolve_minima", "prepare_mfd_surface",
         "refresh_hydraulic_surface", "build_topology",
         "prepare_frontier", "accumulate", "update_depth",
     ))
     b.pipeline("run_n_step_transient", (
-        "reset_anderson_history", "reset_tau_history",
         "make_surface", "transport_transient",
     ))
-    b.pipeline("run_n_step_pressure", (
-        "reset_anderson_history", "make_surface", "route_local_minima",
-        "snapshot_local_minima", "resolve_minima", "prepare_mfd_surface",
-        "refresh_hydraulic_surface", "build_topology",
-        "prepare_frontier", "accumulate", "update_depth_pressure",
-    ))
     b.pipeline("run_n_step_analytical", (
-        "reset_anderson_history", "make_surface", "route_local_minima",
-        "snapshot_local_minima",
+        "make_surface", "route_local_minima", "snapshot_local_minima",
         "resolve_minima", "prepare_mfd_surface",
         "refresh_hydraulic_surface", "build_topology",
         "prepare_frontier", "accumulate", "update_depth_analytical",
     ))
-    b.pipeline("run_n_step_tau", (
-        "reset_anderson_history", "make_surface", "route_local_minima",
-        "snapshot_local_minima",
-        "resolve_minima", "prepare_mfd_surface",
-        "refresh_hydraulic_surface", "build_topology",
-        "prepare_frontier", "accumulate", "update_depth_tau",
+    b.pipeline("_prepare_distance_sweep", (
+        "make_surface", "route", "snapshot_receivers",
+        "resolve_cordonnier", "compute_cordonnier_fill",
+        "refresh_hydraulic_surface", "build_fill_topology",
+        "prepare_frontier", "accumulate", "snapshot_boundary_flux",
+        "compute_distance_position",
     ))
-    b.pipeline("run_n_step_anderson", (
+    b.pipeline("refresh_band_boundary", (
         "make_surface", "route_local_minima", "snapshot_local_minima",
-        "resolve_minima", "prepare_mfd_surface",
+        "resolve_minima", "prepare_active_mfd_surface",
         "refresh_hydraulic_surface", "build_topology",
-        "prepare_frontier", "accumulate", "snapshot_anderson_input",
-        "update_depth_tau", "apply_anderson",
+        "prepare_frontier", "accumulate", "snapshot_boundary_flux",
+    ))
+    b.pipeline("run_active_n_step", (
+        "make_surface", "route_local_minima", "snapshot_local_minima",
+        "resolve_minima", "prepare_active_mfd_surface",
+        "refresh_hydraulic_surface", "build_topology",
+        "accumulate_active", "update_active_depth",
+    ))
+    b.pipeline("run_active_n_step_analytical", (
+        "make_surface", "route_local_minima", "snapshot_local_minima",
+        "resolve_minima", "prepare_active_mfd_surface",
+        "refresh_hydraulic_surface", "build_topology",
+        "accumulate_active", "update_active_depth_analytical",
+    ))
+    b.pipeline("run_active_n_step_transient", (
+        "make_surface", "transport_active_transient",
     ))
     program = b.freeze()
+
+    def prepare_distance_sweep(self):
+        """Fill once, freeze global Qi, and build the fixed drainage coordinate."""
+        self._prepare_distance_sweep()
+        return self.set_active_band(0.0, 1.0)
+
+    def set_active_band(self, lower, upper):
+        """Compact nodes whose fixed outlet-to-source coordinate is in a band."""
+        lower, upper = float(lower), float(upper)
+        if not (0.0 <= lower <= upper <= 1.0):
+            raise ProgramError("active band must satisfy 0 <= lower <= upper <= 1")
+        self.band_min.set(lower)
+        self.band_max.set(upper)
+        self.mark_active_band()
+        scan = getattr(self, "_active_scan", None)
+        if scan is None:
+            scan = make_scan(self._be, self._pool, self.nx * self.ny)
+            object.__setattr__(self, "_active_scan", scan)
+        count = scan.compact(
+            self._handle("active_flags"), self._handle("active_ids"),
+        )
+        self.active_count.set(count)
+
+        self.mark_active_work()
+        work_scan = getattr(self, "_work_scan", None)
+        if work_scan is None:
+            work_scan = make_scan(self._be, self._pool, self.nx * self.ny)
+            object.__setattr__(self, "_work_scan", work_scan)
+        work_count = work_scan.compact(
+            self._handle("work_flags"), self._handle("work_ids"),
+        )
+        self.work_count.set(work_count)
+
+        for name in (
+            "accumulate_active", "update_active_depth",
+            "update_active_depth_analytical", "transport_active_transient",
+        ):
+            self._ensure_compiled(name)
+
+        active_view = self._be.wrap(
+            self._handle("active_ids").array[:count], owned=False,
+        )
+        work_view = self._be.wrap(
+            self._handle("work_ids").array[:work_count], owned=False,
+        )
+        self._states["accumulate_active"].compiled.swap(
+            "clear.active_ids", active_view,
+        ).swap("prepare.active_ids", active_view)
+        self._states["update_active_depth"].compiled.swap(
+            "active_ids", active_view,
+        )
+        self._states["update_active_depth_analytical"].compiled.swap(
+            "active_ids", active_view,
+        )
+        transient = self._states["transport_active_transient"].compiled
+        transient.swap("topology.work_ids", work_view)
+        transient.swap("outflow.work_ids", work_view)
+        transient.swap("limit.work_ids", work_view)
+        transient.swap("update.active_ids", active_view)
+
+        old_views = getattr(self, "_compact_domain_views", ())
+        object.__setattr__(self, "_compact_domain_views", (active_view, work_view))
+        for view in old_views:
+            view.destroy()
+        return count
+
+    base_close = program.close
+
+    def close(self):
+        scan = getattr(self, "_active_scan", None)
+        if scan is not None:
+            scan.close()
+            object.__setattr__(self, "_active_scan", None)
+        work_scan = getattr(self, "_work_scan", None)
+        if work_scan is not None:
+            work_scan.close()
+            object.__setattr__(self, "_work_scan", None)
+        base_close(self)
+        for view in getattr(self, "_compact_domain_views", ()):
+            view.destroy()
+        object.__setattr__(self, "_compact_domain_views", ())
+
+    program.prepare_distance_sweep = prepare_distance_sweep
+    program.set_active_band = set_active_band
+    program.close = close
     program.outlet_mask = property(
         lambda self: _GridMaskAccessor(self, "OUTLET_MASK", "outlet='mask'"),
     )

@@ -117,9 +117,8 @@ MFD Programs use max-normalized `uint8` routing scores by default. Pass
 are normalized by their integer sum during accumulation, so the quantized path
 still partitions the complete discharge at every node.
 
-The experimental CuPy `GraphFloodProgram` combines the same rank-gated
-Cordonnier topology with persistent MFD accumulation and a Manning depth
-update:
+The experimental CuPy `GraphFloodProgram` combines local-minimum conditioning,
+persistent MFD accumulation, and a Manning depth update:
 
 ```python
 from pyfastflow.experimental.programs.graphflood import GraphFloodProgram
@@ -135,8 +134,17 @@ with GraphFloodProgram(backend, nx=nx, ny=ny, dx=dx) as flood:
     depth = flood.h.to_numpy()
 ```
 
-Each step rebuilds the hydraulic surface and its Cordonnier-carved,
-rank-gated MFD graph before accumulating rainfall and updating water depth.
+`run_n_step()` performs the standard stationary GraphFlood update.
+`run_n_step_analytical()` replaces its explicit depth update with either the
+local or bottom-up analytical inversion, and `run_n_step_transient()` performs
+conservative local MFD transport on the unconditioned hydraulic surface.
+Stationary steps can use rank-gated, filled, or carved Cordonnier routing, or
+reconstruction plus epsilon ordering through `mfd_local_minima`.
+For ordered regional relaxation, call `prepare_distance_sweep()`, select
+overlapping outlet-to-source bands with `set_active_band(lower, upper)`, then
+use the corresponding `run_active_n_step*()` method. Call
+`refresh_band_boundary()` after a complete sweep to refresh the frozen
+discharge entering later bands.
 The only friction-law option is currently `friction_law="manning"`; it is
 already a construction-time Program choice so more laws can be added without
 changing the execution API.
