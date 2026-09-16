@@ -139,14 +139,12 @@ with GraphFloodProgram(backend, nx=nx, ny=ny, dx=dx) as flood:
 local or bottom-up analytical inversion, and `run_n_step_transient()` performs
 conservative local MFD transport on the unconditioned hydraulic surface.
 `run_n_step_hybrid()` blends the previous `Qi` with Manning `Qo` through
-`hybrid_theta`; `run_active_n_step_hybrid()` applies it to the compact band.
+`hybrid_theta`.
 Stationary steps can use rank-gated, filled, or carved Cordonnier routing, or
 reconstruction plus epsilon ordering through `mfd_local_minima`.
-For ordered regional relaxation, call `prepare_distance_sweep()`, select
-overlapping outlet-to-source bands with `set_active_band(lower, upper)`, then
-use the corresponding `run_active_n_step*()` method. Call
-`refresh_band_boundary()` after a complete sweep to refresh the frozen
-discharge entering later bands.
+For a growable river domain, call `prepare_dynamic_flow_domain()`, alternate
+`run_dynamic_n_step_analytical()` with `grow_dynamic_flow_domain()`, or use
+the corresponding transient run and growth methods.
 The only friction-law option is currently `friction_law="manning"`; it is
 already a construction-time Program choice so more laws can be added without
 changing the execution API.

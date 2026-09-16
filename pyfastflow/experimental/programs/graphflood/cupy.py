@@ -31,9 +31,8 @@ Set ``adaptive_transient_dt=False`` to retain the fixed-step operator; in that
 mode ``transient_cfl`` is intentionally unused.
 ``run_n_step_hybrid(n)`` locally transmits
 ``hybrid_theta * Qo + (1 - hybrid_theta) * Qi`` and conservatively updates
-depth against that transmitted flux. Its active counterpart uses the compact
-band and halo. Initialise ``Qi`` first with a stationary step or
-``prepare_distance_sweep()``.
+depth against that transmitted flux. Initialise ``Qi`` first with a
+stationary step.
 
 Receiver routing and unconditioned link gradients use an internal float64
 ``z + h`` surface. Depth, discharge, terrain, and accumulation remain
@@ -47,33 +46,15 @@ accepts ``"D4"`` or ``"D8"``; ``boundary`` accepts ``"normal"``,
 or ``"mask"``. With masked outlets, set ``outlet_mask`` before running. Set
 ``nodata=True`` to additionally expose ``nodata_mask``.
 
-For ordered regional relaxation, ``prepare_distance_sweep()`` performs one
-Cordonnier fill, freezes global boundary discharge, and computes a fixed
-outlet-to-source coordinate. ``set_active_band(lower, upper)`` compacts the
-selected nodes. Use ``run_active_n_step()``,
-``run_active_n_step_analytical()``, or ``run_active_n_step_transient()``;
-``refresh_band_boundary()`` updates boundary discharge between full sweeps.
-
-``prepare_flow_domains(area_threshold, river_padding, overlap,
-precipitation_reference)`` instead extracts a river skeleton from the maximum
-of geometric drainage area and ``Qi / precipitation_reference``, then builds
-overlapping river and hillslope compact domains from grid distance to that
-skeleton. Omitting the reference retains geometric-area-only classification.
-The resulting domains are consumed by ``run_hillslope_n_step_analytical(n)``
-and ``run_river_n_step_analytical(n)``.
-
 For adaptive river corridors, ``run_n_step_analytical_capped(n)`` provides a
-fast depth-limited hillslope warm-up. ``prepare_dynamic_flow_domain(...)``
-then seeds a compact river list. ``run_dynamic_n_step_analytical(n)`` solves
+then seeds a compact river list from effective drainage area and optional
+padding. ``run_dynamic_n_step_analytical(n)`` solves
 only that list; ``grow_dynamic_flow_domain_analytical(...)`` expands it from
 the undamped analytical depth residual. ``run_dynamic_n_step_transient(n)``
 transports on the same list and a one-cell halo using fixed ``transient_dt``;
 ``grow_dynamic_flow_domain_transient(...)`` expands it from accumulated
 ``sum(abs(Δh))`` and resets that activity after each check. Both growth paths
 also require depth above the hillslope cap. Zero growth is not convergence.
-``run_dynamic_n_step_analytical_optimised(n)`` freezes the initial Cordonnier
-correction and exterior boundary flux, updating only local links and depths;
-it is an approximate alternative to the full dynamic analytical path.
 """
 
 import math
@@ -89,7 +70,6 @@ from pyfastflow.flow import (
     make_accumulation,
     make_depression_solver,
     make_depressions,
-    make_mfd_distance,
     make_mfd_topology,
     make_subset_mfd_accumulation,
 )
@@ -648,89 +628,6 @@ def _carve_topology_factory(be, bundles, config):
             .freeze())
 
 
-def _freeze_dynamic_carve_factory(be, _bundles, config):
-    _cupy_only(be)
-    n = config["nx"] * config["ny"]
-    return KernelBuilder(
-        f'''extern "C" __global__ void graphflood_freeze_dynamic_carve(
-                const float* surface, const double* hydraulic_surface,
-                const int* rank, double* offset, int* frozen_rank) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            offset[i] = (double)surface[i] - hydraulic_surface[i];
-            frozen_rank[i] = rank[i];
-        }}''', domain=n,
-    ).freeze()
-
-
-def _dynamic_carve_topology_factory(be, bundles, config):
-    """Rebuild MFD and Manning slopes only on active cells plus one halo."""
-    _cupy_only(be)
-    nk = 8 if config["topology"] == "D8" else 4
-    weight_type = "unsigned char" if config["quantized_weight"] else "float"
-    max_update = "if (score > max_score) max_score = score;" if config["quantized_weight"] else ""
-    max_decl = "float max_score = 0.0f;" if config["quantized_weight"] else ""
-    weight_write = (
-        "weights[i * nk + k] = scores[k] > 0.0f "
-        "? (unsigned char)max(1, __float2int_rn("
-        "255.0f * scores[k] / max_score)) : 0;"
-        if config["quantized_weight"] else
-        "weights[i * nk + k] = sum_score > 0.0f "
-        "? scores[k] / sum_score : 0.0f;"
-    )
-    return KernelBuilder(
-        f'''extern "C" __global__ void graphflood_dynamic_carve_topology(
-                const int* work_ids, const float* z, const float* h,
-                const double* offset, const int* rank,
-                unsigned char* dirs, {weight_type}* weights,
-                float* steepest_slope, float* flow_width) {{
-            int p = blockIdx.x * blockDim.x + threadIdx.x;
-            if (p >= $ctx.WORK_COUNT.get(0)$) return;
-            int i = work_ids[p];
-            int nk = {nk};
-            float scores[8];
-            for (int k = 0; k < 8; ++k) scores[k] = 0.0f;
-            unsigned char mask = 0u;
-            float sum_score = 0.0f;
-            {max_decl}
-            double best_slope = 0.0;
-            float best_width = $ctx.grid.DX.get(0)$;
-            if (!$ctx.grid.nodata(i)$ && !$ctx.grid.can_out(i)$) {{
-                double physical = (double)z[i] + (double)h[i];
-                float zi = (float)(physical + offset[i]);
-                float ulp = nextafterf(zi, 1.0e30f) - zi;
-                for (int k = 0; k < {nk}; ++k) {{
-                    int j = $ctx.grid.neighbour(i, k)$;
-                    if (j == -1) continue;
-                    double physical_j = (double)z[j] + (double)h[j];
-                    float zj = (float)(physical_j + offset[j]);
-                    float drop = zi > zj ? zi - zj : 0.0f;
-                    if (drop == 0.0f && zi == zj && rank[i] > rank[j])
-                        drop = ulp * (float)(rank[i] - rank[j]);
-                    if (drop <= 0.0f) continue;
-                    mask |= (unsigned char)(1u << k);
-                    float score = drop;
-                    scores[k] = score;
-                    sum_score += score;
-                    {max_update}
-                    double width = (double)$ctx.grid.dist_from_k(k)$;
-                    double slope = (physical - physical_j) / width;
-                    if (slope > best_slope) {{
-                        best_slope = slope;
-                        best_width = (float)width;
-                    }}
-                }}
-            }}
-            for (int k = 0; k < {nk}; ++k) {{ {weight_write} }}
-            dirs[i] = mask;
-            steepest_slope[i] = best_slope > 0.0
-                ? (float)best_slope
-                : fmaxf($ctx.CARVE_SLOPE.get(i)$, 1.0e-12f);
-            flow_width[i] = best_width;
-        }}''', domain="work_ids",
-    ).compose("grid", bundles["grid"]).freeze()
-
-
 def _reconstructed_topology_factory(be, bundles, config):
     """MFD and Manning diagnostics on reconstruct+epsilon potential."""
     _cupy_only(be)
@@ -911,7 +808,7 @@ def _subset_accumulation_factory(be, bundles, config):
 
 def _subset_accumulation_plan(frozen, _be):
     return _grid_leaf_plan(frozen, {
-        "active_ids": "active_ids", "active": "active_mask",
+        "active_ids": "dynamic_active_ids", "active": "dynamic_active_mask",
         "dirs": "directions", "mfd_w": "weights",
         "boundary": "Qi_boundary", "accum": "Qi",
         "accumulation": "Qi", "remaining": "active_indegree",
@@ -932,29 +829,6 @@ def _copy_flux_factory(be, _bundles, config):
             if (i < {n}) destination[i] = source[i];
         }}''', domain=n,
     ).freeze()
-
-
-def _distance_factory(be, bundles, config):
-    _cupy_only(be)
-    return make_mfd_distance(
-        be, bundles["grid"], n_flat=config["nx"] * config["ny"],
-        n_neighbours=8 if config["topology"] == "D8" else 4,
-    )
-
-
-def _distance_plan(frozen, _be):
-    plan = _grid_leaf_plan(frozen, {
-        "dirs": "directions", "upstream": "distance_upstream",
-        "downstream": "distance_downstream",
-        "position": "distance_position", "remaining": "distance_remaining",
-        "maximum": "distance_max",
-        "frontier": "distance_frontier0", "frontier0": "distance_frontier0",
-        "frontier1": "distance_frontier1", "count": "distance_count",
-        "barrier": "distance_barrier",
-    })
-    plan["walk_forward.distance"] = "distance_upstream"
-    plan["walk_reverse.distance"] = "distance_downstream"
-    return plan
 
 
 def _river_distance_init_factory(be, bundles, config):
@@ -1013,26 +887,20 @@ def _river_distance_relax_factory(be, bundles, config):
             .freeze())
 
 
-def _flow_domain_factory(be, bundles, config):
+def _river_seed_factory(be, bundles, config):
     _cupy_only(be)
     n = config["nx"] * config["ny"]
     return KernelBuilder(
-        f'''extern "C" __global__ void graphflood_mark_flow_domains(
+        f'''extern "C" __global__ void graphflood_mark_river_seed(
                 const float* distance, int* river_flags,
-                unsigned char* river_mask, int* hillslope_flags,
-                unsigned char* hillslope_mask) {{
+                unsigned char* river_mask) {{
             int i = blockIdx.x * blockDim.x + threadIdx.x;
             if (i >= {n}) return;
             float split = fmaxf($ctx.RIVER_PADDING.get(0)$, 0.0f);
-            float hillslope_start = fmaxf(
-                split - fmaxf($ctx.DOMAIN_OVERLAP.get(0)$, 0.0f), 0.0f);
             bool valid = !$ctx.grid.nodata(i)$;
             bool river = valid && distance[i] <= split;
-            bool hillslope = valid && distance[i] >= hillslope_start;
             river_flags[i] = river ? 1 : 0;
             river_mask[i] = river ? 1u : 0u;
-            hillslope_flags[i] = hillslope ? 1 : 0;
-            hillslope_mask[i] = hillslope ? 1u : 0u;
         }}''', domain=n,
     ).compose("grid", bundles["grid"]).freeze()
 
@@ -1113,23 +981,6 @@ def _river_distance_relax_plan(frozen, _be):
         "backward.destination": "river_distance",
     })
     return plan
-
-
-def _active_band_factory(be, bundles, config):
-    _cupy_only(be)
-    n = config["nx"] * config["ny"]
-    return KernelBuilder(
-        f'''extern "C" __global__ void graphflood_mark_active_band(
-                const float* position, int* flags, unsigned char* active) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            float x = position[i];
-            bool selected = !$ctx.grid.nodata(i)$ && x >= $ctx.BAND_MIN.get(0)$
-                         && x <= $ctx.BAND_MAX.get(0)$;
-            flags[i] = selected ? 1 : 0;
-            active[i] = selected ? 1u : 0u;
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
 
 
 def _active_work_factory(be, bundles, config):
@@ -1398,10 +1249,6 @@ def _transient_factory(
     return routine.step("update", update).freeze()
 
 
-def _active_transient_factory(be, bundles, config):
-    return _transient_factory(be, bundles, config, active_only=True)
-
-
 def _dynamic_transient_factory(be, bundles, config):
     # Dynamic-domain transport always uses transient_dt, regardless of the
     # full-domain adaptive timestep choice.
@@ -1415,12 +1262,6 @@ def _hybrid_factory(be, bundles, config):
     return _transient_factory(be, bundles, config, hybrid=True)
 
 
-def _active_hybrid_factory(be, bundles, config):
-    return _transient_factory(
-        be, bundles, config, active_only=True, hybrid=True,
-    )
-
-
 def _transient_plan(frozen, _be):
     return _grid_leaf_plan(frozen, {
         "hydraulic_surface": "hydraulic_surface", "h": "h",
@@ -1430,29 +1271,22 @@ def _transient_plan(frozen, _be):
         "EXPO": "friction_exponent", "PRECIPITATION": "precipitation",
         "TRANSIENT_DT": "transient_dt", "TRANSIENT_CFL": "transient_cfl",
         "effective_dt": "transient_dt_used",
-        "active_ids": "active_ids", "ACTIVE_COUNT": "active_count",
-        "work_ids": "work_ids", "WORK_COUNT": "work_count",
+        "active_ids": "dynamic_active_ids", "ACTIVE_COUNT": "active_count",
+        "work_ids": "dynamic_work_ids", "WORK_COUNT": "work_count",
         "Qsend": "Qsend", "THETA": "hybrid_theta",
         "activity": "transient_activity",
     })
 
 
-def _update_factory(be, bundles, config, *, active_only=False):
+def _update_factory(be, bundles, config):
     _cupy_only(be)
     n = config["nx"] * config["ny"]
     friction = build_friction_velocity(config["friction_law"])
-    args = "const int* active_ids, " if active_only else ""
-    index = (
-        "int p = blockIdx.x * blockDim.x + threadIdx.x;\n"
-        "            if (p >= $ctx.ACTIVE_COUNT.get(0)$) return;\n"
-        "            int i = active_ids[p];"
-        if active_only else
-        f"int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
-        f"            if (i >= {n}) return;"
-    )
+    index = (f"int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+             f"            if (i >= {n}) return;")
     return KernelBuilder(
         f'''extern "C" __global__ void graphflood_update_depth(
-                {args}float* h, const float* Qi, float* Qo,
+                float* h, const float* Qi, float* Qo,
                 const float* steepest_slope, const float* flow_width) {{
             {index}
             if ($ctx.grid.nodata(i)$) {{
@@ -1471,31 +1305,20 @@ def _update_factory(be, bundles, config, *, active_only=False):
             float dx = $ctx.grid.DX.get(0)$;
             float next = h[i] + (Qi[i] - qout) / (dx * dx) * $ctx.DT.get(i)$;
             h[i] = next > 0.0f ? next : 0.0f;
-        }}''', domain="active_ids" if active_only else n,
+        }}''', domain=n,
     ).compose("grid", bundles["grid"]).compose("friction", friction).freeze()
 
 
-def _active_update_factory(be, bundles, config):
-    return _update_factory(be, bundles, config, active_only=True)
-
-
-def _local_analytical_update_factory(be, bundles, config, *, active_only=False):
+def _local_analytical_update_factory(be, bundles, config):
     """Original pointwise inverse of the frozen-slope discharge closure."""
     _cupy_only(be)
     n = config["nx"] * config["ny"]
     friction = build_friction_velocity(config["friction_law"])
-    args = "const int* active_ids, " if active_only else ""
-    index = (
-        "int p = blockIdx.x * blockDim.x + threadIdx.x;\n"
-        "            if (p >= $ctx.ACTIVE_COUNT.get(0)$) return;\n"
-        "            int i = active_ids[p];"
-        if active_only else
-        f"int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
-        f"            if (i >= {n}) return;"
-    )
+    index = (f"int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+             f"            if (i >= {n}) return;")
     return KernelBuilder(
         f'''extern "C" __global__ void graphflood_local_analytical(
-                {args}float* h, const float* Qi, float* Qo,
+                float* h, const float* Qi, float* Qo,
                 const float* steepest_slope, const float* flow_width) {{
             {index}
             if ($ctx.grid.nodata(i)$) {{
@@ -1523,14 +1346,8 @@ def _local_analytical_update_factory(be, bundles, config, *, active_only=False):
                 h[i] + relaxation * (target - fmaxf(h[i], 0.0f)), 0.0f);
             h[i] = next_h;
             Qo[i] = $ctx.friction(next_h, slope, i)$ * next_h * width;
-        }}''', domain="active_ids" if active_only else n,
+        }}''', domain=n,
     ).compose("grid", bundles["grid"]).compose("friction", friction).freeze()
-
-
-def _active_local_analytical_update_factory(be, bundles, config):
-    return _local_analytical_update_factory(
-        be, bundles, config, active_only=True,
-    )
 
 
 def _capped_local_analytical_update_factory(be, bundles, config):
@@ -1613,7 +1430,7 @@ def _local_analytical_update_plan(frozen, _be):
         "steepest_slope": "steepest_slope", "flow_width": "flow_width",
         "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
         "ANALYTICAL_RELAXATION": "analytical_relaxation",
-        "active_ids": "active_ids", "ACTIVE_COUNT": "active_count",
+        "active_ids": "dynamic_active_ids", "ACTIVE_COUNT": "active_count",
     })
 
 
@@ -2049,19 +1866,14 @@ def build_graphflood_program() -> type:
     b.param("transient_dt", "auto", "f32", value=1.0e-3)
     b.param("transient_cfl", "auto", "f32", value=0.5)
     b.param("hybrid_theta", "auto", "f32", value=0.1, shape=shape)
-    b.param("band_min", "scalar", "f32", value=0.0)
-    b.param("band_max", "scalar", "f32", value=1.0)
     b.param("flow_area_threshold", "scalar", "f32", value=0.0)
     b.param("precipitation_reference", "scalar", "f32", value=0.0)
     b.param("river_padding", "scalar", "f32", value=0.0)
-    b.param("domain_overlap", "scalar", "f32", value=0.0)
     b.param("hillslope_depth_cap", "scalar", "f32", value=0.03)
     b.param("growth_residual_threshold", "scalar", "f32", value=1.0e-3)
     b.param("transient_activity_threshold", "scalar", "f32", value=1.0e-3)
     b.param("active_count", "scalar", "i32", value=0)
     b.param("work_count", "scalar", "i32", value=0)
-    b.param("river_count", "scalar", "i32", value=0)
-    b.param("hillslope_count", "scalar", "i32", value=0)
     b.param("dynamic_active_count", "scalar", "i32", value=0)
     b.param("ndep", "scalar", "i32", value=0)
     b.param("pass_index", "scalar", "i32", value=0)
@@ -2075,15 +1887,12 @@ def build_graphflood_program() -> type:
     b.data("surface", "f32", shape, role="internal")
     b.data("hydraulic_surface", "f64", shape, role="internal")
     b.data("rec", "i32", shape, role="output")
-    b.data("distance_position", "f32", shape, role="output")
     b.data("drainage_area", "f32", shape, role="output")
     b.data("effective_drainage_area", "f32", shape, role="output")
     b.data("river_distance", "f32", shape, role="output")
     b.data("river_distance_work", "f32", shape, role="internal")
     b.data("analytical_residual", "f32", shape, role="output")
     b.data("transient_activity", "f32", shape, role="output")
-    b.data("frozen_carve_offset", "f64", shape, role="internal")
-    b.data("frozen_carve_rank", "i32", shape, role="internal")
 
     def grid_structure(be, *, topology, boundary, outlet, nodata, **_):
         _cupy_only(be)
@@ -2108,18 +1917,14 @@ def build_graphflood_program() -> type:
         "rec_initial", "rank_ancestor", "rank_ancestor_alt", "rank", "rank_alt",
         "bid", "basin_saddlenode", "basin_route", "b_rcv",
         "mfd_frontier0", "mfd_frontier1", "indegree",
-        "active_flags", "active_indegree", "work_ids", "work_flags",
-        "river_flags", "hillslope_flags", "river_ids", "hillslope_ids",
+        "active_indegree", "river_flags",
         "dynamic_flags", "dynamic_claims", "dynamic_active_ids",
         "dynamic_work_flags", "dynamic_work_ids",
-        "distance_remaining", "distance_frontier0", "distance_frontier1",
     ):
         b.data(name, "i32", (flat,), role="internal")
-    b.data("active_ids", "i32", (flat,), role="output")
     for name in ("z_prime", "steepest_slope", "flow_width"):
         b.data(name, "f32", (flat,), role="internal")
-    for name in ("Qi_boundary", "distance_upstream", "distance_downstream"):
-        b.data(name, "f32", shape, role="output")
+    b.data("Qi_boundary", "f32", shape, role="output")
     b.data(
         "weights",
         lambda config: "u8" if config["quantized_weight"] else "f32",
@@ -2129,19 +1934,13 @@ def build_graphflood_program() -> type:
         "is_border", "directions", "hydraulic_conditioned", "hydraulic_cut",
     ):
         b.data(name, "u8", (flat,), role="internal")
-    b.data("active_mask", "u8", shape, role="output")
-    b.data("work_mask", "u8", shape, role="output")
     b.data("river_mask", "u8", shape, role="output")
-    b.data("hillslope_mask", "u8", shape, role="output")
     b.data("dynamic_active_mask", "u8", shape, role="output")
     b.data("dynamic_work_mask", "u8", shape, role="internal")
     for name in ("basin_saddle", "basin_outlet"):
         b.data(name, "i64", (flat,), role="internal")
     b.data("mfd_count", "i32", (2,), role="internal")
     b.data("mfd_barrier", "u32", (1,), role="internal")
-    b.data("distance_count", "i32", (2,), role="internal")
-    b.data("distance_barrier", "u32", (1,), role="internal")
-    b.data("distance_max", "f32", (1,), role="output")
     b.data("transient_dt_used", "f32", (1,), role="output")
     b.data("dynamic_count_device", "i32", (1,), role="internal")
 
@@ -2238,20 +2037,6 @@ def build_graphflood_program() -> type:
           bind=_filled_topology_plan)
     b.add("build_carve_topology", _carve_topology_factory,
           bind=_carve_topology_plan)
-    b.add("freeze_dynamic_carve", _freeze_dynamic_carve_factory,
-          bind={
-              "surface": "surface", "hydraulic_surface": "hydraulic_surface",
-              "rank": "rank", "offset": "frozen_carve_offset",
-              "frozen_rank": "frozen_carve_rank",
-          })
-    b.add("build_dynamic_topology_optimised", _dynamic_carve_topology_factory,
-          bind=lambda f, be: _grid_leaf_plan(f, {
-              "work_ids": "dynamic_work_ids", "WORK_COUNT": "work_count",
-              "z": "z", "h": "h", "offset": "frozen_carve_offset",
-              "rank": "frozen_carve_rank", "dirs": "directions",
-              "weights": "weights", "steepest_slope": "steepest_slope",
-              "flow_width": "flow_width", "CARVE_SLOPE": "carve_slope_min",
-          }))
     b.add("build_reconstructed_topology", _reconstructed_topology_factory,
           bind=_reconstructed_topology_plan)
     b.dispatch("build_topology", on="mfd_local_minima", cases={
@@ -2279,8 +2064,6 @@ def build_graphflood_program() -> type:
           bind=_subset_accumulation_plan)
     b.add("snapshot_boundary_flux", _copy_flux_factory,
           bind={"source": "Qi", "destination": "Qi_boundary"})
-    b.add("compute_distance_position", _distance_factory,
-          bind=_distance_plan)
     b.add("initialize_river_distance", _river_distance_init_factory,
           bind=lambda f, be: _grid_leaf_plan(f, {
               "drainage_area": "drainage_area",
@@ -2292,14 +2075,11 @@ def build_graphflood_program() -> type:
           }))
     b.add("relax_river_distance", _river_distance_relax_factory,
           bind=_river_distance_relax_plan)
-    b.add("mark_flow_domains", _flow_domain_factory,
+    b.add("mark_river_seed", _river_seed_factory,
           bind=lambda f, be: _grid_leaf_plan(f, {
               "distance": "river_distance", "river_flags": "river_flags",
               "river_mask": "river_mask",
-              "hillslope_flags": "hillslope_flags",
-              "hillslope_mask": "hillslope_mask",
               "RIVER_PADDING": "river_padding",
-              "DOMAIN_OVERLAP": "domain_overlap",
           }))
     b.add("initialize_dynamic_domain", _dynamic_domain_init_factory,
           bind={
@@ -2333,17 +2113,6 @@ def build_graphflood_program() -> type:
               "activity": "transient_activity",
               "ACTIVE_COUNT": "dynamic_active_count",
           })
-    b.add("mark_active_band", _active_band_factory,
-          bind=lambda f, be: _grid_leaf_plan(f, {
-              "position": "distance_position", "flags": "active_flags",
-              "active": "active_mask", "BAND_MIN": "band_min",
-              "BAND_MAX": "band_max",
-          }))
-    b.add("mark_active_work", _active_work_factory,
-          bind=lambda f, be: _grid_leaf_plan(f, {
-              "active": "active_mask", "flags": "work_flags",
-              "work": "work_mask",
-          }))
     b.add("mark_dynamic_work", _active_work_factory,
           bind=lambda f, be: _grid_leaf_plan(f, {
               "active": "dynamic_active_mask",
@@ -2357,22 +2126,10 @@ def build_graphflood_program() -> type:
               "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
               "DT": "dt",
           }))
-    b.add("update_active_depth", _active_update_factory,
-          bind=lambda f, be: _grid_leaf_plan(f, {
-              "active_ids": "active_ids", "ACTIVE_COUNT": "active_count",
-              "h": "h", "Qi": "Qi", "Qo": "Qo",
-              "steepest_slope": "steepest_slope", "flow_width": "flow_width",
-              "MANNING": "friction_coefficient", "EXPO": "friction_exponent",
-              "DT": "dt",
-          }))
     b.add("transport_transient", _transient_factory, bind=_transient_plan)
-    b.add("transport_active_transient", _active_transient_factory,
-          bind=_transient_plan)
     b.add("transport_dynamic_transient", _dynamic_transient_factory,
           bind=_transient_plan)
     b.add("transport_hybrid", _hybrid_factory, bind=_transient_plan)
-    b.add("transport_active_hybrid", _active_hybrid_factory,
-          bind=_transient_plan)
     b.add("update_depth_analytical_local", _local_analytical_update_factory,
           bind=_local_analytical_update_plan)
     b.add(
@@ -2380,9 +2137,6 @@ def build_graphflood_program() -> type:
         _bottom_up_analytical_update_factory,
         bind=_bottom_up_analytical_update_plan,
     )
-    b.add("update_active_depth_analytical",
-          _active_local_analytical_update_factory,
-          bind=_local_analytical_update_plan)
     b.add("update_depth_analytical_capped",
           _capped_local_analytical_update_factory,
           bind=_capped_local_analytical_update_plan)
@@ -2417,14 +2171,7 @@ def build_graphflood_program() -> type:
         "refresh_hydraulic_surface", "build_topology",
         "prepare_frontier", "accumulate", "update_depth_analytical_capped",
     ))
-    b.pipeline("_prepare_distance_sweep", (
-        "make_surface", "route", "snapshot_receivers",
-        "resolve_cordonnier", "compute_cordonnier_fill",
-        "refresh_hydraulic_surface", "build_fill_topology",
-        "prepare_frontier", "accumulate", "snapshot_boundary_flux",
-        "compute_distance_position",
-    ))
-    b.pipeline("_prepare_flow_domains", (
+    b.pipeline("_prepare_dynamic_seed", (
         "make_surface", "route_local_minima", "snapshot_local_minima",
         "resolve_minima", "prepare_mfd_surface",
         "refresh_hydraulic_surface", "build_topology",
@@ -2434,23 +2181,11 @@ def build_graphflood_program() -> type:
         "snapshot_boundary_flux", "initialize_river_distance",
     ))
     b.pipeline("_relax_river_distance", ("relax_river_distance",))
-    b.pipeline("refresh_band_boundary", (
+    b.pipeline("_refresh_dynamic_boundary", (
         "make_surface", "route_local_minima", "snapshot_local_minima",
         "resolve_minima", "prepare_active_mfd_surface",
         "refresh_hydraulic_surface", "build_topology",
         "prepare_frontier", "accumulate", "snapshot_boundary_flux",
-    ))
-    b.pipeline("run_active_n_step", (
-        "make_surface", "route_local_minima", "snapshot_local_minima",
-        "resolve_minima", "prepare_active_mfd_surface",
-        "refresh_hydraulic_surface", "build_topology",
-        "accumulate_active", "update_active_depth",
-    ))
-    b.pipeline("run_active_n_step_analytical", (
-        "make_surface", "route_local_minima", "snapshot_local_minima",
-        "resolve_minima", "prepare_active_mfd_surface",
-        "refresh_hydraulic_surface", "build_topology",
-        "accumulate_active", "update_active_depth_analytical",
     ))
     b.pipeline("_run_dynamic_active_batch", (
         "make_surface", "route_local_minima", "snapshot_local_minima",
@@ -2458,198 +2193,10 @@ def build_graphflood_program() -> type:
         "refresh_hydraulic_surface", "build_topology",
         "accumulate_active", "update_dynamic_depth_analytical",
     ))
-    b.pipeline("_run_dynamic_analytical_optimised", (
-        "build_dynamic_topology_optimised", "accumulate_active",
-        "update_dynamic_depth_analytical",
-    ))
-    b.pipeline("run_active_n_step_transient", (
-        "make_surface", "transport_active_transient",
-    ))
     b.pipeline("_run_dynamic_transient", (
         "make_surface", "transport_dynamic_transient",
     ))
-    b.pipeline("run_active_n_step_hybrid", (
-        "make_surface", "transport_active_hybrid",
-    ))
     program = b.freeze()
-
-    def prepare_distance_sweep(self):
-        """Fill once, freeze global Qi, and build the fixed drainage coordinate."""
-        self._prepare_distance_sweep()
-        return self.set_active_band(0.0, 1.0)
-
-    def set_active_band(self, lower, upper):
-        """Compact nodes whose fixed outlet-to-source coordinate is in a band."""
-        lower, upper = float(lower), float(upper)
-        if not (0.0 <= lower <= upper <= 1.0):
-            raise ProgramError("active band must satisfy 0 <= lower <= upper <= 1")
-        self.band_min.set(lower)
-        self.band_max.set(upper)
-        self.mark_active_band()
-        scan = getattr(self, "_active_scan", None)
-        if scan is None:
-            scan = make_scan(self._be, self._pool, self.nx * self.ny)
-            object.__setattr__(self, "_active_scan", scan)
-        count = scan.compact(
-            self._handle("active_flags"), self._handle("active_ids"),
-        )
-        self.active_count.set(count)
-
-        self.mark_active_work()
-        work_scan = getattr(self, "_work_scan", None)
-        if work_scan is None:
-            work_scan = make_scan(self._be, self._pool, self.nx * self.ny)
-            object.__setattr__(self, "_work_scan", work_scan)
-        work_count = work_scan.compact(
-            self._handle("work_flags"), self._handle("work_ids"),
-        )
-        self.work_count.set(work_count)
-
-        for name in (
-            "accumulate_active", "update_active_depth",
-            "update_active_depth_analytical", "transport_active_transient",
-            "transport_active_hybrid",
-        ):
-            self._ensure_compiled(name)
-
-        active_view = self._be.wrap(
-            self._handle("active_ids").array[:count], owned=False,
-        )
-        work_view = self._be.wrap(
-            self._handle("work_ids").array[:work_count], owned=False,
-        )
-        self._states["accumulate_active"].compiled.swap(
-            "clear.active_ids", active_view,
-        ).swap("prepare.active_ids", active_view)
-        self._states["update_active_depth"].compiled.swap(
-            "active_ids", active_view,
-        )
-        self._states["update_active_depth_analytical"].compiled.swap(
-            "active_ids", active_view,
-        )
-        transient = self._states["transport_active_transient"].compiled
-        transient.swap("topology.work_ids", work_view)
-        transient.swap("outflow.work_ids", work_view)
-        transient.swap("limit.work_ids", work_view)
-        transient.swap("update.active_ids", active_view)
-        hybrid = self._states["transport_active_hybrid"].compiled
-        hybrid.swap("topology.work_ids", work_view)
-        hybrid.swap("outflow.work_ids", work_view)
-        hybrid.swap("limit.work_ids", work_view)
-        hybrid.swap("mix.work_ids", work_view)
-        hybrid.swap("update.active_ids", active_view)
-
-        old_views = getattr(self, "_compact_domain_views", ())
-        object.__setattr__(self, "_compact_domain_views", (active_view, work_view))
-        for view in old_views:
-            view.destroy()
-        return count
-
-    def prepare_flow_domains(
-            self, area_threshold, river_padding, overlap=0.0,
-            precipitation_reference=None):
-        """Build frozen overlapping compact domains around a river skeleton.
-
-        Distances use the configured D4/D8 stencil and are propagated only as
-        far as ``river_padding``. All distances and area arguments are in the
-        grid's physical units (area for the threshold, length for padding).
-        With a positive precipitation reference, the seed metric is
-        ``max(drainage_area, Qi / precipitation_reference)``.
-        """
-        area_threshold = float(area_threshold)
-        river_padding = float(river_padding)
-        overlap = float(overlap)
-        if not math.isfinite(area_threshold) or area_threshold <= 0.0:
-            raise ProgramError("area_threshold must be finite and > 0")
-        if not math.isfinite(river_padding) or river_padding < 0.0:
-            raise ProgramError("river_padding must be finite and >= 0")
-        if not math.isfinite(overlap) or overlap < 0.0:
-            raise ProgramError("overlap must be finite and >= 0")
-        if precipitation_reference is None:
-            precipitation_reference = 0.0
-        else:
-            precipitation_reference = float(precipitation_reference)
-            if (not math.isfinite(precipitation_reference)
-                    or precipitation_reference <= 0.0):
-                raise ProgramError(
-                    "precipitation_reference must be finite and > 0",
-                )
-
-        self.flow_area_threshold.set(area_threshold)
-        self.precipitation_reference.set(precipitation_reference)
-        self.river_padding.set(river_padding)
-        self.domain_overlap.set(overlap)
-        self._prepare_flow_domains()
-
-        edge_steps = int(math.ceil(river_padding / float(self.dx)))
-        if edge_steps:
-            self._relax_river_distance((edge_steps + 1) // 2)
-        self.mark_flow_domains()
-
-        scan = getattr(self, "_flow_domain_scan", None)
-        if scan is None:
-            scan = make_scan(self._be, self._pool, self.nx * self.ny)
-            object.__setattr__(self, "_flow_domain_scan", scan)
-        river_count = scan.compact(
-            self._handle("river_flags"), self._handle("river_ids"),
-        )
-        hillslope_count = scan.compact(
-            self._handle("hillslope_flags"), self._handle("hillslope_ids"),
-        )
-        self.river_count.set(river_count)
-        self.hillslope_count.set(hillslope_count)
-
-        old_views = getattr(self, "_flow_domain_views", {})
-        views = {
-            "river": self._be.wrap(
-                self._handle("river_ids").array[:river_count], owned=False,
-            ),
-            "hillslope": self._be.wrap(
-                self._handle("hillslope_ids").array[:hillslope_count],
-                owned=False,
-            ),
-        }
-        object.__setattr__(self, "_flow_domain_views", views)
-        for view in old_views.values():
-            view.destroy()
-        return river_count, hillslope_count
-
-    def select_flow_domain(self, domain):
-        """Bind one prepared flow domain to the active analytical pipeline."""
-        if domain not in ("river", "hillslope"):
-            raise ProgramError("flow domain must be 'river' or 'hillslope'")
-        views = getattr(self, "_flow_domain_views", None)
-        if views is None:
-            raise ProgramError("call prepare_flow_domains() first")
-        count = (int(self.river_count.read()) if domain == "river"
-                 else int(self.hillslope_count.read()))
-        mask = self._handle(domain + "_mask")
-        ids = views[domain]
-        self.active_count.set(count)
-        self._ensure_compiled("accumulate_active")
-        self._ensure_compiled("update_active_depth_analytical")
-        accumulation = self._states["accumulate_active"].compiled
-        accumulation.swap("clear.active_ids", ids)
-        accumulation.swap("prepare.active_ids", ids)
-        accumulation.swap("prepare.active", mask)
-        accumulation.swap("accum.active", mask)
-        self._states["update_active_depth_analytical"].compiled.swap(
-            "active_ids", ids,
-        )
-        object.__setattr__(self, "_selected_flow_domain", domain)
-        return count
-
-    def run_hillslope_n_step_analytical(self, n):
-        """Refresh global boundary flux, then relax the hillslope domain."""
-        self.refresh_band_boundary()
-        self.select_flow_domain("hillslope")
-        self.run_active_n_step_analytical(n)
-
-    def run_river_n_step_analytical(self, n):
-        """Refresh global boundary flux, then relax the padded river domain."""
-        self.refresh_band_boundary()
-        self.select_flow_domain("river")
-        self.run_active_n_step_analytical(n)
 
     def _bind_dynamic_domain(self, count, view):
         self.active_count.set(count)
@@ -2691,13 +2238,34 @@ def build_graphflood_program() -> type:
                 "dynamic flow domains currently require "
                 "mfd_local_minima='carve_cordonnier'",
             )
-        prepare_flow_domains(
-            self, area_threshold, initial_padding, 0.0,
-            precipitation_reference,
-        )
-        self.freeze_dynamic_carve()
+        area_threshold = float(area_threshold)
+        initial_padding = float(initial_padding)
+        if not math.isfinite(area_threshold) or area_threshold <= 0.0:
+            raise ProgramError("area_threshold must be finite and > 0")
+        if not math.isfinite(initial_padding) or initial_padding < 0.0:
+            raise ProgramError("initial_padding must be finite and >= 0")
+        if precipitation_reference is None:
+            precipitation_reference = 0.0
+        else:
+            precipitation_reference = float(precipitation_reference)
+            if (not math.isfinite(precipitation_reference)
+                    or precipitation_reference <= 0.0):
+                raise ProgramError(
+                    "precipitation_reference must be finite and > 0",
+                )
+        self.flow_area_threshold.set(area_threshold)
+        self.precipitation_reference.set(precipitation_reference)
+        self.river_padding.set(initial_padding)
+        self._prepare_dynamic_seed()
+        edge_steps = int(math.ceil(initial_padding / float(self.dx)))
+        if edge_steps:
+            self._relax_river_distance((edge_steps + 1) // 2)
+        self.mark_river_seed()
         self.initialize_dynamic_domain()
-        scan = getattr(self, "_flow_domain_scan")
+        scan = getattr(self, "_dynamic_domain_scan", None)
+        if scan is None:
+            scan = make_scan(self._be, self._pool, self.nx * self.ny)
+            object.__setattr__(self, "_dynamic_domain_scan", scan)
         count = scan.compact(
             self._handle("dynamic_flags"),
             self._handle("dynamic_active_ids"),
@@ -2785,7 +2353,7 @@ def build_graphflood_program() -> type:
         object.__setattr__(self, "_dynamic_residual_valid", False)
         object.__setattr__(self, "_dynamic_activity_valid", False)
         object.__setattr__(self, "_dynamic_activity_initialized", False)
-        self.refresh_band_boundary()
+        self._refresh_dynamic_boundary()
         count = int(self.dynamic_active_count.read())
         _bind_dynamic_domain(self, count, self._dynamic_domain_view)
         if count:
@@ -2816,35 +2384,9 @@ def build_graphflood_program() -> type:
             if transient is not None:
                 for step in ("topology", "outflow", "limit"):
                     transient.swap(step + ".work_ids", view)
-            topology = self._states["build_dynamic_topology_optimised"].compiled
-            if topology is not None:
-                topology.swap("work_ids", view)
             if old_view is not None:
                 old_view.destroy()
         self.work_count.set(self._dynamic_work_count)
-
-    def run_dynamic_n_step_analytical_optimised(self, n):
-        """Solve with frozen Cordonnier correction and local halo topology."""
-        n = int(n)
-        if n < 1:
-            raise ProgramError("n must be >= 1")
-        if getattr(self, "_dynamic_domain_view", None) is None:
-            raise ProgramError("call prepare_dynamic_flow_domain() first")
-        object.__setattr__(self, "_dynamic_residual_valid", False)
-        object.__setattr__(self, "_dynamic_activity_valid", False)
-        object.__setattr__(self, "_dynamic_activity_initialized", False)
-        count = int(self.dynamic_active_count.read())
-        if not count:
-            object.__setattr__(self, "_dynamic_residual_valid", True)
-            return
-        _bind_dynamic_domain(self, count, self._dynamic_domain_view)
-        _ensure_dynamic_work(self)
-        self._ensure_compiled("build_dynamic_topology_optimised")
-        self._states["build_dynamic_topology_optimised"].compiled.swap(
-            "work_ids", self._dynamic_work_view,
-        )
-        self._run_dynamic_analytical_optimised(n)
-        object.__setattr__(self, "_dynamic_residual_valid", True)
 
     def run_dynamic_n_step_transient(self, n):
         """Run fixed-dt local transient transport on the dynamic domain."""
@@ -2887,29 +2429,15 @@ def build_graphflood_program() -> type:
     base_close = program.close
 
     def close(self):
-        scan = getattr(self, "_active_scan", None)
-        if scan is not None:
-            scan.close()
-            object.__setattr__(self, "_active_scan", None)
-        work_scan = getattr(self, "_work_scan", None)
-        if work_scan is not None:
-            work_scan.close()
-            object.__setattr__(self, "_work_scan", None)
-        domain_scan = getattr(self, "_flow_domain_scan", None)
+        domain_scan = getattr(self, "_dynamic_domain_scan", None)
         if domain_scan is not None:
             domain_scan.close()
-            object.__setattr__(self, "_flow_domain_scan", None)
+            object.__setattr__(self, "_dynamic_domain_scan", None)
         dynamic_work_scan = getattr(self, "_dynamic_work_scan", None)
         if dynamic_work_scan is not None:
             dynamic_work_scan.close()
             object.__setattr__(self, "_dynamic_work_scan", None)
         base_close(self)
-        for view in getattr(self, "_compact_domain_views", ()):
-            view.destroy()
-        object.__setattr__(self, "_compact_domain_views", ())
-        for view in getattr(self, "_flow_domain_views", {}).values():
-            view.destroy()
-        object.__setattr__(self, "_flow_domain_views", {})
         dynamic_view = getattr(self, "_dynamic_domain_view", None)
         if dynamic_view is not None:
             dynamic_view.destroy()
@@ -2919,17 +2447,8 @@ def build_graphflood_program() -> type:
             dynamic_work_view.destroy()
         object.__setattr__(self, "_dynamic_work_view", None)
 
-    program.prepare_distance_sweep = prepare_distance_sweep
-    program.set_active_band = set_active_band
-    program.prepare_flow_domains = prepare_flow_domains
-    program.select_flow_domain = select_flow_domain
-    program.run_hillslope_n_step_analytical = run_hillslope_n_step_analytical
-    program.run_river_n_step_analytical = run_river_n_step_analytical
     program.prepare_dynamic_flow_domain = prepare_dynamic_flow_domain
     program.run_dynamic_n_step_analytical = run_dynamic_n_step_analytical
-    program.run_dynamic_n_step_analytical_optimised = (
-        run_dynamic_n_step_analytical_optimised
-    )
     program.run_dynamic_n_step_transient = run_dynamic_n_step_transient
     program.grow_dynamic_flow_domain = grow_dynamic_flow_domain
     program.grow_dynamic_flow_domain_analytical = grow_dynamic_flow_domain
