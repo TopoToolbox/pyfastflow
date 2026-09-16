@@ -138,6 +138,8 @@ with GraphFloodProgram(backend, nx=nx, ny=ny, dx=dx) as flood:
 `run_n_step_analytical()` replaces its explicit depth update with either the
 local or bottom-up analytical inversion, and `run_n_step_transient()` performs
 conservative local MFD transport on the unconditioned hydraulic surface.
+`run_n_step_hybrid()` blends the previous `Qi` with Manning `Qo` through
+`hybrid_theta`; `run_active_n_step_hybrid()` applies it to the compact band.
 Stationary steps can use rank-gated, filled, or carved Cordonnier routing, or
 reconstruction plus epsilon ordering through `mfd_local_minima`.
 For ordered regional relaxation, call `prepare_distance_sweep()`, select
