@@ -71,6 +71,9 @@ transports on the same list and a one-cell halo using fixed ``transient_dt``;
 ``grow_dynamic_flow_domain_transient(...)`` expands it from accumulated
 ``sum(abs(Δh))`` and resets that activity after each check. Both growth paths
 also require depth above the hillslope cap. Zero growth is not convergence.
+``run_dynamic_n_step_analytical_optimised(n)`` freezes the initial Cordonnier
+correction and exterior boundary flux, updating only local links and depths;
+it is an approximate alternative to the full dynamic analytical path.
 """
 
 import math
@@ -643,6 +646,89 @@ def _carve_topology_factory(be, bundles, config):
             .step("effective_slope", effective_slope)
             .step("indegree_reset", reset).step("indegree_count", count)
             .freeze())
+
+
+def _freeze_dynamic_carve_factory(be, _bundles, config):
+    _cupy_only(be)
+    n = config["nx"] * config["ny"]
+    return KernelBuilder(
+        f'''extern "C" __global__ void graphflood_freeze_dynamic_carve(
+                const float* surface, const double* hydraulic_surface,
+                const int* rank, double* offset, int* frozen_rank) {{
+            int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i >= {n}) return;
+            offset[i] = (double)surface[i] - hydraulic_surface[i];
+            frozen_rank[i] = rank[i];
+        }}''', domain=n,
+    ).freeze()
+
+
+def _dynamic_carve_topology_factory(be, bundles, config):
+    """Rebuild MFD and Manning slopes only on active cells plus one halo."""
+    _cupy_only(be)
+    nk = 8 if config["topology"] == "D8" else 4
+    weight_type = "unsigned char" if config["quantized_weight"] else "float"
+    max_update = "if (score > max_score) max_score = score;" if config["quantized_weight"] else ""
+    max_decl = "float max_score = 0.0f;" if config["quantized_weight"] else ""
+    weight_write = (
+        "weights[i * nk + k] = scores[k] > 0.0f "
+        "? (unsigned char)max(1, __float2int_rn("
+        "255.0f * scores[k] / max_score)) : 0;"
+        if config["quantized_weight"] else
+        "weights[i * nk + k] = sum_score > 0.0f "
+        "? scores[k] / sum_score : 0.0f;"
+    )
+    return KernelBuilder(
+        f'''extern "C" __global__ void graphflood_dynamic_carve_topology(
+                const int* work_ids, const float* z, const float* h,
+                const double* offset, const int* rank,
+                unsigned char* dirs, {weight_type}* weights,
+                float* steepest_slope, float* flow_width) {{
+            int p = blockIdx.x * blockDim.x + threadIdx.x;
+            if (p >= $ctx.WORK_COUNT.get(0)$) return;
+            int i = work_ids[p];
+            int nk = {nk};
+            float scores[8];
+            for (int k = 0; k < 8; ++k) scores[k] = 0.0f;
+            unsigned char mask = 0u;
+            float sum_score = 0.0f;
+            {max_decl}
+            double best_slope = 0.0;
+            float best_width = $ctx.grid.DX.get(0)$;
+            if (!$ctx.grid.nodata(i)$ && !$ctx.grid.can_out(i)$) {{
+                double physical = (double)z[i] + (double)h[i];
+                float zi = (float)(physical + offset[i]);
+                float ulp = nextafterf(zi, 1.0e30f) - zi;
+                for (int k = 0; k < {nk}; ++k) {{
+                    int j = $ctx.grid.neighbour(i, k)$;
+                    if (j == -1) continue;
+                    double physical_j = (double)z[j] + (double)h[j];
+                    float zj = (float)(physical_j + offset[j]);
+                    float drop = zi > zj ? zi - zj : 0.0f;
+                    if (drop == 0.0f && zi == zj && rank[i] > rank[j])
+                        drop = ulp * (float)(rank[i] - rank[j]);
+                    if (drop <= 0.0f) continue;
+                    mask |= (unsigned char)(1u << k);
+                    float score = drop;
+                    scores[k] = score;
+                    sum_score += score;
+                    {max_update}
+                    double width = (double)$ctx.grid.dist_from_k(k)$;
+                    double slope = (physical - physical_j) / width;
+                    if (slope > best_slope) {{
+                        best_slope = slope;
+                        best_width = (float)width;
+                    }}
+                }}
+            }}
+            for (int k = 0; k < {nk}; ++k) {{ {weight_write} }}
+            dirs[i] = mask;
+            steepest_slope[i] = best_slope > 0.0
+                ? (float)best_slope
+                : fmaxf($ctx.CARVE_SLOPE.get(i)$, 1.0e-12f);
+            flow_width[i] = best_width;
+        }}''', domain="work_ids",
+    ).compose("grid", bundles["grid"]).freeze()
 
 
 def _reconstructed_topology_factory(be, bundles, config):
@@ -1996,6 +2082,8 @@ def build_graphflood_program() -> type:
     b.data("river_distance_work", "f32", shape, role="internal")
     b.data("analytical_residual", "f32", shape, role="output")
     b.data("transient_activity", "f32", shape, role="output")
+    b.data("frozen_carve_offset", "f64", shape, role="internal")
+    b.data("frozen_carve_rank", "i32", shape, role="internal")
 
     def grid_structure(be, *, topology, boundary, outlet, nodata, **_):
         _cupy_only(be)
@@ -2150,6 +2238,20 @@ def build_graphflood_program() -> type:
           bind=_filled_topology_plan)
     b.add("build_carve_topology", _carve_topology_factory,
           bind=_carve_topology_plan)
+    b.add("freeze_dynamic_carve", _freeze_dynamic_carve_factory,
+          bind={
+              "surface": "surface", "hydraulic_surface": "hydraulic_surface",
+              "rank": "rank", "offset": "frozen_carve_offset",
+              "frozen_rank": "frozen_carve_rank",
+          })
+    b.add("build_dynamic_topology_optimised", _dynamic_carve_topology_factory,
+          bind=lambda f, be: _grid_leaf_plan(f, {
+              "work_ids": "dynamic_work_ids", "WORK_COUNT": "work_count",
+              "z": "z", "h": "h", "offset": "frozen_carve_offset",
+              "rank": "frozen_carve_rank", "dirs": "directions",
+              "weights": "weights", "steepest_slope": "steepest_slope",
+              "flow_width": "flow_width", "CARVE_SLOPE": "carve_slope_min",
+          }))
     b.add("build_reconstructed_topology", _reconstructed_topology_factory,
           bind=_reconstructed_topology_plan)
     b.dispatch("build_topology", on="mfd_local_minima", cases={
@@ -2355,6 +2457,10 @@ def build_graphflood_program() -> type:
         "resolve_minima", "prepare_active_mfd_surface",
         "refresh_hydraulic_surface", "build_topology",
         "accumulate_active", "update_dynamic_depth_analytical",
+    ))
+    b.pipeline("_run_dynamic_analytical_optimised", (
+        "build_dynamic_topology_optimised", "accumulate_active",
+        "update_dynamic_depth_analytical",
     ))
     b.pipeline("run_active_n_step_transient", (
         "make_surface", "transport_active_transient",
@@ -2589,6 +2695,7 @@ def build_graphflood_program() -> type:
             self, area_threshold, initial_padding, 0.0,
             precipitation_reference,
         )
+        self.freeze_dynamic_carve()
         self.initialize_dynamic_domain()
         scan = getattr(self, "_flow_domain_scan")
         count = scan.compact(
@@ -2685,22 +2792,8 @@ def build_graphflood_program() -> type:
             self._run_dynamic_active_batch(n)
         object.__setattr__(self, "_dynamic_residual_valid", True)
 
-    def run_dynamic_n_step_transient(self, n):
-        """Run fixed-dt local transient transport on the dynamic domain."""
-        n = int(n)
-        if n < 1:
-            raise ProgramError("n must be >= 1")
-        if getattr(self, "_dynamic_domain_view", None) is None:
-            raise ProgramError("call prepare_dynamic_flow_domain() first")
-
-        count = int(self.dynamic_active_count.read())
-        if not count:
-            return
-        object.__setattr__(self, "_dynamic_residual_valid", False)
-        if not getattr(self, "_dynamic_activity_initialized", False):
-            self.clear_dynamic_activity()
-            object.__setattr__(self, "_dynamic_activity_initialized", True)
-        self.active_count.set(count)
+    def _ensure_dynamic_work(self):
+        """Compact the active list plus one-cell halo only after growth."""
         if getattr(self, "_dynamic_work_dirty", True):
             self.mark_dynamic_work()
             scan = getattr(self, "_dynamic_work_scan", None)
@@ -2719,17 +2812,62 @@ def build_graphflood_program() -> type:
             object.__setattr__(self, "_dynamic_work_view", view)
             object.__setattr__(self, "_dynamic_work_count", work_count)
             object.__setattr__(self, "_dynamic_work_dirty", False)
-        else:
-            old_view = None
-
+            transient = self._states["transport_dynamic_transient"].compiled
+            if transient is not None:
+                for step in ("topology", "outflow", "limit"):
+                    transient.swap(step + ".work_ids", view)
+            topology = self._states["build_dynamic_topology_optimised"].compiled
+            if topology is not None:
+                topology.swap("work_ids", view)
+            if old_view is not None:
+                old_view.destroy()
         self.work_count.set(self._dynamic_work_count)
+
+    def run_dynamic_n_step_analytical_optimised(self, n):
+        """Solve with frozen Cordonnier correction and local halo topology."""
+        n = int(n)
+        if n < 1:
+            raise ProgramError("n must be >= 1")
+        if getattr(self, "_dynamic_domain_view", None) is None:
+            raise ProgramError("call prepare_dynamic_flow_domain() first")
+        object.__setattr__(self, "_dynamic_residual_valid", False)
+        object.__setattr__(self, "_dynamic_activity_valid", False)
+        object.__setattr__(self, "_dynamic_activity_initialized", False)
+        count = int(self.dynamic_active_count.read())
+        if not count:
+            object.__setattr__(self, "_dynamic_residual_valid", True)
+            return
+        _bind_dynamic_domain(self, count, self._dynamic_domain_view)
+        _ensure_dynamic_work(self)
+        self._ensure_compiled("build_dynamic_topology_optimised")
+        self._states["build_dynamic_topology_optimised"].compiled.swap(
+            "work_ids", self._dynamic_work_view,
+        )
+        self._run_dynamic_analytical_optimised(n)
+        object.__setattr__(self, "_dynamic_residual_valid", True)
+
+    def run_dynamic_n_step_transient(self, n):
+        """Run fixed-dt local transient transport on the dynamic domain."""
+        n = int(n)
+        if n < 1:
+            raise ProgramError("n must be >= 1")
+        if getattr(self, "_dynamic_domain_view", None) is None:
+            raise ProgramError("call prepare_dynamic_flow_domain() first")
+
+        count = int(self.dynamic_active_count.read())
+        if not count:
+            return
+        object.__setattr__(self, "_dynamic_residual_valid", False)
+        if not getattr(self, "_dynamic_activity_initialized", False):
+            self.clear_dynamic_activity()
+            object.__setattr__(self, "_dynamic_activity_initialized", True)
+        self.active_count.set(count)
+        _ensure_dynamic_work(self)
         self._ensure_compiled("transport_dynamic_transient")
         transport = self._states["transport_dynamic_transient"].compiled
         for step in ("topology", "outflow", "limit"):
             transport.swap(step + ".work_ids", self._dynamic_work_view)
         transport.swap("update.active_ids", self._dynamic_domain_view)
-        if old_view is not None:
-            old_view.destroy()
         self._run_dynamic_transient(n)
         object.__setattr__(self, "_dynamic_activity_valid", True)
 
@@ -2789,6 +2927,9 @@ def build_graphflood_program() -> type:
     program.run_river_n_step_analytical = run_river_n_step_analytical
     program.prepare_dynamic_flow_domain = prepare_dynamic_flow_domain
     program.run_dynamic_n_step_analytical = run_dynamic_n_step_analytical
+    program.run_dynamic_n_step_analytical_optimised = (
+        run_dynamic_n_step_analytical_optimised
+    )
     program.run_dynamic_n_step_transient = run_dynamic_n_step_transient
     program.grow_dynamic_flow_domain = grow_dynamic_flow_domain
     program.grow_dynamic_flow_domain_analytical = grow_dynamic_flow_domain
