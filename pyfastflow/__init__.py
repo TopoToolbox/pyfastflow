@@ -29,6 +29,7 @@ _LAZY_SUBMODULES = [
     "grid",
     "noise",
     "flow",
+    "flood",
     "graphflood",
     "ops",
     "visu",

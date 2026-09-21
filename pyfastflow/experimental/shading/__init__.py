@@ -1,5 +1,5 @@
-"""Experimental terrain-shading Programs."""
+"""Compatibility imports for the promoted hillshade Program."""
 
-from .hillshade import HillshadeProgram, build_hillshade_program
+from pyfastflow.visu import HillshadeProgram, build_hillshade_program
 
 __all__ = ["HillshadeProgram", "build_hillshade_program"]

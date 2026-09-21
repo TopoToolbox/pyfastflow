@@ -24,6 +24,8 @@ class Dim:
     def __init__(self, name): self.name = name
     def __mul__(self, other): return _Prod((self, other))
     def __rmul__(self, other): return _Prod((other, self))
+    def __add__(self, other): return _Sum((self, other))
+    def __radd__(self, other): return _Sum((other, self))
     def __repr__(self): return f"Dim({self.name!r})"
 
 
@@ -35,9 +37,23 @@ class _Prod:
     def __rmul__(self, other): return _Prod((other,) + self.factors)
 
 
+class _Sum:
+    """A symbolic sum used by staggered-grid Program storage shapes."""
+    __slots__ = ("terms",)
+    def __init__(self, terms):
+        self.terms = tuple(
+            x for term in terms
+            for x in (term.terms if isinstance(term, _Sum) else (term,))
+        )
+    def __add__(self, other): return _Sum(self.terms + (other,))
+    def __radd__(self, other): return _Sum((other,) + self.terms)
+    def __repr__(self): return " + ".join(repr(x) for x in self.terms)
+
+
 def _axis_names(axis):
     if isinstance(axis, Dim): return {axis.name}
     if isinstance(axis, _Prod): return set().union(*(_axis_names(x) for x in axis.factors))
+    if isinstance(axis, _Sum): return set().union(*(_axis_names(x) for x in axis.terms))
     if isinstance(axis, int): return set()
     raise ProgramBuilderError(f"shape axis must be a Dim, product, or int; got {type(axis).__name__}")
 
@@ -48,11 +64,21 @@ def _resolve_axis(axis, dims):
         n = 1
         for x in axis.factors: n *= _resolve_axis(x, dims)
         return n
+    if isinstance(axis, _Sum):
+        return sum(_resolve_axis(x, dims) for x in axis.terms)
     if isinstance(axis, int): return axis
     raise ProgramError(f"invalid shape axis {axis!r}")
 
 
 def _resolve_shape(shape, dims): return tuple(_resolve_axis(x, dims) for x in shape)
+
+
+def _spec_shape(spec, config, dims):
+    """Resolve a fixed symbolic shape or a configuration-selected shape."""
+    shape = spec.shape
+    if callable(shape):
+        shape = shape({**config, **dims})
+    return tuple(_resolve_axis(axis, dims) for axis in shape)
 
 
 @dataclass(frozen=True)
@@ -115,7 +141,10 @@ class ProgramBuilder:
         if not callable(dtype) and dtype not in _NP_DTYPES: raise ProgramBuilderError(f"{name!r}: unsupported dtype {dtype!r}")
         if lifetime not in ("persistent", "temp"): raise ProgramBuilderError(f"{name!r}: lifetime must be persistent or temp")
         if shape_source and lifetime == "temp": raise ProgramBuilderError(f"{name!r}: temp data cannot be a shape source")
-        self._data[name] = _DataSpec(name, dtype, tuple(shape), lifetime, role, flat, shape_source); return self
+        if shape_source and callable(shape):
+            raise ProgramBuilderError(f"{name!r}: shape-source data cannot have a callable shape")
+        normalized_shape = shape if callable(shape) else tuple(shape)
+        self._data[name] = _DataSpec(name, dtype, normalized_shape, lifetime, role, flat, shape_source); return self
 
     def bundle(self, name, structure, params, *, dims=(), config=()):
         self._bundles[name] = _BundleSpec(name, structure, params, tuple(dims), tuple(config)); return self
@@ -143,6 +172,8 @@ class ProgramBuilder:
             if not name.isidentifier(): raise ProgramBuilderError(f"config name {name!r} is not an identifier")
             if name in seen and seen[name] != "dim": raise ProgramBuilderError(f"name {name!r} declared twice ({seen[name]}, config)")
         for spec in list(self._params.values()) + list(self._data.values()):
+            if callable(spec.shape):
+                continue
             unknown = set().union(*(_axis_names(a) for a in spec.shape)) - dimset
             if unknown: raise ProgramBuilderError(f"{spec.name!r}: undeclared dims {sorted(unknown)}")
             if spec.shape_source and any(not isinstance(a, (Dim, int)) for a in spec.shape): raise ProgramBuilderError(f"{spec.name!r}: shape-source axes must be bare Dim or int")
@@ -300,12 +331,14 @@ class _Program:
     def _host_shape(self, name):
         self._check_open()
         if not self._allocated: raise ProgramError("shapes are unresolved")
-        return _resolve_shape(self._spec(name).shape, self._dim_vals)
+        return _spec_shape(self._spec(name), self._config, self._dim_vals)
     def _device_shape(self, spec):
-        shape = _resolve_shape(spec.shape, self._dim_vals)
+        shape = _spec_shape(spec, self._config, self._dim_vals)
         return (int(np.prod(shape)),) if spec.flat else shape
     def _bind_source_dims(self, name, arr):
         spec = self._spec(name)
+        if callable(spec.shape):
+            raise ProgramError(f"{name!r}: callable shape cannot bind dimensions")
         if len(arr.shape) != len(spec.shape): raise ProgramError(f"{name!r}: source rank mismatch")
         for axis, size in zip(spec.shape, arr.shape):
             if isinstance(axis, int):

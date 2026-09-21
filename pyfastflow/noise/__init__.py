@@ -149,3 +149,6 @@ def make_noise_parameters(
         "OCTAVES": octaves_p,
         "PERSISTENCE": persistence_p,
     }
+
+
+from .perlin import PerlinNoiseProgram, build_perlin_noise_program

@@ -11,7 +11,7 @@ from importlib import import_module
 from ..core import Backend, HostBlockBuilder, SequenceBuilder, require_backend
 from ..noise import make_hash_u32
 
-_MODES = frozenset({"steepest", "stochastic"})
+_MODES = frozenset({"steepest", "stochastic", "slope_weighted_fixed"})
 _ACCUM_METHODS = frozenset({"atomic", "rake_compress", "pointer_jump_push"})
 _MFD_TOPOLOGY_METHODS = frozenset(
     {"surface", "cordonnier_rank", "cordonnier_fill"}
@@ -40,7 +40,8 @@ def make_receivers(
 ) -> dict:
     """Return a receiver-routing kernel and its helpers.
 
-    ``mode`` selects steepest-descent or stochastic routing.  Set
+    ``mode`` selects steepest, randomized score, or fixed slope-weighted
+    categorical routing. Set
     ``h_aware`` to route on ``z + h``; choose D4 or D8 topology.
 
     Parameters
@@ -51,7 +52,7 @@ def make_receivers(
         Grid topology helpers.
     topology : {"D4", "D8"}
         Neighbourhood used for routing.
-    mode : {"steepest", "stochastic"}
+    mode : {"steepest", "stochastic", "slope_weighted_fixed"}
         Receiver selection rule.
     diagonal_partition_correction : bool
         Apply diagonal-distance correction on D8 grids.
@@ -70,7 +71,7 @@ def make_receivers(
 
     be = require_backend(be)
     blocks = _blocks_for(be, "receivers")
-    hash_u32 = make_hash_u32(be) if mode == "stochastic" else None
+    hash_u32 = make_hash_u32(be) if mode != "steepest" else None
 
     if be.family == "closure":
         backend_mod = be.module
@@ -857,3 +858,7 @@ def _build_fill_reconstruct_sequence(
     sb.loop(body=["zero_active", "relax", "bump_pass"], max_times=int(max_passes), until="converged")
 
     return sb.freeze(), {"P": pass_p, "ACTIVE": active_p}
+
+
+from .sfd import SFDFlowProgram, build_sfd_flow_program
+from .mfd import MFDFlowProgram, build_mfd_flow_program

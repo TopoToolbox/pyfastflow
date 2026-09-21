@@ -42,14 +42,14 @@ selected backend, topology, parameter layout, and algorithm.
 
 ## Quick start: a complete flow Program
 
-The experimental CuPy Programs provide the shortest route from a DEM to SFD
+The CuPy Programs provide the shortest route from a DEM to SFD
 drainage accumulation:
 
 ```python
 import numpy as np
 
 from pyfastflow.core import Backend
-from pyfastflow.experimental.programs.flow import SFDFlowProgram
+from pyfastflow.flow import SFDFlowProgram
 
 ny = nx = 1024
 dem = np.random.default_rng(42).random((ny, nx), dtype=np.float32)
@@ -117,11 +117,11 @@ MFD Programs use max-normalized `uint8` routing scores by default. Pass
 are normalized by their integer sum during accumulation, so the quantized path
 still partitions the complete discharge at every node.
 
-The experimental CuPy `GraphFloodProgram` combines local-minimum conditioning,
+The CuPy `GraphFloodProgram` combines local-minimum conditioning,
 persistent MFD accumulation, and a Manning depth update:
 
 ```python
-from pyfastflow.experimental.programs.graphflood import GraphFloodProgram
+from pyfastflow.graphflood import GraphFloodProgram
 
 with GraphFloodProgram(backend, nx=nx, ny=ny, dx=dx) as flood:
     flood.z.from_numpy(dem.astype("float32"))
@@ -182,8 +182,8 @@ immediately after all relevant Programs have closed, the application can call
   over a Cordonnier-carved receiver graph without topographic filling.
 - **Local minima:** Cordonnier basin labelling with carve or jump rerouting,
   plus fill-and-reconstruct solvers.
-- **Hydraulics:** GraphFlood SFD, unstable flow, and CuPy MFD variants, with
-  configurable friction laws and outlet behaviour.
+- **Hydraulics:** GraphFlood with MFD routing, local-minimum conditioning,
+  stationary and transient depth updates.
 - **Terrain and utilities:** white/Perlin noise, hillshading, elementwise
   operations, scan, reduction, and reusable math/bit-packing helpers.
 
@@ -298,7 +298,7 @@ Useful starting points:
   and
   [`examples/flow_acc_sfd_lm_raw_quadrants.py`](./examples/flow_acc_sfd_lm_raw_quadrants.py):
   hard-coded baselines for measuring the cost of the machinery;
-- [`examples/core/graphflood`](./examples/core/graphflood): GraphFlood examples;
+- [`examples/graphflood`](./examples/graphflood): GraphFlood program examples;
 - [`examples/core/lem`](./examples/core/lem): landscape-evolution examples.
 
 ## License and authors

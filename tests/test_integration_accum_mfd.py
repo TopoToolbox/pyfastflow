@@ -82,7 +82,7 @@ def test_accum_mfd(boundary, nodata, custom_outlet):
         make_mfd_topology,
     )
     from pyfastflow.flow._cupy_mfd_accum import init_frontier_mfd
-    from pyfastflow.graphflood import _cupy_reconstruct_epsilon
+    from pyfastflow.flow import _cupy_reconstruct_epsilon
     from pyfastflow.grid import make_grid_group, make_grid_parameters
 
     bk = Backend.from_name("cupy")

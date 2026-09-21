@@ -113,9 +113,9 @@ def build_receivers(
     ----------
     grid : FrozenGroup
     hash_u32 : FrozenHelper
-        Required, and only used, when mode="stochastic".
+        Required for randomized modes.
     mode : str
-        "steepest" or "stochastic".
+        "steepest", "stochastic", or "slope_weighted_fixed".
     topology : str
         "D4" or "D8".
     diagonal_partition_correction : bool
@@ -130,9 +130,10 @@ def build_receivers(
     out = build_distance_slope_helpers(grid, topology=topology, diagonal_partition_correction=diagonal_partition_correction)
     slope = out["slope_from_values_k"]
 
-    if mode == "stochastic":
+    if mode in ("stochastic", "slope_weighted_fixed"):
         rand_unit = build_rand_unit(hash_u32)
         out["rand_unit"] = rand_unit
+    if mode == "stochastic":
         stochastic_insert = """
                         if (tsr > 0.0f) {
                             tsr = $ctx.rand_unit(i, k)$ * sqrtf(tsr);
@@ -148,17 +149,30 @@ def build_receivers(
         args = "const float* z, int* rec"
         slope_call = "$ctx.slope(z[i], 0.0f, z[j], 0.0f, k)$"
 
-    body = f"""
-extern "C" __global__ void {t}_receivers({args}) {{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int n = $ctx.grid.NX.get(0)$ * $ctx.grid.NY.get(0)$;
-    if (i >= n) return;
-
-    if ($ctx.grid.can_out(i)$) {{
-        rec[i] = i;
-        return;
+    if mode == "slope_weighted_fixed":
+        selection = f"""
+    float total = 0.0f;
+    int nk = $ctx.grid.N_NEIGHBOURS.get(0)$;
+    for (int k = 0; k < nk; ++k) {{
+        int j = $ctx.grid.neighbour(i, k)$;
+        if (j != -1) total += fmaxf({slope_call}, 0.0f);
     }}
-
+    if (total <= 0.0f) {{ rec[i] = i; return; }}
+    float draw = $ctx.rand_unit(i, 0)$ * total;
+    int selected = i;
+    for (int k = 0; k < nk; ++k) {{
+        int j = $ctx.grid.neighbour(i, k)$;
+        if (j == -1) continue;
+        float weight = fmaxf({slope_call}, 0.0f);
+        if (weight <= 0.0f) continue;
+        selected = j;
+        if (draw < weight) break;
+        draw -= weight;
+    }}
+    rec[i] = selected;
+"""
+    else:
+        selection = f"""
     int r = i;
     float sr = 0.0f;
     int nk = $ctx.grid.N_NEIGHBOURS.get(0)$;
@@ -174,6 +188,20 @@ extern "C" __global__ void {t}_receivers({args}) {{
         r = better ? j : r;
     }}
     rec[i] = r;
+"""
+
+    body = f"""
+extern "C" __global__ void {t}_receivers({args}) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int n = $ctx.grid.NX.get(0)$ * $ctx.grid.NY.get(0)$;
+    if (i >= n) return;
+
+    if ($ctx.grid.can_out(i)$) {{
+        rec[i] = i;
+        return;
+    }}
+
+{selection}
 }}
 """
 
@@ -183,7 +211,7 @@ extern "C" __global__ void {t}_receivers({args}) {{
         kb.param(name)
     kb.compose("grid", grid)
     kb.compose("slope", slope)
-    if mode == "stochastic":
+    if mode in ("stochastic", "slope_weighted_fixed"):
         kb.compose("rand_unit", out["rand_unit"])
 
     for name in grid_param_names:

@@ -1,5 +1,5 @@
-"""Experimental procedural-noise Programs."""
+"""Compatibility imports for the promoted noise Program."""
 
-from .perlin import PerlinNoiseProgram, build_perlin_noise_program
+from pyfastflow.noise import PerlinNoiseProgram, build_perlin_noise_program
 
 __all__ = ["PerlinNoiseProgram", "build_perlin_noise_program"]

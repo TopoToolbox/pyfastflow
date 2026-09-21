@@ -117,7 +117,11 @@ def _insert_locals(body: str, local_ptrs: dict[int, dict], local_index: dict[int
     """
     if not local_ptrs:
         return body
-    idx = body.find("{")
+    # A CUDA source template may place reusable ``__device__`` helpers before
+    # its entry kernel.  Parameters referenced by the entry kernel must be
+    # declared in that kernel's scope, not in the first helper body.
+    kernel = re.search(r"__global__\s+void\s+\w+\s*\([^)]*\)\s*\{", body, re.S)
+    idx = body.find("{", kernel.start()) if kernel is not None else body.find("{")
     if idx == -1:
         raise ValueError("could not find a function body to insert parameter locals into")
     decls = "".join(

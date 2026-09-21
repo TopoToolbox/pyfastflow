@@ -80,7 +80,7 @@ def build_basin_id_init(*, grid, n_flat: int):
 __global__ void {t}_basin_id_init(int* bid) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
-    bid[i] = $ctx.grid.can_out(i)$ ? 0 : (i + 1);
+    bid[i] = ($ctx.grid.nodata(i)$ || $ctx.grid.can_out(i)$) ? 0 : (i + 1);
 }}
 """, domain=n_flat)
         .compose("grid", grid)
@@ -348,6 +348,11 @@ def build_saddlesort(*, grid, bitpack, n_flat: int):
 __global__ void {t}_border_zprime(const int* bid, const float* z, float* z_prime, unsigned char* is_border) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
+    if ($ctx.grid.nodata(i)$) {{
+        is_border[i] = 0;
+        z_prime[i] = 1e9f;
+        return;
+    }}
     if ($ctx.grid.can_out(i)$) {{
         z_prime[i] = z[i];
         return;

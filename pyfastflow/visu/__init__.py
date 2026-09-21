@@ -158,3 +158,6 @@ def make_hillshade_kernel(be: Backend, hillshade_group: FrozenGroup) -> FrozenKe
     if be.family == "cupy":
         return blocks.build_kernel(hillshade_group)
     return blocks.build_kernel(hillshade_group, backend=be.name)
+
+
+from .hillshade import HillshadeProgram, build_hillshade_program
