@@ -36,7 +36,7 @@ def init_frontier_mfd(indegree_data, frontier_data) -> int:
     Host-side frontier compaction: writes the flat indices of every cell
     with indegree 0 into the front of `frontier_data` (a raw cupy ndarray,
     e.g. a DataHandle's `.array`) and returns how many there were - the
-    `count[p]` the caller must then store before the first launch.
+    `count[0]` the caller must then store before the first launch.
 
     Plain cupy indexing, not a kernel: `cp.nonzero` has no equivalent
     device-side primitive this package's span/template mechanism reaches,
@@ -81,9 +81,11 @@ def build_persistent_mfd(
     docstring). Both are bare FrozenKernels, not a Sequence - "q_init" is
     one ordinary n_flat-sized launch, "accum" is one persistent launch on
     `persistent_grid_block(...)`'s dims; there is no per-round host loop to
-    sequence, unlike rake_compress/pointer_jump_push. A caller `.build()`s
-    each, binds "q_init"'s `SOURCE` PARAM slot and both kernels' composed
-    `grid`, then calls `.compile()` on each. The q-init kernel declares an
+    sequence, unlike rake_compress/pointer_jump_push. `count` holds three
+    ints: the caller stores the initial frontier size in `count[0]` and zero
+    in `count[1]`; the kernel clears `count[2]` itself before first use. A
+    caller `.build()`s each, binds "q_init"'s `SOURCE` PARAM slot and both
+    kernels' composed `grid`, then calls `.compile()` on each. The q-init kernel declares an
     n_flat-sized domain; the accumulation kernel stores
     `persistent_grid_block(blocks_per_sm=..., threads=...)` as its fixed
     resident domain, so callers never pass launch dimensions.
@@ -153,13 +155,22 @@ extern "C" __global__ void {t}_persistent_mfd(
     __shared__ int s_buf[{fr_stage}];
     __shared__ int s_n;
     __shared__ unsigned int s_base;
+    __shared__ int s_size;
 
     int* frontiers[2] = {{ frontier0, frontier1 }};
     int p = 0;
     unsigned int level = 0;
 
+    // Three rotating counters: level L reads count[L % 3], pushes into
+    // count[(L + 1) % 3] and clears count[(L + 2) % 3], which no block
+    // touches during level L. A counter is never cleared while a block that
+    // has not yet read it could still be waking up from the last barrier.
     while (true) {{
-        int size_in = *((volatile int*)&count[p]);
+        int* c_in  = &count[level % 3];
+        int* c_out = &count[(level + 1) % 3];
+        if (threadIdx.x == 0) s_size = *((volatile int*)c_in);
+        __syncthreads();
+        int size_in = s_size;
         if (size_in == 0) break;
         int* fin  = frontiers[p];
         int* fout = frontiers[1 - p];
@@ -190,7 +201,7 @@ extern "C" __global__ void {t}_persistent_mfd(
                 if (old == 1) {{
                     int sp = atomicAdd(&s_n, 1);
                     if (sp < {fr_stage}) s_buf[sp] = r;
-                    else {{ int pos = atomicAdd(&count[1 - p], 1); fout[pos] = r; }}
+                    else {{ int pos = atomicAdd(c_out, 1); fout[pos] = r; }}
                 }}
             }}
         }}
@@ -198,7 +209,7 @@ extern "C" __global__ void {t}_persistent_mfd(
         __syncthreads();
         int n_flush = min(s_n, {fr_stage});
         if (threadIdx.x == 0)
-            s_base = atomicAdd((unsigned int*)&count[1 - p], (unsigned int)n_flush);
+            s_base = atomicAdd((unsigned int*)c_out, (unsigned int)n_flush);
         __syncthreads();
         for (int i = threadIdx.x; i < n_flush; i += blockDim.x)
             fout[s_base + i] = s_buf[i];
@@ -206,7 +217,10 @@ extern "C" __global__ void {t}_persistent_mfd(
 
         __syncthreads();
         if (threadIdx.x == 0) {{
-            if (blockIdx.x == 0) count[p] = 0;
+            if (blockIdx.x == 0) {{
+                count[(level + 2) % 3] = 0;
+                __threadfence();
+            }}
             unsigned int target = (level + 1) * (unsigned int)gridDim.x;
             atomicAdd(barrier, 1u);
             unsigned int ns = 32;
@@ -327,11 +341,17 @@ def build_persistent_subset_mfd(
                 unsigned int* barrier, const unsigned char* active,
                 const unsigned char* dirs, const {weight_type}* mfd_w,
                 float* accumulation, int* remaining) {{
+            __shared__ int s_size;
             int* frontiers[2] = {{frontier0, frontier1}};
             int phase = 0;
             unsigned int level = 0;
+            // Rotating counters; see build_persistent_mfd.
             while (true) {{
-                int size = *((volatile int*)&count[phase]);
+                int* c_out = &count[(level + 1) % 3];
+                if (threadIdx.x == 0)
+                    s_size = *((volatile int*)&count[level % 3]);
+                __syncthreads();
+                int size = s_size;
                 if (size == 0) break;
                 int tid = blockIdx.x * blockDim.x + threadIdx.x;
                 int stride = gridDim.x * blockDim.x;
@@ -348,7 +368,7 @@ def build_persistent_subset_mfd(
                                   * ({propagation_weight}));
                         __threadfence();
                         if (atomicAdd(&remaining[r], -1) == 1) {{
-                            int out = atomicAdd(&count[1 - phase], 1);
+                            int out = atomicAdd(c_out, 1);
                             frontiers[1 - phase][out] = r;
                         }}
                     }}
@@ -356,7 +376,10 @@ def build_persistent_subset_mfd(
                 __threadfence();
                 __syncthreads();
                 if (threadIdx.x == 0) {{
-                    if (blockIdx.x == 0) count[phase] = 0;
+                    if (blockIdx.x == 0) {{
+                        count[(level + 2) % 3] = 0;
+                        __threadfence();
+                    }}
                     unsigned int target = (level + 1) * gridDim.x;
                     atomicAdd(barrier, 1u);
                     while (*((volatile unsigned int*)barrier) < target) {{

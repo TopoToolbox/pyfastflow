@@ -463,7 +463,7 @@ def run_mfd_cupy():
     accum_h = pool.get_data(f32, (n,))
     frontier0 = pool.get_data(i32, (n,))
     frontier1 = pool.get_data(i32, (n,))
-    count = pool.get_data(i32, (2,))
+    count = pool.get_data(i32, (3,))
     barrier = pool.get_data(np.dtype(np.uint32), (1,))
 
     dirs.array.set(dirs_np)

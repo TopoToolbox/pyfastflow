@@ -212,7 +212,7 @@ def test_accum_mfd(boundary, nodata, custom_outlet):
     accum_h = pool.get_data(f32, (n,))
     frontier0 = pool.get_data(i32, (n,))
     frontier1 = pool.get_data(i32, (n,))
-    count = pool.get_data(i32, (2,))
+    count = pool.get_data(i32, (3,))
     barrier = pool.get_data(u32, (1,))
 
     source_p = Param("SRC", dtype="f32", mode="const", value=1.0, pool=pool)

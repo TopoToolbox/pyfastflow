@@ -83,7 +83,7 @@ mfd_w = pool.get_data(np.float32, (n_flat * N_NEIGHBOURS,))
 indegree = pool.get_data(np.int32, (n_flat,))
 frontier0 = pool.get_data(np.int32, (n_flat,))
 frontier1 = pool.get_data(np.int32, (n_flat,))
-count = pool.get_data(np.int32, (2,))
+count = pool.get_data(np.int32, (3,))
 barrier = pool.get_data(np.uint32, (1,))
 q = pool.get_data(np.float32, (n_flat,))
 

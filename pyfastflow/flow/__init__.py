@@ -11,7 +11,16 @@ from importlib import import_module
 from ..core import Backend, HostBlockBuilder, SequenceBuilder, require_backend
 from ..noise import make_hash_u32
 
-_MODES = frozenset({"steepest", "stochastic", "slope_weighted_fixed"})
+#: Flow neighbourhoods.
+TOPOLOGIES = ("D4", "D8")
+#: Grid edge handling: all edges are outlets, or periodic east-west / north-south.
+BOUNDARIES = ("normal", "periodic_EW", "periodic_NS")
+#: Receiver selection rules of make_receivers.
+RECEIVER_MODES = ("steepest", "stochastic", "slope_weighted_fixed")
+#: Local-minima handling of the SFD flow program.
+LOCAL_MINIMA = ("none", "reconstruct_epsilon", "cordonnier_carve", "cordonnier_jump")
+
+_MODES = frozenset(RECEIVER_MODES)
 _ACCUM_METHODS = frozenset({"atomic", "rake_compress", "pointer_jump_push"})
 _MFD_TOPOLOGY_METHODS = frozenset(
     {"surface", "cordonnier_rank", "cordonnier_fill"}
@@ -66,8 +75,8 @@ def make_receivers(
     """
     if mode not in _MODES:
         raise ValueError(f"make_receivers: mode must be one of {sorted(_MODES)}, got {mode!r}")
-    if topology not in ("D4", "D8"):
-        raise ValueError(f"make_receivers: topology must be 'D4' or 'D8', got {topology!r}")
+    if topology not in TOPOLOGIES:
+        raise ValueError(f"make_receivers: topology must be one of {TOPOLOGIES}, got {topology!r}")
 
     be = require_backend(be)
     blocks = _blocks_for(be, "receivers")
@@ -862,3 +871,22 @@ def _build_fill_reconstruct_sequence(
 
 from .sfd import SFDFlowProgram, build_sfd_flow_program
 from .mfd import MFDFlowProgram, build_mfd_flow_program
+
+
+def make_sfd_linear_decline(be, grid, *, n_flat: int, n_neighbours: int):
+    """Build a CuPy direct implicit linear-decline solve on local SFD links.
+
+    The frozen sequence expects surface elevation, receivers, ``phi`` and
+    ``psi`` fields for ``E = phi*S - psi*Q``, and temporary frontier and
+    coefficient arrays. Receiver links must join grid neighbours.
+    """
+    be = require_backend(be)
+    if be.family != "cupy":
+        raise ValueError("make_sfd_linear_decline is currently CuPy-only")
+    if n_neighbours not in (4, 8):
+        raise ValueError("n_neighbours must be 4 or 8")
+    from ._cupy_sfd_linear_decline import build_sfd_linear_decline
+
+    return build_sfd_linear_decline(
+        grid=grid, n_flat=n_flat, n_neighbours=n_neighbours,
+    )
