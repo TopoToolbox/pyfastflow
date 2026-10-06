@@ -3,7 +3,7 @@
 from pyfastflow.core import KernelBuilder
 from pyfastflow.core.context.program import Dim, ProgramBuilder
 
-from ._speed import HILLSLOPE_MODELS, speed_source
+from ._speed import speed_source
 
 
 def build_finite_program():
@@ -19,16 +19,12 @@ def build_finite_program():
     b.param("erodibility", "auto", "f32", value=1.0, shape=(Dim("ny"), Dim("nx")))
     b.param("hillslope_erosion", "auto", "f32", value=0.0, shape=(Dim("ny"), Dim("nx")))
     b.config("hack_constant", default=1.5).config("hack_exponent", default=0.6)
-    b.config("hillslope_model", choices=HILLSLOPE_MODELS, default="hack")
-    b.config("channel_area", default=0.0)
-    b.param("critical_slope", "auto", "f32", value=0.57)
     b.param("time", "scalar", "f32", value=0.0)
     b.param("level", "scalar", "i32", value=0)
     shape = (Dim("ny"), Dim("nx"))
     b.data("rec", "i32", shape, role="input")
     b.data("drainage", "f32", shape, role="input")
     b.data("slope_correction", "f32", shape, role="input")
-    b.data("divide_distance", "f32", shape, role="input")
     b.data("z0", "f32", shape, role="input")
     b.data("z", "f32", shape, role="output")
     b.data("conditioned_z0", "f32", shape, role="internal")
@@ -45,7 +41,7 @@ def build_finite_program():
         return KernelBuilder(f'''
 extern "C" __global__ void saleve_finite_init(
     const int* rec, const float* drainage, const float* slope_correction,
-    const float* divide_distance, int* ancestors,
+    int* ancestors,
     float* tau, float* phi, int* depth) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= $ctx.ACTIVE_N.get(0)$) return;
@@ -146,25 +142,14 @@ extern "C" __global__ void saleve_finite_finish(
     z[i] = initial + phi[i] - uplift_at_source;
 }}''', domain=n).freeze()
 
-    initialize_bind = {
+    b.add("initialize", initialize, bind={
         "rec": "rec", "drainage": "drainage",
-        "slope_correction": "slope_correction",
-        "divide_distance": "divide_distance", "ancestors": "ancestors",
+        "slope_correction": "slope_correction", "ancestors": "ancestors",
         "tau": "tau_a", "phi": "phi_a", "depth": "depth_a", "UPLIFT": "uplift",
         "ERODIBILITY": "erodibility", "HILLSLOPE": "hillslope_erosion",
-        "CRITICAL": "critical_slope",
         "ACTIVE_NX": "active_nx",
         "ACTIVE_N": "active_n", "ACTIVE_DX": "active_dx",
-    }
-
-    def initialize_plan(frozen, _be):
-        # speed_source only reads CRITICAL for divide_roering; binding it into
-        # a kernel that has no such slot raises BindError.
-        if ("CRITICAL",) in frozen.build().addresses():
-            return initialize_bind
-        return {k: v for k, v in initialize_bind.items() if k != "CRITICAL"}
-
-    b.add("initialize", initialize, bind=initialize_plan)
+    })
     for src, dst in (("a", "b"), ("b", "a")):
         b.add(f"jump_{src}_to_{dst}", jump, bind={
             "ancestors": "ancestors", "tau_in": f"tau_{src}",

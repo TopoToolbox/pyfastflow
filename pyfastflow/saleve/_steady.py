@@ -1,20 +1,9 @@
-"""Steady stream-power solution on a frozen single-receiver forest.
-
-``diffuse_*`` is the opt-in lateral coupling: one red-black Gauss-Seidel
-sweep (two parity half-sweeps, in place) of the 2D
-steady balance ``D lap(z) + U = K A^m (z - z_rec) / L`` on every non-root
-cell, the fluvial term acting as a per-cell sink toward the receiver. With
-``D = 0`` a sweep reproduces the receiver-tree solution link by link; with
-``D > 0`` neighbouring cells are coupled wherever diffusion competes with
-stream power, which removes the per-path streaking of the tree solution
-without pinning any cell. Roots keep their elevation; the caller chooses
-the number of sweeps.
-"""
+"""Steady stream-power solution on a frozen single-receiver forest."""
 
 from pyfastflow.core import KernelBuilder
 from pyfastflow.core.context.program import Dim, ProgramBuilder
 
-from ._speed import HILLSLOPE_MODELS, speed_source
+from ._speed import speed_source
 
 
 def build_steady_program():
@@ -30,14 +19,9 @@ def build_steady_program():
     b.param("thermal_erosion", "auto", "f32", value=0.0, shape=(Dim("ny"), Dim("nx")))
     b.param("hillslope_erosion", "auto", "f32", value=0.0, shape=(Dim("ny"), Dim("nx")))
     b.config("hack_constant", default=1.5).config("hack_exponent", default=0.6)
-    b.config("hillslope_model", choices=HILLSLOPE_MODELS, default="hack")
-    b.config("channel_area", default=0.0)
-    b.config("boundary", choices=("normal", "periodic_EW", "periodic_NS"),
-             default="normal")
     b.param("critical_slope", "auto", "f32", value=0.57)
     shape = (Dim("ny"), Dim("nx"))
     b.data("rec", "i32", shape, role="input")
-    b.data("divide_distance", "f32", shape, role="input")
     b.data("drainage", "f32", shape, role="input")
     b.data("slope_correction", "f32", shape, role="input")
     b.data("outlet_z", "f32", shape, role="input")
@@ -52,7 +36,7 @@ def build_steady_program():
         return KernelBuilder(f'''
 extern "C" __global__ void saleve_steady_init(
     const int* rec, const float* drainage, const float* slope_correction,
-    const float* divide_distance, int* parent, float* sum) {{
+    int* parent, float* sum) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= $ctx.ACTIVE_N.get(0)$) return;
     int r = rec[i];
@@ -98,59 +82,9 @@ extern "C" __global__ void saleve_steady_finish(
     if (i < $ctx.ACTIVE_N.get(0)$) z[i] = outlet_z[parent[i]] + sum[i];
 }}''', domain=n).freeze()
 
-    def diffuse(_be, _bundles, config, *, parity):
-        n = config["nx"] * config["ny"]
-        m = float(config["m"])
-        periodic_x = int(config["boundary"] == "periodic_EW")
-        periodic_y = int(config["boundary"] == "periodic_NS")
-        return KernelBuilder(f'''
-extern "C" __global__ void saleve_steady_diffuse_{parity}(
-    const int* rec, const float* drainage, const float* slope_correction,
-    float* z) {{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= $ctx.ACTIVE_N.get(0)$) return;
-    int nx = $ctx.ACTIVE_NX.get(0)$;
-    int x = i % nx, y = i / nx;
-    if (((x + y) & 1) != {parity}) return;
-    int r = rec[i];
-    if (r == i) return;
-    int ny = $ctx.ACTIVE_N.get(0)$ / nx;
-    float dx = $ctx.ACTIVE_DX.get(0)$;
-    int dr = y - r / nx, dc = x - r % nx;
-    float length = dx * ((dr && dc) ? 1.41421356237f : 1.0f);
-    float area = fmaxf(drainage[i] * dx * dx, 1.0e-20f);
-    float sink = fmaxf($ctx.ERODIBILITY.get(i)$, 1.0e-20f) * powf(area, {m:.9e}f)
-               * slope_correction[i] / length;
-    float kd = $ctx.HILLSLOPE.get(i)$ / (dx * dx);
-    float total = 0.0f; int count = 0;
-    int xl = x - 1, xr = x + 1, yd = y - 1, yu = y + 1;
-    if ({periodic_x}) {{ xl = (xl + nx) % nx; xr = xr % nx; }}
-    if ({periodic_y}) {{ yd = (yd + ny) % ny; yu = yu % ny; }}
-    if (xl >= 0) {{ total += z[y * nx + xl]; ++count; }}
-    if (xr < nx) {{ total += z[y * nx + xr]; ++count; }}
-    if (yd >= 0) {{ total += z[yd * nx + x]; ++count; }}
-    if (yu < ny) {{ total += z[yu * nx + x]; ++count; }}
-    z[i] = (kd * total + $ctx.UPLIFT.get(i)$ + sink * z[r])
-         / (kd * (float)count + sink);
-}}''', domain=n).freeze()
-
-    for parity, name in ((0, "red"), (1, "black")):
-        b.add(f"diffuse_{name}",
-              lambda be, bundles, config, parity=parity:
-                  diffuse(be, bundles, config, parity=parity),
-              bind={
-            "rec": "rec", "drainage": "drainage",
-            "slope_correction": "slope_correction", "z": "z",
-            "UPLIFT": "uplift", "HILLSLOPE": "hillslope_erosion",
-            "ERODIBILITY": "erodibility",
-            "ACTIVE_NX": "active_nx", "ACTIVE_N": "active_n",
-            "ACTIVE_DX": "active_dx",
-        })
-
     b.add("initialize", initialize, bind={
         "rec": "rec", "drainage": "drainage",
-        "slope_correction": "slope_correction",
-        "divide_distance": "divide_distance", "parent": "parent_a",
+        "slope_correction": "slope_correction", "parent": "parent_a",
         "sum": "sum_a", "UPLIFT": "uplift", "ERODIBILITY": "erodibility",
         "THERMAL": "thermal_erosion", "CRITICAL": "critical_slope",
         "HILLSLOPE": "hillslope_erosion",

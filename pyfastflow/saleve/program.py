@@ -13,12 +13,7 @@ from ._finite import SaleveFiniteProgram
 from ._levels import SaleveLevelProgram
 from ._steady import SaleveSteadyProgram
 from ._thermal import SaleveThermalProgram
-from ._divide import SaleveDivideProgram
-from ._valleys import SaleveValleyProgram
-from ._speed import HILLSLOPE_MODELS
 
-#: Valley models: none, or hand (height above the nearest drainage).
-VALLEY_MODELS = ("none", "hand")
 #: Link travel-time corrections.
 SLOPE_CORRECTIONS = ("none", "gradient")
 
@@ -63,23 +58,10 @@ class SaleveProgram:
     ``"none"`` preserves the original solver. ``thermal_erosion`` is the
     paper's talus coefficient (zero disables it); ``critical_slope`` is its
     dimensionless slope threshold. ``hillslope_erosion`` adds the paper's
-    Hack-law ridge term (zero disables it). ``cliff_optimization`` applies
-    fixed-network post-correction after each high-level solve.
-
-    ``hillslope_model`` selects how ``hillslope_erosion`` enters the link
-    slope: ``"hack"`` (area proxy), ``"divide_linear"`` or
-    ``"divide_roering"`` (distance from the divide, the latter saturating at
-    ``critical_slope``); ``channel_area`` > 0 switches between the hillslope
-    and fluvial laws at that drainage area instead of adding them (see
-    ``_speed.py``). ``diffusion_iterations`` > 0 follows every solve with
-    that many Jacobi sweeps of the 2D balance ``D lap(z) + U = K A^m (z -
-    z_rec) / L`` on every non-root cell, which couples neighbouring cells
-    wherever diffusion competes with stream power and removes the
-    receiver-tree streaking without pinning any cell. ``valley_model="hand"`` lowers cells within
-    ``valley_height * (A / valley_area) ** valley_exponent`` of their
-    channel (drainage area >= ``valley_area``) onto a floor of transverse
-    slope ``valley_slope``, with a wall smoothed over ``valley_transition``
-    (see ``_valleys.py``).
+    Hack-law ridge term (zero disables it; see ``_speed.py``), with
+    ``hack_constant`` and ``hack_exponent`` the law's C and h.
+    ``cliff_optimization`` applies fixed-network post-correction after each
+    high-level solve.
     """
 
     def __init__(self, backend, *, nx, ny, dx=1.0, m=0.4,
@@ -94,29 +76,7 @@ class SaleveProgram:
                  hillslope_erosion=0.0, hack_constant=1.5,
                  hack_exponent=0.6, cliff_optimization=False,
                  cliff_iterations=50, cliff_learning_rate=0.01,
-                 cliff_river_weight=1.0 / 3.0,
-                 hillslope_model="hack", channel_area=0.0,
-                 diffusion_iterations=0,
-                 valley_model="none", valley_area=1.0e6, valley_height=10.0,
-                 valley_exponent=0.5, valley_slope=1.0e-3,
-                 valley_transition=0.5):
-        if hillslope_model not in HILLSLOPE_MODELS:
-            raise ValueError(f"hillslope_model must be one of {HILLSLOPE_MODELS}")
-        if not math.isfinite(channel_area) or channel_area < 0:
-            raise ValueError("channel_area must be finite and non-negative")
-        if not isinstance(diffusion_iterations, Integral) or diffusion_iterations < 0:
-            raise ValueError("diffusion_iterations must be a non-negative integer")
-        if valley_model not in VALLEY_MODELS:
-            raise ValueError(f"valley_model must be one of {VALLEY_MODELS}")
-        for name, value in (("valley_area", valley_area),
-                            ("valley_height", valley_height)):
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be finite and positive")
-        for name, value in (("valley_exponent", valley_exponent),
-                            ("valley_slope", valley_slope),
-                            ("valley_transition", valley_transition)):
-            if not math.isfinite(value) or value < 0:
-                raise ValueError(f"{name} must be finite and non-negative")
+                 cliff_river_weight=1.0 / 3.0):
         if slope_correction not in SLOPE_CORRECTIONS:
             raise ValueError(f"slope_correction must be one of {SLOPE_CORRECTIONS}")
         if not math.isfinite(min_link_slope) or min_link_slope <= 0:
@@ -151,10 +111,6 @@ class SaleveProgram:
         self._hillslope_option = hillslope_erosion
         self._critical_slope = critical_slope
         self._hack_constant, self._hack_exponent = hack_constant, hack_exponent
-        self._hillslope_model = hillslope_model
-        self._channel_area = float(channel_area)
-        self._diffusion_iterations = int(diffusion_iterations)
-        self._valley_model = valley_model
         self._cliff_enabled = bool(cliff_optimization)
         self._cliff_iterations = cliff_iterations
         self._cliff_learning_rate = cliff_learning_rate
@@ -185,8 +141,6 @@ class SaleveProgram:
             thermal_erosion=thermal_erosion, critical_slope=critical_slope,
             hillslope_erosion=hillslope_erosion,
             hack_constant=hack_constant, hack_exponent=hack_exponent,
-            hillslope_model=hillslope_model, channel_area=channel_area,
-            boundary=boundary,
         )
         self.steady.rec.adopt(self.flow.rec.array)
         self.steady.drainage.adopt(self.flow.drainage.array)
@@ -216,22 +170,6 @@ class SaleveProgram:
         if self._hillslope_field:
             self._levels.hillslope_erosion.adopt(
                 self.steady._params["hillslope_erosion"].handle().array)
-        self._divide = None
-        self._valleys = None
-        if hillslope_model != "hack" or valley_model != "none":
-            self._divide = SaleveDivideProgram(backend, nx=nx, ny=ny)
-            self._divide.rec.adopt(self.flow.rec.array)
-            self.steady.divide_distance.adopt(self._divide.divide_distance.array)
-        if valley_model != "none":
-            self._valleys = SaleveValleyProgram(
-                backend, nx=nx, ny=ny, valley_area=valley_area,
-                valley_height=valley_height, valley_exponent=valley_exponent,
-                valley_slope=valley_slope, valley_transition=valley_transition,
-            )
-            self._valleys.rec.adopt(self.flow.rec.array)
-            self._valleys.drainage.adopt(self.flow.drainage.array)
-            self._valleys.path_length.adopt(self._divide.path_length.array)
-            self._valleys.z.adopt(self.flow.z.array)
         self.z = _ActiveField(self, self.flow.z)
         self.rec = _ActiveField(self, self.flow.rec)
         self.drainage = _ActiveField(self, self.flow.drainage)
@@ -249,10 +187,7 @@ class SaleveProgram:
                                     erodibility=erodibility,
                                     hillslope_erosion=hillslope_erosion,
                                     hack_constant=hack_constant,
-                                    hack_exponent=hack_exponent,
-                                    hillslope_model=hillslope_model,
-                                    channel_area=channel_area,
-                                    critical_slope=critical_slope)
+                                    hack_exponent=hack_exponent)
         self._finite = None
         self._thermal = None
         self._cliff = None
@@ -269,14 +204,11 @@ class SaleveProgram:
         grid["DX"].set(self.dx)
         n = self.nx * self.ny
         self.flow.active_n.set(n)
-        for solver in (self.steady, self._finite, self._thermal, self._divide):
+        for solver in (self.steady, self._finite, self._thermal):
             if solver is not None:
                 solver.active_nx.set(self.nx)
                 solver.active_n.set(n)
                 solver.active_dx.set(self.dx)
-        if self._valleys is not None:
-            self._valleys.active_n.set(n)
-            self._valleys.active_dx.set(self.dx)
         if self._cliff is not None:
             self._cliff.active_n.set(n)
             cliff_grid = self._cliff._bundle_params["grid"]
@@ -308,8 +240,6 @@ class SaleveProgram:
             finite.slope_correction.adopt(self.flow.slope_correction.array)
             finite.z0.adopt(self.steady.outlet_z.array)
             finite.z.adopt(self.flow.z.array)
-            if self._divide is not None:
-                finite.divide_distance.adopt(self._divide.divide_distance.array)
             for name, field in (("uplift", self._uplift_field),
                                 ("erodibility", self._erodibility_field),
                                 ("hillslope_erosion", self._hillslope_field)):
@@ -333,11 +263,7 @@ class SaleveProgram:
                 critical_slope=self._critical_slope,
                 hack_constant=self._hack_constant,
                 hack_exponent=self._hack_exponent,
-                hillslope_model=self._hillslope_model,
-                channel_area=self._channel_area,
             )
-            if self._divide is not None:
-                thermal.divide_distance.adopt(self._divide.divide_distance.array)
             for name, source in (("rec", self.flow.rec),
                                  ("drainage", self.flow.drainage),
                                  ("slope_correction", self.flow.slope_correction),
@@ -419,55 +345,17 @@ class SaleveProgram:
             self.flow.drainage.array.ravel()[:n] = cliff._data["area"].array.ravel()[:n]
             self.flow._params["source"].handle().array.fill(1.0)
 
-    def _compute_divide(self):
-        """Refresh path_length and divide_distance for the current forest."""
-        divide = self._divide
-        if divide is None:
-            return
-        divide.initialize()
-        for k in range(self._rounds):
-            (divide.jump_a_to_b if k % 2 == 0 else divide.jump_b_to_a)()
-        depth = "a" if self._rounds % 2 == 0 else "b"
-        getattr(divide, f"max_init_{depth}")()
-        for k in range(self._rounds):
-            src, dst = ("a", "b") if k % 2 == 0 else ("b", "a")
-            getattr(divide, f"push_{src}_to_{dst}_copy")()
-            getattr(divide, f"push_{src}_to_{dst}_core")()
-        getattr(divide, f"finish_{depth}")()
-
-    def _diffuse_hillslopes(self):
-        """Red-black Gauss-Seidel sweeps of the diffusion / stream-power balance."""
-        count = self._diffusion_iterations
-        if not count:
-            return
-        for _ in range(count):
-            self.steady.diffuse_red()
-            self.steady.diffuse_black()
-
-    def _apply_valleys(self):
-        """Lower the solved z onto height-above-channel valley floors."""
-        valleys = self._valleys
-        if valleys is None:
-            return
-        valleys.initialize()
-        for k in range(self._rounds):
-            (valleys.jump_a_to_b if k % 2 == 0 else valleys.jump_b_to_a)()
-        getattr(valleys, f"apply_{'a' if self._rounds % 2 == 0 else 'b'}")()
-
     def solve_fixed_network(self):
         """Solve steady state on the current receiver forest and drainage."""
         self._require_initialized()
         if self._slope_correction_mode == "gradient":
             self.flow.compute_slope_correction()
-        self._compute_divide()
         self.steady.initialize()
         for k in range(self._rounds):
             (self.steady.jump_a_to_b if k % 2 == 0
              else self.steady.jump_b_to_a)()
         (self.steady.finish_a if self._rounds % 2 == 0
          else self.steady.finish_b)()
-        self._diffuse_hillslopes()
-        self._apply_valleys()
 
     def run_steady_state(self, n=1):
         """Rebuild the network and solve steady state ``n`` times."""
@@ -490,7 +378,6 @@ class SaleveProgram:
         finite = self._finite_program()
         if self._slope_correction_mode == "gradient":
             self.flow.compute_slope_correction()
-        self._compute_divide()
         finite.time.set(time)
         finite.initialize()
         for k in range(self._rounds):
@@ -522,15 +409,11 @@ class SaleveProgram:
             thermal.time.set(time)
             thermal._data["barrier"].array.fill(0)
             thermal.solve()
-            self._diffuse_hillslopes()
-            self._apply_valleys()
             return
         getattr(finite, f"finish_{depth}")()
         getattr(finite, f"seed_candidate_{depth}")()
         path_max()
         getattr(finite, f"condition_candidate_{depth}_{depth}")()
-        self._diffuse_hillslopes()
-        self._apply_valleys()
 
     def run_finite_time(self, time, n=1):
         """Refine the network ``n`` times for the same target time."""
@@ -680,10 +563,6 @@ class SaleveProgram:
         self.flow.restore_outlets()
 
     def close(self):
-        if self._valleys is not None:
-            self._valleys.close()
-        if self._divide is not None:
-            self._divide.close()
         if self._cliff is not None:
             self._cliff.close()
         if self._thermal is not None:

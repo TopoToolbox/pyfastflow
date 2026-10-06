@@ -4,7 +4,7 @@ from pyfastflow.core import KernelBuilder
 from pyfastflow.core.context.program import Dim, ProgramBuilder
 from pyfastflow.flow._cupy_mfd_accum import persistent_grid_block
 
-from ._speed import HILLSLOPE_MODELS, speed_source
+from ._speed import speed_source
 
 
 def build_thermal_program():
@@ -13,8 +13,6 @@ def build_thermal_program():
     b.config("ny").config("nx").config("levels")
     b.config("m", default=0.4)
     b.config("hack_constant", default=1.5).config("hack_exponent", default=0.6)
-    b.config("hillslope_model", choices=HILLSLOPE_MODELS, default="hack")
-    b.config("channel_area", default=0.0)
     b.param("active_nx", "scalar", "i32", value=lambda d: d["nx"])
     b.param("active_n", "scalar", "i32", value=lambda d: d["nx"] * d["ny"])
     b.param("active_dx", "scalar", "f32", value=1.0)
@@ -26,7 +24,7 @@ def build_thermal_program():
     b.param("erodibility", "auto", "f32", value=1.0, shape=shape)
     b.param("thermal_erosion", "auto", "f32", value=0.0, shape=shape)
     b.param("hillslope_erosion", "auto", "f32", value=0.0, shape=shape)
-    for name in ("z0", "drainage", "slope_correction", "divide_distance"):
+    for name in ("z0", "drainage", "slope_correction"):
         b.data(name, "f32", shape, role="input")
     b.data("rec", "i32", shape, role="input")
     b.data("ancestors", "i32", (Dim("levels"), *shape), role="input")
@@ -70,7 +68,7 @@ extern "C" __global__ void saleve_thermal_solve(
     const int* rec, const int* ancestors, const int* order,
     const int* starts, const int* ends, unsigned int* barrier,
     const float* z0, const float* drainage, const float* correction,
-    const float* divide_distance, float* tau, float* phi, float* z) {{
+    float* tau, float* phi, float* z) {{
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = gridDim.x * blockDim.x;
     int nx = $ctx.ACTIVE_NX.get(0)$;
@@ -134,7 +132,6 @@ extern "C" __global__ void saleve_thermal_solve(
         "rec": "rec", "ancestors": "ancestors", "order": "order",
         "starts": "starts", "ends": "ends", "barrier": "barrier",
         "z0": "z0", "drainage": "drainage", "correction": "slope_correction",
-        "divide_distance": "divide_distance",
         "tau": "tau", "phi": "phi", "z": "z",
         "ACTIVE_NX": "active_nx", "ACTIVE_DX": "active_dx",
         "TIME": "time", "CRITICAL": "critical_slope",
