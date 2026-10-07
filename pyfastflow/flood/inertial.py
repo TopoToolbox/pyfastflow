@@ -13,12 +13,35 @@ to their two endpoints. D8 uses the requested regular-octagon convention:
 every one of its eight links has width ``dx / 2``; cardinal and diagonal link
 lengths are respectively ``dx`` and ``sqrt(2) * dx``. The depth control
 volume remains ``dx * dx``.
+
+``sparse=True`` launches the flux, regulator, inlet and depth kernels over
+32x8-cell tiles and skips the inactive ones, for runs where few cells carry
+water. A cell is live when it can change, or feed a link, on its own: depth
+above ``min_flow_depth`` (or below ``min_depth``), non-zero rainfall, an inlet
+or flux-mask cell, a top-row cell under ``top_inflow``, an outlet with a sink
+or a depth constraint it does not satisfy, an edge outlet under
+``boundary_flux``, or a non-active grid cell holding water. A tile is active
+when it lies within ``TILE_MARGIN`` cells of a live cell. A link between two
+non-live cells is zero, and a step moves liveness by at most one cell (two
+with a regulator, which reads the parallel links), so refreshing the tiles
+every ``TILE_MARGIN`` steps (``TILE_MARGIN / 2`` with a regulator) skips only
+cells and links the dense update would leave unchanged: the result matches the
+dense run. A tile leaving the active set has its own links zeroed. ``step(n)``
+refreshes the tiles before its first step, so edits to ``h``, the masks or the
+sources between calls are picked up; links edited by hand are not.
+``active_tiles()`` returns the active fraction.
+
+Author: B.G (10/2026)
 """
 
 from pyfastflow.core import Backend, KernelBuilder
 from pyfastflow.core.context.program import Dim, ProgramBuilder
 from pyfastflow.grid import make_grid_group, make_grid_parameters
 from pyfastflow.grid._mask import GridMaskAccessor
+
+
+TILE_W, TILE_H = 32, 8   # sparse tile, one 256-thread block
+TILE_MARGIN = 8          # cells from a live cell kept active (<= TILE_H)
 
 
 def _cupy_only(be: Backend) -> None:
@@ -86,6 +109,39 @@ def _inlet_qy_shape(config):
     return (0, 0)
 
 
+def _tiles(config):
+    """Sparse tile columns and rows."""
+    return (-(-int(config["nx"]) // TILE_W), -(-int(config["ny"]) // TILE_H))
+
+
+def _tile_shape(config):
+    """One flag per tile, allocated only for the sparse recipe."""
+    if config["sparse"]:
+        tx, ty = _tiles(config)
+        return (tx * ty,)
+    return (0,)
+
+
+def _launch(config):
+    """Extra kernel argument, cell-index prologue and launch geometry.
+
+    Dense: one thread per cell. Sparse: one block per tile, returning at
+    once when ``tile_active`` is zero.
+    """
+    nx, ny = int(config["nx"]), int(config["ny"])
+    n = nx * ny
+    if not config["sparse"]:
+        return ("", f'''int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i >= {n}) return;''', dict(domain=n))
+    tx, ty = _tiles(config)
+    return (", const unsigned char* tile_active", f'''if (!tile_active[blockIdx.x]) return;
+            int tile_x = (blockIdx.x % {tx}) * {TILE_W} + threadIdx.x % {TILE_W};
+            int tile_y = (blockIdx.x / {tx}) * {TILE_H} + threadIdx.x / {TILE_W};
+            if (tile_x >= {nx} || tile_y >= {ny}) return;
+            int i = tile_y * {nx} + tile_x;''',
+            dict(domain=tx * ty * TILE_W * TILE_H, block=TILE_W * TILE_H))
+
+
 def _reset_factory(be: Backend, _bundles, config):
     _cupy_only(be)
     nx, ny = int(config["nx"]), int(config["ny"])
@@ -117,6 +173,7 @@ def _flux_factory(be: Backend, bundles, config):
     _cupy_only(be)
     nx, ny = int(config["nx"]), int(config["ny"])
     n = nx * ny
+    tile_arg, prologue, launch = _launch(config)
     d8 = config["topology"] == "D8"
     periodic_x = config["boundary"] == "periodic_EW"
     periodic_y = config["boundary"] == "periodic_NS"
@@ -181,9 +238,8 @@ def _flux_factory(be: Backend, bundles, config):
         }}
 
         extern "C" __global__ void inertial_update_flux(
-                const float* z, const float* h, {q_type} qx, {q_type} qy{diagonal_args}{regulated_args}) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
+                const float* z, const float* h, {q_type} qx, {q_type} qy{diagonal_args}{regulated_args}{tile_arg}) {{
+            {prologue}
             int x = i % {nx};
             int y = i / {nx};
             int fx = y * ({nx} + 1) + x;
@@ -235,7 +291,7 @@ def _flux_factory(be: Backend, bundles, config):
             }}
             {diagonal_update}
         }}''',
-        domain=n,
+        **launch,
     ).compose("grid", bundles["grid"]).freeze()
 
 
@@ -261,6 +317,7 @@ def _regulate_flux_factory(be: Backend, bundles, config):
 
     nx, ny = int(config["nx"]), int(config["ny"])
     n = nx * ny
+    tile_arg, prologue, launch = _launch(config)
     d8 = config["topology"] == "D8"
     periodic_x = config["boundary"] == "periodic_EW"
     periodic_y = config["boundary"] == "periodic_NS"
@@ -322,9 +379,8 @@ def _regulate_flux_factory(be: Backend, bundles, config):
         }}
 
         {theta_helper}extern "C" __global__ void inertial_regulate_flux(
-                float* qx, float* qy, const float* qx_reg, const float* qy_reg{diagonal_args}{h_arg}) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
+                float* qx, float* qy, const float* qx_reg, const float* qy_reg{diagonal_args}{h_arg}{tile_arg}) {{
+            {prologue}
             int x = i % {nx};
             int y = i / {nx};
             int fx = y * ({nx} + 1) + x;
@@ -356,7 +412,7 @@ def _regulate_flux_factory(be: Backend, bundles, config):
             if (y == {ny - 1}) qy[fy + {nx}] = qy_reg[fy + {nx}];
             {diagonal_update}
         }}''',
-        domain=n,
+        **launch,
     ).compose("grid", bundles["grid"]).freeze()
 
 
@@ -364,6 +420,7 @@ def _depth_factory(be: Backend, bundles, config):
     _cupy_only(be)
     nx, ny = int(config["nx"]), int(config["ny"])
     n = nx * ny
+    tile_arg, prologue, launch = _launch(config)
     d8 = config["topology"] == "D8"
     periodic_x = config["boundary"] == "periodic_EW"
     periodic_y = config["boundary"] == "periodic_NS"
@@ -392,9 +449,8 @@ def _depth_factory(be: Backend, bundles, config):
             divergence += 0.5f * dx * (q_nw + q_ne - qxy[i] - qyx[i]);''' if d8 else ""
     return KernelBuilder(
         f'''extern "C" __global__ void inertial_update_depth(
-                float* h, const float* qx, const float* qy{diagonal_args}{inlet_args}) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
+                float* h, const float* qx, const float* qy{diagonal_args}{inlet_args}{tile_arg}) {{
+            {prologue}
             if (!$ctx.grid.is_active(i)$) {{
                 h[i] = 0.0f;
                 return;
@@ -423,7 +479,7 @@ def _depth_factory(be: Backend, bundles, config):
             h[i] = fmaxf(h_new, $ctx.min_depth.get(0)$);
             {outlet_constraint}
         }}''',
-        domain=n,
+        **launch,
     ).compose("grid", bundles["grid"]).freeze()
 
 
@@ -440,14 +496,14 @@ def _apply_inlet_factory(be: Backend, bundles, config):
         ).freeze()
     nx, ny = int(config["nx"]), int(config["ny"])
     n = nx * ny
+    tile_arg, prologue, launch = _launch(config)
     d8 = config["topology"] == "D8"
     left_k, up_k = (3, 1) if d8 else (1, 0)
     return KernelBuilder(
         f'''extern "C" __global__ void inertial_apply_inlet(
                 float* qx, float* qy, const float* qx_fix, const float* qy_fix,
-                const float* inlet_mask, const float* flux_mask) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
+                const float* inlet_mask, const float* flux_mask{tile_arg}) {{
+            {prologue}
             if (!$ctx.grid.is_active(i)$) return;
             int x = i % {nx};
             int y = i / {nx};
@@ -466,8 +522,146 @@ def _apply_inlet_factory(be: Backend, bundles, config):
             if (me || nbc) qy[fy] = qy_fix[fy];
             if (me && y == {ny - 1}) qy[fy + {nx}] = qy_fix[fy + {nx}];
         }}''',
-        domain=n,
+        **launch,
     ).compose("grid", bundles["grid"]).freeze()
+
+
+def _flag_tiles_factory(be: Backend, bundles, config):
+    """Write ``tile_live``: 1 for a tile holding a live cell (see module
+    docstring). Scans every tile. No-op unless sparse.
+
+    Author: B.G (10/2026)
+    """
+    _cupy_only(be)
+    if not config["sparse"]:
+        return KernelBuilder(
+            'extern "C" __global__ void inertial_flag_tiles() {}', domain=1,
+        ).freeze()
+    nx, ny = int(config["nx"]), int(config["ny"])
+    tx, ty = _tiles(config)
+    inlet = config["inlet"]
+    inlet_args = ", const float* inlet_mask, const float* flux_mask" if inlet else ""
+    inlet_live = ("\n                    || inlet_mask[i] != 0.0f || flux_mask[i] != 0.0f"
+                  if inlet else "")
+    outlet_depth = config["outlet_depth"]
+    outlet_live = (f"hi != {float(outlet_depth):.9e}f" if outlet_depth is not None
+                   else "$ctx.outlet_discharge.get(0)$ != 0.0f")
+    return KernelBuilder(
+        f'''extern "C" __global__ void inertial_flag_tiles(
+                const float* h{inlet_args}, unsigned char* tile_live) {{
+            int x = (blockIdx.x % {tx}) * {TILE_W} + threadIdx.x % {TILE_W};
+            int y = (blockIdx.x / {tx}) * {TILE_H} + threadIdx.x / {TILE_W};
+            int live = 0;
+            if (x < {nx} && y < {ny}) {{
+                int i = y * {nx} + x;
+                float hi = h[i];
+                if (!$ctx.grid.is_active(i)$) {{
+                    live = hi != 0.0f;
+                }} else {{
+                    bool out = $ctx.grid.can_out(i)$;
+                    bool edge = x == 0 || x == {nx - 1} || y == 0 || y == {ny - 1};
+                    live = hi > $ctx.min_flow_depth.get(0)$
+                        || hi < $ctx.min_depth.get(0)$
+                        || $ctx.rainfall.get(i)$ != 0.0f
+                        || (y == 0 && $ctx.top_inflow.get(0)$ != 0.0f)
+                        || (out && ({outlet_live}))
+                        || (out && edge && $ctx.boundary_flux.get(0)$ != 0.0f){inlet_live};
+                }}
+            }}
+            live = __syncthreads_or(live);
+            if (threadIdx.x == 0) tile_live[blockIdx.x] = (unsigned char)(live != 0);
+        }}''',
+        domain=tx * ty * TILE_W * TILE_H, block=TILE_W * TILE_H,
+    ).compose("grid", bundles["grid"]).freeze()
+
+
+def _dilate_tiles_factory(be: Backend, _bundles, config):
+    """Write ``tile_active``: 1 for a tile within ``TILE_MARGIN`` cells of a
+    live tile (wrapping on periodic edges). A tile going from active to
+    inactive zeroes the links its cells own (west, north, the east/south
+    domain-edge links, the diagonals and the provisional copies). No-op
+    unless sparse.
+
+    Author: B.G (10/2026)
+    """
+    _cupy_only(be)
+    if not config["sparse"]:
+        return KernelBuilder(
+            'extern "C" __global__ void inertial_dilate_tiles() {}', domain=1,
+        ).freeze()
+    nx, ny = int(config["nx"]), int(config["ny"])
+    tx, ty = _tiles(config)
+    d8 = config["topology"] == "D8"
+    filtered = config["regulator"] != "bates"
+    periodic_x = int(config["boundary"] == "periodic_EW")
+    periodic_y = int(config["boundary"] == "periodic_NS")
+    links = ["qx", "qy"] + (["qxy", "qyx"] if d8 else [])
+    if filtered:
+        links += [f"{name}_reg" for name in links]
+    args = "".join(f", float* {name}" for name in links)
+    clear = []
+    for name in links:
+        if name.startswith("qx") and not name.startswith("qxy"):
+            clear.append(f"{name}[fx] = 0.0f; if (x == {nx - 1}) {name}[fx + 1] = 0.0f;")
+        elif name.startswith("qy") and not name.startswith("qyx"):
+            clear.append(f"{name}[i] = 0.0f; if (y == {ny - 1}) {name}[i + {nx}] = 0.0f;")
+        else:
+            clear.append(f"{name}[i] = 0.0f;")
+    clear = "\n                    ".join(clear)
+    m = TILE_MARGIN
+    return KernelBuilder(
+        f'''extern "C" __global__ void inertial_dilate_tiles(
+                const unsigned char* tile_live, unsigned char* tile_active{args}) {{
+            __shared__ int keep;
+            int tile = blockIdx.x;
+            int col = tile % {tx};
+            int row = tile / {tx};
+            if (threadIdx.x == 0) {{
+                int cols[{2 * m + 1}], rows[{2 * m + 1}];
+                int ncols = 0, nrows = 0;
+                int x0 = col * {TILE_W}, x1 = min(x0 + {TILE_W - 1}, {nx - 1});
+                for (int c = x0 - {m}; c <= x1 + {m}; ++c) {{
+                    if (c > x0 && c <= x1) continue;
+                    int cc = c;
+                    if (cc < 0 || cc >= {nx}) {{
+                        if (!{periodic_x}) continue;
+                        cc = ((cc % {nx}) + {nx}) % {nx};
+                    }}
+                    int t = cc / {TILE_W};
+                    if (ncols == 0 || cols[ncols - 1] != t) cols[ncols++] = t;
+                }}
+                int y0 = row * {TILE_H}, y1 = min(y0 + {TILE_H - 1}, {ny - 1});
+                for (int r = y0 - {m}; r <= y1 + {m}; ++r) {{
+                    if (r > y0 && r <= y1) continue;
+                    int rr = r;
+                    if (rr < 0 || rr >= {ny}) {{
+                        if (!{periodic_y}) continue;
+                        rr = ((rr % {ny}) + {ny}) % {ny};
+                    }}
+                    int t = rr / {TILE_H};
+                    if (nrows == 0 || rows[nrows - 1] != t) rows[nrows++] = t;
+                }}
+                int any = 0;
+                for (int a = 0; a < nrows && !any; ++a)
+                    for (int b = 0; b < ncols && !any; ++b)
+                        any = tile_live[rows[a] * {tx} + cols[b]] != 0;
+                keep = any;
+            }}
+            __syncthreads();
+            if (tile_active[tile] && !keep) {{
+                int x = col * {TILE_W} + threadIdx.x % {TILE_W};
+                int y = row * {TILE_H} + threadIdx.x / {TILE_W};
+                if (x < {nx} && y < {ny}) {{
+                    int i = y * {nx} + x;
+                    int fx = y * ({nx} + 1) + x;
+                    {clear}
+                }}
+            }}
+            __syncthreads();
+            if (threadIdx.x == 0) tile_active[tile] = (unsigned char)keep;
+        }}''',
+        domain=tx * ty * TILE_W * TILE_H, block=TILE_W * TILE_H,
+    ).freeze()
 
 
 def build_inertial_flood_program() -> type:
@@ -490,6 +684,8 @@ def build_inertial_flood_program() -> type:
     external sink in m3/s, useful for interior cells selected by
     ``outlet='mask'``. ``top_inflow`` is a uniform m3/s source applied only
     to active cells in the top row. All three are zero by default.
+    ``sparse`` skips tiles without water (see the module docstring); the
+    result matches the dense run.
     """
     b = ProgramBuilder("InertialFloodProgram")
     b.dim("ny").dim("nx")
@@ -506,6 +702,8 @@ def build_inertial_flood_program() -> type:
     # per-face fixed-flux inlet BC: band cells whose faces carry a prescribed
     # qx/qy (e.g. an already-solved upstream tile's flux) and whose depth is held.
     b.config("inlet", choices=(False, True), default=False)
+    # skip tiles without water (see the module docstring)
+    b.config("sparse", choices=(False, True), default=False)
 
     shape = (Dim("ny"), Dim("nx"))
     b.param("dt", "scalar", "f32", value=1.0e-3)
@@ -540,6 +738,8 @@ def build_inertial_flood_program() -> type:
     # lateral-source mask: faces get their prescribed flux stamped like the band,
     # but the depth is NOT held (it relaxes from a Manning warm-start seed).
     b.data("flux_mask", "f32", _inlet_cell_shape, role="input")
+    b.data("tile_live", "u8", _tile_shape, role="internal")
+    b.data("tile_active", "u8", _tile_shape, role="internal")
 
     def grid_structure(be, *, topology, boundary, outlet, nodata, **_):
         _cupy_only(be)
@@ -557,6 +757,7 @@ def build_inertial_flood_program() -> type:
 
     reset_values = {"h": "h", "qx": "qx", "qy": "qy", "qxy": "qxy", "qyx": "qyx"}
     flux_values = {
+        "tile_active": "tile_active",
         "z": "z", "h": "h", "qx": "qx", "qy": "qy", "qxy": "qxy", "qyx": "qyx",
         "qx_reg": "qx_reg", "qy_reg": "qy_reg", "qxy_reg": "qxy_reg", "qyx_reg": "qyx_reg",
         "dt": "dt", "gravity": "gravity", "manning": "manning",
@@ -564,6 +765,7 @@ def build_inertial_flood_program() -> type:
         "min_flow_depth": "min_flow_depth", "boundary_flux": "boundary_flux",
     }
     depth_values = {
+        "tile_active": "tile_active",
         "h": "h", "qx": "qx", "qy": "qy", "qxy": "qxy", "qyx": "qyx",
         "qx_reg": "qx_reg", "qy_reg": "qy_reg", "qxy_reg": "qxy_reg", "qyx_reg": "qyx_reg",
         "dt": "dt", "rainfall": "rainfall", "min_depth": "min_depth",
@@ -571,15 +773,33 @@ def build_inertial_flood_program() -> type:
         "inlet_mask": "inlet_mask", "inlet_depth": "inlet_depth",
     }
     regulate_values = {
+        "tile_active": "tile_active",
         "qx": "qx", "qy": "qy", "qxy": "qxy", "qyx": "qyx",
         "qx_reg": "qx_reg", "qy_reg": "qy_reg", "qxy_reg": "qxy_reg", "qyx_reg": "qyx_reg",
         "regulator_theta": "regulator_theta",
         "h": "h", "dt": "dt", "gravity": "gravity",
     }
     apply_inlet_values = {
+        "tile_active": "tile_active",
         "qx": "qx", "qy": "qy", "qx_fix": "qx_fix", "qy_fix": "qy_fix",
         "inlet_mask": "inlet_mask", "flux_mask": "flux_mask",
     }
+    flag_values = {
+        "h": "h", "inlet_mask": "inlet_mask", "flux_mask": "flux_mask",
+        "tile_live": "tile_live", "min_flow_depth": "min_flow_depth",
+        "min_depth": "min_depth", "rainfall": "rainfall",
+        "top_inflow": "top_inflow", "outlet_discharge": "outlet_discharge",
+        "boundary_flux": "boundary_flux",
+    }
+    dilate_values = {
+        "tile_live": "tile_live", "tile_active": "tile_active",
+        "qx": "qx", "qy": "qy", "qxy": "qxy", "qyx": "qyx",
+        "qx_reg": "qx_reg", "qy_reg": "qy_reg", "qxy_reg": "qxy_reg", "qyx_reg": "qyx_reg",
+    }
+    b.add("_flag_tiles", _flag_tiles_factory,
+          bind=lambda f, be: _grid_plan(f, flag_values))
+    b.add("_dilate_tiles", _dilate_tiles_factory,
+          bind=lambda f, be: _grid_plan(f, dilate_values))
     for topology in ("D4", "D8"):
         b.add(f"reset_{topology}", _reset_factory,
               bind=lambda f, be, values=reset_values: _grid_plan(f, values))
@@ -596,9 +816,40 @@ def build_inertial_flood_program() -> type:
     b.dispatch("update_depth", on="topology", cases={"D4": "update_depth_D4", "D8": "update_depth_D8"})
     b.dispatch("regulate_flux", on="topology", cases={"D4": "regulate_flux_D4", "D8": "regulate_flux_D8"})
     b.dispatch("apply_inlet", on="topology", cases={"D4": "apply_inlet_D4", "D8": "apply_inlet_D8"})
-    b.pipeline("step", ("update_flux", "regulate_flux", "apply_inlet", "update_depth"))
+    b.pipeline("_step", ("update_flux", "regulate_flux", "apply_inlet", "update_depth"))
 
     program = b.freeze()
+
+    def refresh_tiles(self):
+        """Recompute the active tiles from the current state (sparse only)."""
+        if not getattr(self, "_tiles_ready", False):
+            # every tile counts as active once, so the first refresh zeroes
+            # the links of the tiles it leaves inactive
+            self._handle("tile_active").array.fill(1)
+            object.__setattr__(self, "_tiles_ready", True)
+        self._flag_tiles()
+        self._dilate_tiles()
+
+    def step(self, n=1):
+        """Advance ``n`` steps. Sparse: refresh the tiles before the first
+        step, then every ``TILE_MARGIN`` steps (half with a regulator)."""
+        if not self.sparse:
+            return self._step(n)
+        every = TILE_MARGIN // (1 if self.regulator == "bates" else 2)
+        for k in range(max(0, int(n))):
+            if k % every == 0:
+                self.refresh_tiles()
+            self._step()
+
+    def active_tiles(self):
+        """Fraction of active tiles after the last refresh (sparse only)."""
+        if not self.sparse:
+            raise ValueError("active_tiles() requires sparse=True")
+        return float(self._handle("tile_active").array.mean())
+
+    program.refresh_tiles = refresh_tiles
+    program.step = step
+    program.active_tiles = active_tiles
     program.outlet_mask = property(
         lambda self: GridMaskAccessor(self, "OUTLET_MASK", "outlet='mask'"),
     )

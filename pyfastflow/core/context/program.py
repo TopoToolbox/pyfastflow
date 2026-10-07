@@ -306,11 +306,11 @@ class _Program:
             object.__setattr__(self, n, _runner)
         for n in self._recipe.dispatch:
             def _dispatcher(n=1, _name=n):
-                return self.run(_name, n)
+                return _Program.run(self, _name, n)
             object.__setattr__(self, n, _dispatcher)
         for n in self._recipe.pipelines:
             def _pipeline(n=1, _name=n):
-                return self.run(_name, n)
+                return _Program.run(self, _name, n)
             object.__setattr__(self, n, _pipeline)
     def __getattr__(self, name):
         if name in self._dim_vals: return self._dim_vals[name]
@@ -512,7 +512,7 @@ class _Program:
             result = None
             for _ in range(max(0, int(n))):
                 for step in self._recipe.pipelines[name].steps:
-                    result = self.run(step)
+                    result = _Program.run(self, step)
             return result
         raise ProgramError(f"unknown sequence {name!r}")
     def compile(self):

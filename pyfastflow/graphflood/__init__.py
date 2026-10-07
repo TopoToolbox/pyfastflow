@@ -1,11 +1,15 @@
-"""GraphFlood simulation program and hydraulic building blocks."""
+"""GraphFlood programs: Vanilla (iterative), Relax (analytical relaxation)
+and Particles (live particle processors), on one shared recipe (``_base``).
+"""
 
-from .particle import (
-    GraphFloodParticleProgram, build_graphflood_particle_program,
-)
-from .program import GraphFloodProgram, build_graphflood_program
+from ._convergence import ConvergenceRule
+from .particles import GraphFloodParticles, build_graphflood_particles
+from .relax import GraphFloodRelax, build_graphflood_relax
+from .vanilla import GraphFloodVanilla, build_graphflood_vanilla
 
 __all__ = [
-    "GraphFloodParticleProgram", "GraphFloodProgram",
-    "build_graphflood_particle_program", "build_graphflood_program",
+    "ConvergenceRule",
+    "GraphFloodParticles", "GraphFloodRelax", "GraphFloodVanilla",
+    "build_graphflood_particles", "build_graphflood_relax",
+    "build_graphflood_vanilla",
 ]

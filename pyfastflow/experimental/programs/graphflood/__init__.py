@@ -1,5 +1,7 @@
-"""Experimental stateful GraphFlood Program."""
+"""Experimental stateful GraphFlood Programs."""
 
-from pyfastflow.graphflood import GraphFloodProgram, build_graphflood_program
+from pyfastflow.graphflood import (
+    GraphFloodParticles, GraphFloodRelax, GraphFloodVanilla,
+)
 
-__all__ = ["GraphFloodProgram", "build_graphflood_program"]
+__all__ = ["GraphFloodParticles", "GraphFloodRelax", "GraphFloodVanilla"]

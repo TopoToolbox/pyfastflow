@@ -1,8 +1,12 @@
-"""Routing operations for GraphFlood."""
+"""Routing operations for GraphFlood.
 
-from pyfastflow.core import KernelBuilder, RoutineBuilder, SequenceBuilder
-from pyfastflow.flow import make_accumulation, make_mfd_topology, make_subset_mfd_accumulation
-from pyfastflow.flow._program_cupy import BLOCK, _cupy_only, _grid_leaf_plan
+The u8 quantized-weight branches are kept but no program exposes them:
+``config.get("quantized_weight", False)`` always selects f32 weights.
+"""
+
+from pyfastflow.core import KernelBuilder, RoutineBuilder
+from pyfastflow.flow import make_accumulation, make_mfd_topology
+from pyfastflow.flow._program_cupy import _cupy_only, _grid_leaf_plan
 
 def _build_hydraulic_topology(be, grid, n, topology, quantized_weight):
     """Rank-gated MFD weights plus unmodified hydraulic slope diagnostics."""
@@ -199,7 +203,7 @@ def _topology_factory(be, bundles, config):
     dirs, reset, count = _build_hydraulic_topology(
         be, bundles["grid"], config["nx"] * config["ny"],
         config["topology"],
-        config["quantized_weight"],
+        config.get("quantized_weight", False),
     )
     return (RoutineBuilder().step("dirs_weights", dirs)
             .step("indegree_reset", reset).step("indegree_count", count).freeze())
@@ -209,7 +213,7 @@ def _filled_topology_factory(be, bundles, config):
     dirs, diagnostics, reset, count = _build_filled_hydraulic_topology(
         be, bundles["grid"], config["nx"] * config["ny"],
         config["topology"],
-        config["quantized_weight"],
+        config.get("quantized_weight", False),
     )
     return (RoutineBuilder().step("dirs_weights", dirs)
             .step("diagnostics", diagnostics)
@@ -221,7 +225,7 @@ def _carve_topology_factory(be, bundles, config):
     n = config["nx"] * config["ny"]
     dirs, diagnostics, reset, count = _build_filled_hydraulic_topology(
         be, bundles["grid"], n, config["topology"],
-        config["quantized_weight"],
+        config.get("quantized_weight", False),
     )
     effective_slope = KernelBuilder(
         f'''extern "C" __global__ void graphflood_carve_effective_slope(
@@ -265,7 +269,7 @@ def _reconstructed_topology_factory(be, bundles, config):
     topology = make_mfd_topology(
         be, bundles["grid"], method="surface", n_flat=n,
         topology=config["topology"], diagonal_partition_correction=True,
-        quantized_weight=config["quantized_weight"],
+        quantized_weight=config.get("quantized_weight", False),
     )
     diagnostics = KernelBuilder(
         f'''extern "C" __global__ void graphflood_reconstruct_diagnostics(
@@ -386,54 +390,6 @@ def _accumulation_factory(be, bundles, config):
     accum = make_accumulation(
         be, bundles["grid"], method="persistent_mfd", n_flat=n,
         n_neighbours=8 if config["topology"] == "D8" else 4,
-        quantized_weight=config["quantized_weight"],
+        quantized_weight=config.get("quantized_weight", False),
     )["accum"]
     return RoutineBuilder().step("q_init", q_init).step("accum", accum).freeze()
-
-def _drainage_area_factory(be, bundles, config):
-    """Persistent MFD accumulation with one cell area injected per node."""
-    _cupy_only(be)
-    n = config["nx"] * config["ny"]
-    init = KernelBuilder(
-        f'''extern "C" __global__ void graphflood_area_init(float* area) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            float dx = $ctx.grid.DX.get(0)$;
-            area[i] = $ctx.grid.nodata(i)$ ? 0.0f : dx * dx;
-        }}''', domain=n,
-    ).compose("grid", bundles["grid"]).freeze()
-    accum = make_accumulation(
-        be, bundles["grid"], method="persistent_mfd", n_flat=n,
-        n_neighbours=8 if config["topology"] == "D8" else 4,
-        quantized_weight=config["quantized_weight"],
-    )["accum"]
-    return RoutineBuilder().step("init", init).step("accum", accum).freeze()
-
-def _drainage_area_plan(frozen, _be):
-    return _grid_leaf_plan(frozen, {
-        "area": "drainage_area", "frontier0": "mfd_frontier0",
-        "frontier1": "mfd_frontier1", "count": "mfd_count",
-        "barrier": "mfd_barrier", "dirs": "directions",
-        "mfd_w": "weights", "accum": "drainage_area",
-        "indegree": "indegree",
-    })
-
-def _subset_accumulation_factory(be, bundles, config):
-    _cupy_only(be)
-    return make_subset_mfd_accumulation(
-        be, bundles["grid"], n_flat=config["nx"] * config["ny"],
-        n_neighbours=8 if config["topology"] == "D8" else 4,
-        quantized_weight=config["quantized_weight"],
-    )
-
-def _subset_accumulation_plan(frozen, _be):
-    return _grid_leaf_plan(frozen, {
-        "active_ids": "dynamic_active_ids", "active": "dynamic_active_mask",
-        "dirs": "directions", "mfd_w": "weights",
-        "boundary": "Qi_boundary", "accum": "Qi",
-        "accumulation": "Qi", "remaining": "active_indegree",
-        "frontier": "mfd_frontier0", "frontier0": "mfd_frontier0",
-        "frontier1": "mfd_frontier1", "count": "mfd_count",
-        "barrier": "mfd_barrier", "SOURCE": "precipitation",
-        "ACTIVE_COUNT": "active_count",
-    })

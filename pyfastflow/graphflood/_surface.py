@@ -1,7 +1,7 @@
 """Surface operations for GraphFlood."""
 
 import math
-from pyfastflow.core import KernelBuilder, RoutineBuilder, SequenceBuilder
+from pyfastflow.core import KernelBuilder, SequenceBuilder
 from pyfastflow.flow import (
     depression_binding_plan, make_depression_solver, make_depressions,
     make_mfd_topology,
@@ -72,7 +72,7 @@ def _snapshot_factory(be, bundles, config):
     return make_mfd_topology(
         be, bundles["grid"], method="cordonnier_rank",
         n_flat=config["nx"] * config["ny"], topology=config["topology"],
-        quantized_weight=config["quantized_weight"],
+        quantized_weight=config.get("quantized_weight", False),
     )["snapshot_receivers"]
 
 def _carve_factory(be, bundles, config):
@@ -100,7 +100,7 @@ def _rank_factory(be, bundles, config):
     return make_mfd_topology(
         be, bundles["grid"], method="cordonnier_rank",
         n_flat=config["nx"] * config["ny"], topology=config["topology"],
-        quantized_weight=config["quantized_weight"],
+        quantized_weight=config.get("quantized_weight", False),
     )["receiver_rank"]
 
 def _rank_plan(_frozen, _be):
@@ -112,8 +112,7 @@ def _rank_plan(_frozen, _be):
         "backward.ancestor_out": "rank_ancestor", "backward.rank_out": "rank",
     }
 
-def _cordonnier_surface_factory(
-        be, _bundles, config, *, fill_depth, active_only=False):
+def _cordonnier_surface_factory(be, _bundles, config, *, fill_depth):
     """Build Cordonnier's path-maximum routing potential."""
     _cupy_only(be)
     n = config["nx"] * config["ny"]
@@ -148,16 +147,14 @@ def _cordonnier_surface_factory(
         }}''', domain=n,
     ).freeze()
     h_argument = "float* h, " if fill_depth else ""
-    active_argument = "const unsigned char* active, " if active_only else ""
-    active_gate = "active[i] && " if active_only else ""
     h_update = (
-        f"if ({active_gate}added_depth > 0.0f) h[i] += added_depth;"
+        "if (added_depth > 0.0f) h[i] += added_depth;"
         if fill_depth else ""
     )
     apply_name = "graphflood_apply_fill" if fill_depth else "graphflood_apply_carve"
     apply = KernelBuilder(
         f'''extern "C" __global__ void {apply_name}(
-                {h_argument}{active_argument}float* surface, const float* spill,
+                {h_argument}float* surface, const float* spill,
                 const int* rec_initial, const int* rec,
                 unsigned char* conditioned) {{
             int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -191,11 +188,6 @@ def _cordonnier_carve_factory(be, bundles, config):
         be, bundles, config, fill_depth=False,
     )
 
-def _active_cordonnier_fill_factory(be, bundles, config):
-    return _cordonnier_surface_factory(
-        be, bundles, config, fill_depth=True, active_only=True,
-    )
-
 def _cordonnier_fill_plan(_frozen, _be):
     return {
         "init.surface": "surface", "init.rec": "rec",
@@ -215,11 +207,6 @@ def _cordonnier_fill_plan(_frozen, _be):
         "apply.spill": "z_prime", "apply.rec_initial": "rec_initial",
         "apply.rec": "rec", "apply.conditioned": "is_border",
     }
-
-def _active_cordonnier_fill_plan(frozen, be):
-    plan = _cordonnier_fill_plan(frozen, be)
-    plan["apply.active"] = "active_mask"
-    return plan
 
 def _cordonnier_carve_plan(frozen, be):
     plan = _cordonnier_fill_plan(frozen, be)
@@ -264,23 +251,6 @@ def _merge_fill_depth_factory(be, _bundles, config):
             float depth = filled[i] - z[i];
             conditioned[i] = depth > h[i] ? 1u : 0u;
             if (depth > h[i]) h[i] = depth;
-        }}''', domain=n,
-    ).freeze()
-
-def _merge_active_fill_depth_factory(be, _bundles, config):
-    """Apply reconstructed storage only where the current band is active."""
-    _cupy_only(be)
-    n = config["nx"] * config["ny"]
-    return KernelBuilder(
-        f'''extern "C" __global__ void graphflood_merge_active_fill(
-                const float* z, const float* filled,
-                const unsigned char* active, float* h,
-                unsigned char* conditioned) {{
-            int i = blockIdx.x * blockDim.x + threadIdx.x;
-            if (i >= {n}) return;
-            float depth = filled[i] - z[i];
-            conditioned[i] = depth > h[i] ? 1u : 0u;
-            if (active[i] && depth > h[i]) h[i] = depth;
         }}''', domain=n,
     ).freeze()
 

@@ -1,5 +1,7 @@
-"""Compatibility import for the promoted GraphFlood program."""
+"""Compatibility import for the promoted GraphFlood programs."""
 
-from pyfastflow.graphflood import GraphFloodProgram, build_graphflood_program
+from pyfastflow.graphflood import (
+    GraphFloodParticles, GraphFloodRelax, GraphFloodVanilla,
+)
 
-__all__ = ["GraphFloodProgram", "build_graphflood_program"]
+__all__ = ["GraphFloodParticles", "GraphFloodRelax", "GraphFloodVanilla"]
