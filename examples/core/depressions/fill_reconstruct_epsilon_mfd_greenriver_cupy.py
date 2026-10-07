@@ -22,8 +22,8 @@ from pyfastflow.core.pool.cupy_pool import CupyPool
 from pyfastflow.flow import make_fill_reconstruct, make_fill_reconstruct_solver
 from pyfastflow.flow._cupy_mfd_accum import build_persistent_mfd, init_frontier_mfd, persistent_grid_block
 from pyfastflow.grid import make_grid_group, make_grid_parameters
-from pyfastflow.graphflood._cupy_mfd_topology import build_mfd_topology
-from pyfastflow.graphflood._cupy_reconstruct_epsilon import build_hops_init, build_hops_jump
+from pyfastflow.flow._cupy_mfd_topology import build_mfd_topology
+from pyfastflow.flow._cupy_reconstruct_epsilon import build_hops_init, build_hops_jump
 
 dem = ttb.load_dem("greenriver")
 N_NEIGHBOURS = 8  # D8
@@ -54,7 +54,7 @@ mfd_w = pool.get_data(np.float32, (n_flat * N_NEIGHBOURS,))
 indegree = pool.get_data(np.int32, (n_flat,))
 frontier0 = pool.get_data(np.int32, (n_flat,))
 frontier1 = pool.get_data(np.int32, (n_flat,))
-count = pool.get_data(np.int32, (2,))
+count = pool.get_data(np.int32, (3,))
 barrier = pool.get_data(np.uint32, (1,))
 q = pool.get_data(np.float32, (n_flat,))
 

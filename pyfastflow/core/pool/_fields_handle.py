@@ -24,7 +24,7 @@ class FieldsBuilderDataHandle(DataHandle):
     def short_dtype(cls, dtype) -> str:
         """Return this backend dtype's stable public short tag."""
         dtype = cls.normalize_dtype(dtype)
-        for tag in ("i32", "i64", "f32", "u8", "u32"):
+        for tag in ("i32", "i64", "f32", "f64", "u8", "u32"):
             if dtype == getattr(cls._backend, tag):
                 return tag
         raise ValueError(f"unsupported dtype {dtype!r}")

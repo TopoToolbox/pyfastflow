@@ -26,9 +26,11 @@ __author__ = "B.G."
 # Lazy submodule loading to avoid heavy backend side effects at import time.
 _LAZY_SUBMODULES = [
     "core",
+    "experimental",
     "grid",
     "noise",
     "flow",
+    "flood",
     "graphflood",
     "ops",
     "visu",

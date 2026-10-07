@@ -11,8 +11,20 @@ from importlib import import_module
 from ..core import Backend, HostBlockBuilder, SequenceBuilder, require_backend
 from ..noise import make_hash_u32
 
-_MODES = frozenset({"steepest", "stochastic"})
+#: Flow neighbourhoods.
+TOPOLOGIES = ("D4", "D8")
+#: Grid edge handling: all edges are outlets, or periodic east-west / north-south.
+BOUNDARIES = ("normal", "periodic_EW", "periodic_NS")
+#: Receiver selection rules of make_receivers.
+RECEIVER_MODES = ("steepest", "stochastic", "slope_weighted_fixed")
+#: Local-minima handling of the SFD flow program.
+LOCAL_MINIMA = ("none", "reconstruct_epsilon", "cordonnier_carve", "cordonnier_jump")
+
+_MODES = frozenset(RECEIVER_MODES)
 _ACCUM_METHODS = frozenset({"atomic", "rake_compress", "pointer_jump_push"})
+_MFD_TOPOLOGY_METHODS = frozenset(
+    {"surface", "cordonnier_rank", "cordonnier_fill"}
+)
 
 
 def _blocks_for(be: Backend, section: str):
@@ -37,7 +49,8 @@ def make_receivers(
 ) -> dict:
     """Return a receiver-routing kernel and its helpers.
 
-    ``mode`` selects steepest-descent or stochastic routing.  Set
+    ``mode`` selects steepest, randomized score, or fixed slope-weighted
+    categorical routing. Set
     ``h_aware`` to route on ``z + h``; choose D4 or D8 topology.
 
     Parameters
@@ -48,7 +61,7 @@ def make_receivers(
         Grid topology helpers.
     topology : {"D4", "D8"}
         Neighbourhood used for routing.
-    mode : {"steepest", "stochastic"}
+    mode : {"steepest", "stochastic", "slope_weighted_fixed"}
         Receiver selection rule.
     diagonal_partition_correction : bool
         Apply diagonal-distance correction on D8 grids.
@@ -62,12 +75,12 @@ def make_receivers(
     """
     if mode not in _MODES:
         raise ValueError(f"make_receivers: mode must be one of {sorted(_MODES)}, got {mode!r}")
-    if topology not in ("D4", "D8"):
-        raise ValueError(f"make_receivers: topology must be 'D4' or 'D8', got {topology!r}")
+    if topology not in TOPOLOGIES:
+        raise ValueError(f"make_receivers: topology must be one of {TOPOLOGIES}, got {topology!r}")
 
     be = require_backend(be)
     blocks = _blocks_for(be, "receivers")
-    hash_u32 = make_hash_u32(be) if mode == "stochastic" else None
+    hash_u32 = make_hash_u32(be) if mode != "steepest" else None
 
     if be.family == "closure":
         backend_mod = be.module
@@ -91,6 +104,110 @@ def make_receivers(
     )
 
 
+def make_mfd_topology(
+    be: Backend,
+    grid,
+    *,
+    method: str = "surface",
+    n_flat: int,
+    topology: str = "D8",
+    diagonal_partition_correction: bool = False,
+    quantized_weight: bool = False,
+) -> dict:
+    """Return CuPy kernels that construct a persistent-MFD topology.
+
+    ``surface`` routes on a depression-filled elevation plus a flat-distance
+    field. ``cordonnier_rank`` instead consumes an SFD receiver graph after
+    Cordonnier carving: carved nodes keep their single receiver, while all
+    other raw-downslope MFD links are gated by decreasing receiver rank.
+    ``cordonnier_fill`` converts the carved receiver paths to their maximum
+    elevation and uses receiver distance only as an epsilon ordering on flats;
+    MFD is otherwise independent of the carved receiver graph.
+
+    For ``cordonnier_rank``, run ``snapshot_receivers`` before modifying the
+    receiver array, then run ``receiver_rank`` and ``dirs_weights`` after the
+    carve. In either mode, run ``indegree_reset`` and ``indegree_count``
+    before :func:`make_accumulation` with ``method="persistent_mfd"``.
+    Set ``quantized_weight=True`` to emit max-normalized ``uint8`` scores;
+    the accumulation factory must receive the same option and the caller must
+    bind an unsigned-byte weight buffer instead of a float buffer.
+    """
+    be = require_backend(be)
+    if be.family != "cupy":
+        raise ValueError(
+            f"make_mfd_topology is cupy-only (got backend={be.name!r})"
+        )
+    if method not in _MFD_TOPOLOGY_METHODS:
+        raise ValueError(
+            f"make_mfd_topology: method must be one of "
+            f"{sorted(_MFD_TOPOLOGY_METHODS)}, got {method!r}"
+        )
+    if topology not in ("D4", "D8"):
+        raise ValueError(
+            f"make_mfd_topology: topology must be 'D4' or 'D8', got {topology!r}"
+        )
+    if int(n_flat) < 1:
+        raise ValueError("make_mfd_topology: n_flat must be positive")
+
+    from . import _cupy_mfd_topology
+
+    if method == "surface":
+        build = _cupy_mfd_topology.build_surface_mfd_topology
+    elif method == "cordonnier_rank":
+        build = _cupy_mfd_topology.build_ranked_mfd_topology
+    else:
+        build = _cupy_mfd_topology.build_filled_rank_mfd_topology
+    out = build(
+        grid=grid,
+        n_flat=int(n_flat),
+        topology=topology,
+        diagonal_partition_correction=diagonal_partition_correction,
+        quantized_weight=bool(quantized_weight),
+    )
+    if method == "cordonnier_fill":
+        out["receiver_fill"] = _cupy_mfd_topology.build_receiver_fill(
+            n_flat=int(n_flat)
+        )
+    return out
+
+
+def bind_mfd_receiver_rank(
+    frozen, *, rec, ancestor, ancestor_alt, rank, rank_alt
+):
+    """Bind the ping-pong buffers of a ``receiver_rank`` sequence.
+
+    The completed rank and ancestor arrays are ``rank`` and ``ancestor``;
+    the ``*_alt`` arrays are scratch space of the same shape and dtype.
+    """
+    bound = frozen.build()
+    bound.bind_leaf(
+        {"rec": rec, "ancestor": ancestor, "rank": rank},
+        prefix=("init",),
+        strict=True,
+    )
+    bound.bind_leaf(
+        {
+            "ancestor_in": ancestor,
+            "rank_in": rank,
+            "ancestor_out": ancestor_alt,
+            "rank_out": rank_alt,
+        },
+        prefix=("forward",),
+        strict=True,
+    )
+    bound.bind_leaf(
+        {
+            "ancestor_in": ancestor_alt,
+            "rank_in": rank_alt,
+            "ancestor_out": ancestor,
+            "rank_out": rank,
+        },
+        prefix=("backward",),
+        strict=True,
+    )
+    return bound
+
+
 def make_accumulation(
     be: Backend,
     grid,
@@ -103,6 +220,7 @@ def make_accumulation(
     fr_stage: int = 2048,
     blocks_per_sm: int = 2,
     threads: int = 256,
+    quantized_weight: bool = False,
 ) -> dict:
     """Return structures for one drainage-accumulation method.
 
@@ -125,6 +243,9 @@ def make_accumulation(
         Number of neighbours for rake-compress or MFD accumulation.
     fr_stage, blocks_per_sm, threads : int
         CuPy persistent-MFD launch settings.
+    quantized_weight : bool
+        For persistent MFD, consume max-normalized ``uint8`` scores and
+        renormalize their sum per node. Must match the topology builder.
 
     Returns
     -------
@@ -164,6 +285,7 @@ def make_accumulation(
         return _cupy_mfd_accum.build_persistent_mfd(
             grid=grid, n_flat=int(n_flat), n_neighbours=int(n_neighbours), fr_stage=fr_stage,
             blocks_per_sm=blocks_per_sm, threads=threads,
+            quantized_weight=bool(quantized_weight),
         )
 
     if method not in _ACCUM_METHODS:
@@ -205,6 +327,48 @@ def make_accumulation(
     out = dict(kernels)
     out["sequence"] = sb
     return out
+
+
+def make_subset_mfd_accumulation(
+    be: Backend, grid, *, n_flat: int, n_neighbours: int,
+    blocks_per_sm: int = 1, threads: int = 256,
+    quantized_weight: bool = False,
+):
+    """Return a CuPy persistent-MFD routine for a compact active subset.
+
+    The caller supplies a frozen full-domain discharge as the boundary
+    condition. Dependencies and propagation are restricted to active nodes.
+    """
+    be = require_backend(be)
+    if be.family != "cupy":
+        raise ValueError("make_subset_mfd_accumulation is cupy-only")
+    if int(n_flat) < 1 or int(n_neighbours) not in (4, 8):
+        raise ValueError("subset MFD requires n_flat > 0 and 4 or 8 neighbours")
+    from . import _cupy_mfd_accum
+
+    return _cupy_mfd_accum.build_persistent_subset_mfd(
+        grid=grid, n_flat=int(n_flat), n_neighbours=int(n_neighbours),
+        blocks_per_sm=blocks_per_sm, threads=threads,
+        quantized_weight=bool(quantized_weight),
+    )
+
+
+def make_mfd_distance(
+    be: Backend, grid, *, n_flat: int, n_neighbours: int,
+    blocks_per_sm: int = 1, threads: int = 256,
+):
+    """Return a CuPy persistent routine computing an outlet-to-source coordinate."""
+    be = require_backend(be)
+    if be.family != "cupy":
+        raise ValueError("make_mfd_distance is cupy-only")
+    if int(n_flat) < 1 or int(n_neighbours) not in (4, 8):
+        raise ValueError("MFD distance requires n_flat > 0 and 4 or 8 neighbours")
+    from ._cupy_mfd_distance import build_mfd_distance
+
+    return build_mfd_distance(
+        grid=grid, n_flat=int(n_flat), n_neighbours=int(n_neighbours),
+        blocks_per_sm=blocks_per_sm, threads=threads,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -703,3 +867,26 @@ def _build_fill_reconstruct_sequence(
     sb.loop(body=["zero_active", "relax", "bump_pass"], max_times=int(max_passes), until="converged")
 
     return sb.freeze(), {"P": pass_p, "ACTIVE": active_p}
+
+
+from .sfd import SFDFlowProgram, build_sfd_flow_program
+from .mfd import MFDFlowProgram, build_mfd_flow_program
+
+
+def make_sfd_linear_decline(be, grid, *, n_flat: int, n_neighbours: int):
+    """Build a CuPy direct implicit linear-decline solve on local SFD links.
+
+    The frozen sequence expects surface elevation, receivers, ``phi`` and
+    ``psi`` fields for ``E = phi*S - psi*Q``, and temporary frontier and
+    coefficient arrays. Receiver links must join grid neighbours.
+    """
+    be = require_backend(be)
+    if be.family != "cupy":
+        raise ValueError("make_sfd_linear_decline is currently CuPy-only")
+    if n_neighbours not in (4, 8):
+        raise ValueError("n_neighbours must be 4 or 8")
+    from ._cupy_sfd_linear_decline import build_sfd_linear_decline
+
+    return build_sfd_linear_decline(
+        grid=grid, n_flat=n_flat, n_neighbours=n_neighbours,
+    )

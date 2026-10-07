@@ -145,9 +145,9 @@ def build_receivers(
         The bound `ti`/`qd` module.
     grid : FrozenGroup
     hash_u32 : FrozenHelper
-        Required, and only used, when mode="stochastic".
+        Required for randomized modes.
     mode : str
-        "steepest" or "stochastic".
+        "steepest", "stochastic", or "slope_weighted_fixed".
     topology : str
         "D4" or "D8".
     diagonal_partition_correction : bool
@@ -164,7 +164,7 @@ def build_receivers(
     slope = out["slope_from_values_k"]
     T = _tensor_annotation(backend_mod, backend)
 
-    if mode == "stochastic":
+    if mode in ("stochastic", "slope_weighted_fixed"):
         out["rand_unit"] = build_rand_unit(hash_u32)
 
     if mode == "steepest" and not h_aware:
@@ -229,7 +229,7 @@ def build_receivers(
                     r = j if better else r
                 rec[i] = r
 
-    else:  # mode == "stochastic" and h_aware
+    elif mode == "stochastic" and h_aware:
 
         def receivers_tmpl(ctx, z: T, h: T, rec: T):
             for i in z:
@@ -251,13 +251,77 @@ def build_receivers(
                     r = j if better else r
                 rec[i] = r
 
+    elif mode == "slope_weighted_fixed" and not h_aware:
+
+        def receivers_tmpl(ctx, z: T, rec: T):
+            for i in z:
+                if ctx.grid.can_out(i):
+                    rec[i] = i
+                    continue
+                total = 0.0
+                for k in range(ctx.grid.N_NEIGHBOURS.get(0)):
+                    j = ctx.grid.neighbour(i, k)
+                    if j != -1:
+                        slope = ctx.slope(z[i], 0.0, z[j], 0.0, k)
+                        if slope > 0.0:
+                            total += slope
+                if total <= 0.0:
+                    rec[i] = i
+                    continue
+                draw = ctx.rand_unit(i, 0) * total
+                selected = i
+                for k in range(ctx.grid.N_NEIGHBOURS.get(0)):
+                    j = ctx.grid.neighbour(i, k)
+                    if j == -1:
+                        continue
+                    weight = ctx.slope(z[i], 0.0, z[j], 0.0, k)
+                    if weight <= 0.0:
+                        continue
+                    selected = j
+                    if draw < weight:
+                        break
+                    draw -= weight
+                rec[i] = selected
+
+    else:  # slope_weighted_fixed and h_aware
+
+        def receivers_tmpl(ctx, z: T, h: T, rec: T):
+            for i in z:
+                if ctx.grid.can_out(i):
+                    rec[i] = i
+                    continue
+                total = 0.0
+                for k in range(ctx.grid.N_NEIGHBOURS.get(0)):
+                    j = ctx.grid.neighbour(i, k)
+                    if j != -1:
+                        slope = ctx.slope(z[i], h[i], z[j], h[j], k)
+                        if slope > 0.0:
+                            total += slope
+                if total <= 0.0:
+                    rec[i] = i
+                    continue
+                draw = ctx.rand_unit(i, 0) * total
+                selected = i
+                for k in range(ctx.grid.N_NEIGHBOURS.get(0)):
+                    j = ctx.grid.neighbour(i, k)
+                    if j == -1:
+                        continue
+                    weight = ctx.slope(z[i], h[i], z[j], h[j], k)
+                    if weight <= 0.0:
+                        continue
+                    selected = j
+                    if draw < weight:
+                        break
+                    draw -= weight
+                rec[i] = selected
+
     kb = KernelBuilder(receivers_tmpl)
     grid_param_names = grid.slots.names(SlotKind.PARAM)
     for name in grid_param_names:
         kb.param(name)
     kb.compose("grid", grid)
     kb.compose("slope", slope)
-    if mode == "stochastic":
+    if mode in ("stochastic", "slope_weighted_fixed"):
         kb.compose("rand_unit", out["rand_unit"])
 
     for name in grid_param_names:

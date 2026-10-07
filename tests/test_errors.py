@@ -100,21 +100,3 @@ def test_feature_factories_require_backend_objects():
 
     with pytest.raises(TypeError, match="require a Backend"):
         make_grid_group("cupy")
-
-
-def test_graphflood_recipe_is_inert_and_requires_backend_object():
-    """GraphFlood keeps live state out of its Unit 8 structure factory."""
-    import pytest
-
-    from pyfastflow.core import Backend
-    from pyfastflow.graphflood import FrozenGraphflood, make_graphflood
-    from pyfastflow.grid import make_grid_group
-
-    be = Backend.from_name("cupy")
-    grid = make_grid_group(be)
-    frozen, params = make_graphflood(be, grid, n_flat=4, nx=2, ny=2)
-    assert isinstance(frozen, FrozenGraphflood)
-    assert params == {}
-    assert frozen.config["n_flat"] == 4
-    with pytest.raises(TypeError, match="require a Backend"):
-        make_graphflood("cupy", grid, n_flat=4, nx=2, ny=2)

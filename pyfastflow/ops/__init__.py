@@ -84,10 +84,11 @@ class Scan:
 
     """
 
-    def __init__(self, inclusive_fn, compact_fn, count_param):
+    def __init__(self, inclusive_fn, compact_fn, count_param, close_fn=None):
         self._inclusive_fn = inclusive_fn
         self._compact_fn = compact_fn
         self.count_param = count_param
+        self._close_fn = close_fn
 
     def inclusive(self, input_handle, output_handle) -> None:
         """Fill `output_handle` with the inclusive prefix sum of `input_handle`."""
@@ -100,6 +101,12 @@ class Scan:
     def count(self) -> int:
         """Host-syncing read of the most recent `.compact()` count."""
         return int(self.count_param.read())
+
+    def close(self) -> None:
+        """Release CuPy scratch owned by this scan, when applicable."""
+        if self._close_fn is not None:
+            close, self._close_fn = self._close_fn, None
+            close()
 
 
 def make_scan(be: Backend, pool, n: int) -> Scan:
@@ -155,7 +162,13 @@ def make_scan(be: Backend, pool, n: int) -> Scan:
             compiled_routine()
             return int(count_p.read())
 
-        return Scan(inclusive_fn, compact_fn, count_p)
+        def close_fn():
+            compiled_routine.close()
+            bound.close()
+            count_p.destroy()
+            pool.release_data(scan_out_h)
+
+        return Scan(inclusive_fn, compact_fn, count_p, close_fn)
 
     # Taichi / Quadrants
     backend_mod = be.module

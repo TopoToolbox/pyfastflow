@@ -10,7 +10,11 @@ from .frozen import Node
 from .host_block import FrozenHostBlock
 from .slot import ProgramBuilderError, ProgramError
 
-_NP_DTYPES = {"i32": np.int32, "i64": np.int64, "f32": np.float32, "u8": np.uint8, "u32": np.uint32}
+_NP_DTYPES = {
+    "i32": np.int32, "i64": np.int64,
+    "f32": np.float32, "f64": np.float64,
+    "u8": np.uint8, "u32": np.uint32,
+}
 _REQUIRED = object()
 
 
@@ -20,6 +24,8 @@ class Dim:
     def __init__(self, name): self.name = name
     def __mul__(self, other): return _Prod((self, other))
     def __rmul__(self, other): return _Prod((other, self))
+    def __add__(self, other): return _Sum((self, other))
+    def __radd__(self, other): return _Sum((other, self))
     def __repr__(self): return f"Dim({self.name!r})"
 
 
@@ -31,9 +37,23 @@ class _Prod:
     def __rmul__(self, other): return _Prod((other,) + self.factors)
 
 
+class _Sum:
+    """A symbolic sum used by staggered-grid Program storage shapes."""
+    __slots__ = ("terms",)
+    def __init__(self, terms):
+        self.terms = tuple(
+            x for term in terms
+            for x in (term.terms if isinstance(term, _Sum) else (term,))
+        )
+    def __add__(self, other): return _Sum(self.terms + (other,))
+    def __radd__(self, other): return _Sum((other,) + self.terms)
+    def __repr__(self): return " + ".join(repr(x) for x in self.terms)
+
+
 def _axis_names(axis):
     if isinstance(axis, Dim): return {axis.name}
     if isinstance(axis, _Prod): return set().union(*(_axis_names(x) for x in axis.factors))
+    if isinstance(axis, _Sum): return set().union(*(_axis_names(x) for x in axis.terms))
     if isinstance(axis, int): return set()
     raise ProgramBuilderError(f"shape axis must be a Dim, product, or int; got {type(axis).__name__}")
 
@@ -44,11 +64,21 @@ def _resolve_axis(axis, dims):
         n = 1
         for x in axis.factors: n *= _resolve_axis(x, dims)
         return n
+    if isinstance(axis, _Sum):
+        return sum(_resolve_axis(x, dims) for x in axis.terms)
     if isinstance(axis, int): return axis
     raise ProgramError(f"invalid shape axis {axis!r}")
 
 
 def _resolve_shape(shape, dims): return tuple(_resolve_axis(x, dims) for x in shape)
+
+
+def _spec_shape(spec, config, dims):
+    """Resolve a fixed symbolic shape or a configuration-selected shape."""
+    shape = spec.shape
+    if callable(shape):
+        shape = shape({**config, **dims})
+    return tuple(_resolve_axis(axis, dims) for axis in shape)
 
 
 @dataclass(frozen=True)
@@ -76,15 +106,19 @@ class _DispatchSpec:
     name: str; on: str; cases: dict
 
 @dataclass(frozen=True)
+class _PipelineSpec:
+    name: str; steps: tuple
+
+@dataclass(frozen=True)
 class _Recipe:
-    name: str; dims: tuple; params: dict; data: dict; bundles: dict; sequences: dict; config: dict; dispatch: dict
+    name: str; dims: tuple; params: dict; data: dict; bundles: dict; sequences: dict; config: dict; dispatch: dict; pipelines: dict
 
 
 class ProgramBuilder:
     """Author a Program recipe with declarative bundles and bind maps."""
     def __init__(self, name):
         self._name = name; self._dims = []; self._params = {}; self._data = {}
-        self._bundles = {}; self._sequences = {}; self._config = {}; self._dispatch = {}
+        self._bundles = {}; self._sequences = {}; self._config = {}; self._dispatch = {}; self._pipelines = {}
 
     def dim(self, name):
         if name in self._dims: raise ProgramBuilderError(f"dim {name!r} already declared")
@@ -97,17 +131,20 @@ class ProgramBuilder:
         self._config[name] = _ConfigSpec(name, choices, default); return self
 
     def param(self, name, mode, dtype, *, value=0, shape=(), shape_source=False):
-        if mode not in ("const", "scalar", "field"): raise ProgramBuilderError(f"{name!r}: invalid parameter mode {mode!r}")
+        if mode not in ("auto", "const", "scalar", "field"): raise ProgramBuilderError(f"{name!r}: invalid parameter mode {mode!r}")
         if dtype not in _NP_DTYPES: raise ProgramBuilderError(f"{name!r}: unsupported dtype {dtype!r}")
-        if mode != "field" and shape: raise ProgramBuilderError(f"{name!r}: only field parameters have a shape")
-        if shape_source and mode != "field": raise ProgramBuilderError(f"{name!r}: shape_source requires a field parameter")
+        if mode not in ("auto", "field") and shape: raise ProgramBuilderError(f"{name!r}: only auto/field parameters have a shape")
+        if shape_source and mode not in ("auto", "field"): raise ProgramBuilderError(f"{name!r}: shape_source requires an auto/field parameter")
         self._params[name] = _ParamSpec(name, mode, dtype, value, tuple(shape), shape_source); return self
 
     def data(self, name, dtype, shape, *, lifetime="persistent", role=None, flat=True, shape_source=False):
-        if dtype not in _NP_DTYPES: raise ProgramBuilderError(f"{name!r}: unsupported dtype {dtype!r}")
+        if not callable(dtype) and dtype not in _NP_DTYPES: raise ProgramBuilderError(f"{name!r}: unsupported dtype {dtype!r}")
         if lifetime not in ("persistent", "temp"): raise ProgramBuilderError(f"{name!r}: lifetime must be persistent or temp")
         if shape_source and lifetime == "temp": raise ProgramBuilderError(f"{name!r}: temp data cannot be a shape source")
-        self._data[name] = _DataSpec(name, dtype, tuple(shape), lifetime, role, flat, shape_source); return self
+        if shape_source and callable(shape):
+            raise ProgramBuilderError(f"{name!r}: shape-source data cannot have a callable shape")
+        normalized_shape = shape if callable(shape) else tuple(shape)
+        self._data[name] = _DataSpec(name, dtype, normalized_shape, lifetime, role, flat, shape_source); return self
 
     def bundle(self, name, structure, params, *, dims=(), config=()):
         self._bundles[name] = _BundleSpec(name, structure, params, tuple(dims), tuple(config)); return self
@@ -120,9 +157,13 @@ class ProgramBuilder:
     def dispatch(self, name, *, on, cases):
         self._dispatch[name] = _DispatchSpec(name, on, dict(cases)); return self
 
+    def pipeline(self, name, steps):
+        """Expose an ordered composition of sequences/dispatches as one call."""
+        self._pipelines[name] = _PipelineSpec(name, tuple(steps)); return self
+
     def freeze(self):
         dims = tuple(self._dims); dimset = set(dims); seen = {}
-        for kind, names in (("dim", dims), ("param", self._params), ("data", self._data), ("bundle", self._bundles), ("sequence", self._sequences), ("dispatch", self._dispatch)):
+        for kind, names in (("dim", dims), ("param", self._params), ("data", self._data), ("bundle", self._bundles), ("sequence", self._sequences), ("dispatch", self._dispatch), ("pipeline", self._pipelines)):
             for name in names:
                 if not name.isidentifier(): raise ProgramBuilderError(f"{kind} name {name!r} is not an identifier")
                 if name in seen: raise ProgramBuilderError(f"name {name!r} declared twice ({seen[name]}, {kind})")
@@ -131,6 +172,8 @@ class ProgramBuilder:
             if not name.isidentifier(): raise ProgramBuilderError(f"config name {name!r} is not an identifier")
             if name in seen and seen[name] != "dim": raise ProgramBuilderError(f"name {name!r} declared twice ({seen[name]}, config)")
         for spec in list(self._params.values()) + list(self._data.values()):
+            if callable(spec.shape):
+                continue
             unknown = set().union(*(_axis_names(a) for a in spec.shape)) - dimset
             if unknown: raise ProgramBuilderError(f"{spec.name!r}: undeclared dims {sorted(unknown)}")
             if spec.shape_source and any(not isinstance(a, (Dim, int)) for a in spec.shape): raise ProgramBuilderError(f"{spec.name!r}: shape-source axes must be bare Dim or int")
@@ -140,7 +183,12 @@ class ProgramBuilder:
             if set(spec.dims) - dimset or set(spec.config) - set(self._config): raise ProgramBuilderError(f"bundle {spec.name!r}: unknown dim/config selection")
         for spec in self._dispatch.values():
             if spec.on not in self._config or set(spec.cases.values()) - set(self._sequences): raise ProgramBuilderError(f"dispatch {spec.name!r}: invalid selector or case")
-        recipe = _Recipe(self._name, dims, dict(self._params), dict(self._data), dict(self._bundles), dict(self._sequences), dict(self._config), dict(self._dispatch))
+        callable_names = set(self._sequences) | set(self._dispatch)
+        for spec in self._pipelines.values():
+            if not spec.steps: raise ProgramBuilderError(f"pipeline {spec.name!r}: steps are empty")
+            unknown = set(spec.steps) - callable_names
+            if unknown: raise ProgramBuilderError(f"pipeline {spec.name!r}: unknown steps {sorted(unknown)}")
+        recipe = _Recipe(self._name, dims, dict(self._params), dict(self._data), dict(self._bundles), dict(self._sequences), dict(self._config), dict(self._dispatch), dict(self._pipelines))
         return type(self._name, (_Program,), {"_recipe": recipe})
 
 
@@ -148,12 +196,12 @@ class _Accessor:
     __slots__ = ("_prog", "_name", "_kind")
     def __init__(self, prog, name, kind): self._prog, self._name, self._kind = prog, name, kind
     def set(self, value):
+        if self._kind == "const": raise ProgramError(f"{self._name!r} is a constant parameter and is immutable")
         if self._kind != "scalar": raise ProgramError(f"{self._name!r} is not a scalar parameter")
         self._prog._set_scalar(self._name, value)
     def read(self):
         self._prog._check_open()
-        if self._kind == "const": return self._prog._recipe.params[self._name].value
-        if self._kind != "scalar": raise ProgramError(f"{self._name!r} is not a scalar parameter")
+        if self._kind not in ("const", "scalar"): raise ProgramError(f"{self._name!r} is not a scalar/constant parameter")
         return self._prog._read_scalar(self._name)
     def from_numpy(self, array):
         if self._kind not in ("field", "data"): raise ProgramError(f"{self._name!r} is not array storage")
@@ -213,12 +261,26 @@ class _BundleView(dict):
 
 class _Program:
     _recipe: _Recipe
-    def __init__(self, be, pool=None, **config):
+    def __init__(self, be, pool=None, **options):
         self._be = require_backend(be); self._closed = False; self._owns_pool = pool is None
         if pool is not None and not isinstance(pool, self._be.PoolCls): raise ProgramError(f"pool does not match {self._be.name!r}")
         self._pool = self._be.pool() if pool is None else pool
-        self._config = self._resolve_config(config); self._dim_vals = {n: int(v) for n, v in self._config.items() if n in self._recipe.dims}
-        self._params = {}; self._data = {}; self._bundles = {}; self._bundle_params = {}; self._owned_params = []; self._allocated = False
+        param_inputs = {n: options.pop(n) for n in tuple(options) if n in self._recipe.params}
+        fixed = {n for n in param_inputs if self._recipe.params[n].mode != "auto"}
+        if fixed: raise ProgramError(f"constructor parameters must be declared auto, got {sorted(fixed)}")
+        self._config = self._resolve_config(options); self._dim_vals = {n: int(v) for n, v in self._config.items() if n in self._recipe.dims}
+        self._param_modes = {}; self._param_initial = {}
+        for name, spec in self._recipe.params.items():
+            if spec.mode == "auto" and name in param_inputs:
+                value = np.asarray(param_inputs[name])
+                mode = "const" if value.ndim == 0 else "field"
+                if mode == "field" and not spec.shape:
+                    raise ProgramError(f"{name!r}: an array requires a declared parameter shape")
+                value = value.item() if mode == "const" else value
+            else:
+                mode, value = ("scalar", spec.value) if spec.mode == "auto" else (spec.mode, spec.value)
+            self._param_modes[name] = mode; self._param_initial[name] = value
+        self._params = {}; self._data = {}; self._data_dtypes = {}; self._bundles = {}; self._bundle_params = {}; self._owned_params = []; self._allocated = False
         self._pending_arrays = {}; self._pending_scalars = {}; self._states = {n: _SeqState() for n in self._recipe.sequences}
         self._install(); self._maybe_allocate()
 
@@ -235,7 +297,7 @@ class _Program:
             out[name] = value
         return out
     def _install(self):
-        for n, s in self._recipe.params.items(): object.__setattr__(self, n, _Accessor(self, n, {"const":"const", "scalar":"scalar", "field":"field"}[s.mode]))
+        for n in self._recipe.params: object.__setattr__(self, n, _Accessor(self, n, self._param_modes[n]))
         for n, s in self._recipe.data.items():
             if s.lifetime == "persistent" and s.role != "internal": object.__setattr__(self, n, _Accessor(self, n, "data"))
         for n in self._recipe.sequences:
@@ -244,8 +306,12 @@ class _Program:
             object.__setattr__(self, n, _runner)
         for n in self._recipe.dispatch:
             def _dispatcher(n=1, _name=n):
-                return self.run(_name, n)
+                return _Program.run(self, _name, n)
             object.__setattr__(self, n, _dispatcher)
+        for n in self._recipe.pipelines:
+            def _pipeline(n=1, _name=n):
+                return _Program.run(self, _name, n)
+            object.__setattr__(self, n, _pipeline)
     def __getattr__(self, name):
         if name in self._dim_vals: return self._dim_vals[name]
         if name in self._config: return self._config[name]
@@ -253,17 +319,26 @@ class _Program:
     def get(self, name):
         if hasattr(self, name): return getattr(self, name)
         raise ProgramError(f"no public program member {name!r}")
-    def _dtype(self, name): return (self._recipe.params.get(name) or self._recipe.data[name]).dtype
+    def _dtype(self, name):
+        if name in self._recipe.params: return self._recipe.params[name].dtype
+        if name not in self._data_dtypes:
+            spec = self._recipe.data[name]
+            dtype = spec.dtype({**self._config, **self._dim_vals}) if callable(spec.dtype) else spec.dtype
+            if dtype not in _NP_DTYPES: raise ProgramError(f"{name!r}: dtype selector returned unsupported dtype {dtype!r}")
+            self._data_dtypes[name] = dtype
+        return self._data_dtypes[name]
     def _spec(self, name): return self._recipe.params.get(name) or self._recipe.data.get(name)
     def _host_shape(self, name):
         self._check_open()
         if not self._allocated: raise ProgramError("shapes are unresolved")
-        return _resolve_shape(self._spec(name).shape, self._dim_vals)
+        return _spec_shape(self._spec(name), self._config, self._dim_vals)
     def _device_shape(self, spec):
-        shape = _resolve_shape(spec.shape, self._dim_vals)
+        shape = _spec_shape(spec, self._config, self._dim_vals)
         return (int(np.prod(shape)),) if spec.flat else shape
     def _bind_source_dims(self, name, arr):
         spec = self._spec(name)
+        if callable(spec.shape):
+            raise ProgramError(f"{name!r}: callable shape cannot bind dimensions")
         if len(arr.shape) != len(spec.shape): raise ProgramError(f"{name!r}: source rank mismatch")
         for axis, size in zip(spec.shape, arr.shape):
             if isinstance(axis, int):
@@ -282,12 +357,24 @@ class _Program:
             params = dict(spec.params(self._be, self._pool, **selected))
             self._bundles[name], self._bundle_params[name] = node, params; self._owned_params.extend(params.values())
         for name, spec in self._recipe.params.items():
-            shape = _resolve_shape(spec.shape, self._dim_vals) if spec.mode == "field" else ()
-            value = spec.value(self._dim_vals) if callable(spec.value) else spec.value
-            p = self._be.ParameterCls(name, dtype=spec.dtype, mode=spec.mode, value=value, pool=self._pool, shape=shape)
+            mode = self._param_modes[name]
+            logical_shape = _resolve_shape(spec.shape, self._dim_vals) if mode == "field" else ()
+            shape = (int(np.prod(logical_shape)),) if mode == "field" else ()
+            value = self._param_initial[name]
+            value = value(self._dim_vals) if callable(value) else value
+            if mode == "field":
+                value = np.asarray(value)
+                expected_dtype = np.dtype(_NP_DTYPES[spec.dtype])
+                if value.ndim == 0:
+                    value = np.full(shape, value.item(), dtype=expected_dtype)
+                else:
+                    if value.dtype != expected_dtype: raise ProgramError(f"{name!r}: dtype mismatch")
+                    if tuple(value.shape) != logical_shape: raise ProgramError(f"{name!r}: expected shape {logical_shape}, got {tuple(value.shape)}")
+                    value = value.reshape(-1)
+            p = self._be.ParameterCls(name, dtype=spec.dtype, mode=mode, value=value, pool=self._pool, shape=shape)
             self._params[name] = p; self._owned_params.append(p)
         for name, spec in self._recipe.data.items():
-            if spec.lifetime == "persistent": self._data[name] = self._pool.get_data(self._be.dtypes[spec.dtype], self._device_shape(spec))
+            if spec.lifetime == "persistent": self._data[name] = self._pool.get_data(self._be.dtypes[self._dtype(name)], self._device_shape(spec))
         self._allocated = True
         for name, arr in tuple(self._pending_arrays.items()): self._write_array(name, arr)
         self._pending_arrays.clear()
@@ -318,14 +405,17 @@ class _Program:
         else: self._params[name].set(value)
     def _read_scalar(self, name):
         self._check_open()
-        if not self._allocated: raise ProgramError("shapes are unresolved")
+        if not self._allocated:
+            if self._param_modes[name] == "const" and not callable(self._param_initial[name]):
+                return np.dtype(_NP_DTYPES[self._dtype(name)]).type(self._param_initial[name]).item()
+            raise ProgramError("shapes are unresolved")
         return self._params[name].read()
     def _adopt(self, name, array):
         self._check_open()
         if not self._allocated: raise ProgramError("adopt requires resolved shapes")
         if any(s.compiled is not None for s in self._states.values()): raise ProgramError("adopt before compile; compiled objects retain bindings")
         h = self._be.wrap(array, owned=False); spec = self._recipe.data[name]
-        if h.dtype != spec.dtype or tuple(h.shape) != self._device_shape(spec): raise ProgramError(f"{name!r}: adopted buffer has incompatible dtype or shape")
+        if h.dtype != self._dtype(name) or tuple(h.shape) != self._device_shape(spec): raise ProgramError(f"{name!r}: adopted buffer has incompatible dtype or shape")
         self._pool.release_data(self._data[name]); self._data[name] = h
     def _value(self, name):
         if isinstance(name, str) and name.endswith(".handle"):
@@ -385,7 +475,7 @@ class _Program:
                 if data is not None and data.lifetime == "temp":
                     placeholder = temp_placeholders.get(value_name)
                     if placeholder is None:
-                        placeholder = self._pool.get_data(self._be.dtypes[data.dtype], self._device_shape(data))
+                        placeholder = self._pool.get_data(self._be.dtypes[self._dtype(value_name)], self._device_shape(data))
                         temp_placeholders[value_name] = placeholder
                     bound.bind(addr, placeholder)
                     temp_addrs.setdefault(value_name, []).append(addr)
@@ -406,7 +496,7 @@ class _Program:
         self._ensure_compiled(name); state = self._states[name]; acquired = []
         try:
             for (temp, addrs), placeholder in zip(state.temp_plan, state.placeholders):
-                data = self._recipe.data[temp]; h = self._pool.get_data(self._be.dtypes[data.dtype], self._device_shape(data)); acquired.append(h)
+                data = self._recipe.data[temp]; h = self._pool.get_data(self._be.dtypes[self._dtype(temp)], self._device_shape(data)); acquired.append(h)
                 for addr in addrs: state.compiled.swap(addr, h)
             for _ in range(max(0, int(n))): state.compiled()
         finally:
@@ -418,34 +508,58 @@ class _Program:
         if name in self._recipe.sequences: return self._run_sequence(name, n)
         if name in self._recipe.dispatch:
             d = self._recipe.dispatch[name]; return self._run_sequence(d.cases[self._config[d.on]], n)
+        if name in self._recipe.pipelines:
+            result = None
+            for _ in range(max(0, int(n))):
+                for step in self._recipe.pipelines[name].steps:
+                    result = _Program.run(self, step)
+            return result
         raise ProgramError(f"unknown sequence {name!r}")
     def compile(self):
         self._check_open()
         if not self._allocated: raise ProgramError("shapes are unresolved")
         for name in self._states: self._ensure_compiled(name)
     def inspect(self): return "\n\n".join(f"[{n}]\n{s.after or s.before or '(not built)'}" for n, s in self._states.items())
-    def describe(self): return f"{self._recipe.name}: config={list(self._recipe.config)}, params={list(self._recipe.params)}, data={list(self._recipe.data)}, bundles={list(self._recipe.bundles)}, sequences={list(self._recipe.sequences)}"
+    def describe(self): return f"{self._recipe.name}: config={list(self._recipe.config)}, params={list(self._recipe.params)}, data={list(self._recipe.data)}, bundles={list(self._recipe.bundles)}, sequences={list(self._recipe.sequences)}, pipelines={list(self._recipe.pipelines)}"
     def state(self):
         self._check_open()
         if not self._allocated: raise ProgramError("shapes are unresolved")
-        return {"schema": self._recipe.name, "version": 1, "dims":dict(self._dim_vals), "data":{n:self._get_array(n) for n,s in self._recipe.data.items() if s.lifetime == "persistent"}, "params":{n:self._read_scalar(n) for n,s in self._recipe.params.items() if s.mode == "scalar"}}
+        return {
+            "schema": self._recipe.name, "version": 1,
+            "dims": dict(self._dim_vals),
+            "params": {
+                n: (self._read_scalar(n) if self._param_modes[n] == "scalar"
+                    else self._get_array(n))
+                for n in self._recipe.params if self._param_modes[n] != "const"
+            },
+            "data": {n:self._get_array(n) for n,s in self._recipe.data.items() if s.lifetime == "persistent"},
+        }
     def load_state(self, payload):
         self._check_open()
         if payload.get("schema") != self._recipe.name or payload.get("version") != 1: raise ProgramError("state schema/version mismatch")
         if payload.get("dims") != self._dim_vals: raise ProgramError("state dimensions do not match this program")
         expected_data = {n for n, s in self._recipe.data.items() if s.lifetime == "persistent"}
-        expected_params = {n for n, s in self._recipe.params.items() if s.mode == "scalar"}
-        if set(payload.get("data", ())) != expected_data or set(payload.get("params", ())) != expected_params:
+        expected_params = {n for n in self._recipe.params if self._param_modes[n] != "const"}
+        if (set(payload.get("data", ())) != expected_data
+                or set(payload.get("params", ())) != expected_params):
             raise ProgramError("state names do not match this program")
         checked = []
         for n, arr in payload.get("data", {}).items():
             arr = np.asarray(arr)
             if n not in self._recipe.data or arr.dtype != np.dtype(_NP_DTYPES[self._dtype(n)]) or tuple(arr.shape) != self._host_shape(n): raise ProgramError(f"invalid state data {n!r}")
             checked.append((n, arr))
-        for n in payload.get("params", {}):
-            if n not in self._recipe.params or self._recipe.params[n].mode != "scalar": raise ProgramError(f"invalid state parameter {n!r}")
+        checked_fields = []
+        for n, value in payload.get("params", {}).items():
+            if self._param_modes[n] == "field":
+                arr = np.asarray(value)
+                if arr.dtype != np.dtype(_NP_DTYPES[self._dtype(n)]) or tuple(arr.shape) != self._host_shape(n): raise ProgramError(f"invalid state parameter field {n!r}")
+                checked_fields.append((n, arr))
+            elif np.asarray(value).ndim != 0:
+                raise ProgramError(f"invalid scalar state parameter {n!r}")
         for n, arr in checked: self._write_array(n, arr)
-        for n, value in payload.get("params", {}).items(): self._params[n].set(value)
+        for n, arr in checked_fields: self._write_array(n, arr)
+        for n, value in payload.get("params", {}).items():
+            if self._param_modes[n] == "scalar": self._params[n].set(value)
     def close(self):
         if self._closed: return
         self._closed = True

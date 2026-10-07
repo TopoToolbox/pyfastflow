@@ -117,7 +117,11 @@ def _insert_locals(body: str, local_ptrs: dict[int, dict], local_index: dict[int
     """
     if not local_ptrs:
         return body
-    idx = body.find("{")
+    # A CUDA source template may place reusable ``__device__`` helpers before
+    # its entry kernel.  Parameters referenced by the entry kernel must be
+    # declared in that kernel's scope, not in the first helper body.
+    kernel = re.search(r"__global__\s+void\s+\w+\s*\([^)]*\)\s*\{", body, re.S)
+    idx = body.find("{", kernel.start()) if kernel is not None else body.find("{")
     if idx == -1:
         raise ValueError("could not find a function body to insert parameter locals into")
     decls = "".join(
@@ -219,9 +223,11 @@ class CupyParameter(Parameter):
         if not isinstance(dtype, str):
             raise TypeError(f"{name}: dtype must be a short tag string, got {type(dtype).__name__}")
         try:
-            backend_dtype = {"i32": np.dtype(np.int32), "i64": np.dtype(np.int64),
-                             "f32": np.dtype(np.float32), "u8": np.dtype(np.uint8),
-                             "u32": np.dtype(np.uint32)}[dtype]
+            backend_dtype = {
+                "i32": np.dtype(np.int32), "i64": np.dtype(np.int64),
+                "f32": np.dtype(np.float32), "f64": np.dtype(np.float64),
+                "u8": np.dtype(np.uint8), "u32": np.dtype(np.uint32),
+            }[dtype]
         except KeyError as exc:
             raise ValueError(f"{name}: unknown dtype tag {dtype!r}") from exc
         shape = tuple(shape)

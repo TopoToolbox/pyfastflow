@@ -1,4 +1,4 @@
-"""CUDA epsilon reconstruction helper for GraphFlood."""
+"""CUDA epsilon reconstruction helpers for filled-surface routing."""
 
 from ..core import FrozenKernel, KernelBuilder, new_uid
 
@@ -69,8 +69,7 @@ def build_hops_jump(*, n_flat: int) -> FrozenKernel:
     ../flow/_cupy_accum.py's build_pointer_jump_push uses for its own
     "step_a"/"step_b" alternation) for a caller-rounded-up-to-even number
     of rounds, so the final, fully-converged result always lands back in
-    `dist`/`anc` regardless of round count - see make_graphflood's own
-    `hops_rounds` computation.
+    `dist`/`anc` regardless of round count.
 
     Parameters
     ----------

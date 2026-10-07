@@ -307,6 +307,7 @@ __device__ void {t}_neighbour_and_distance(int i, int k, int* j_out, float* d_ou
         helpers={"neighbour": neighbour, "dist_from_k": dist_from_k},
     )
 
+    group.compose("delta", delta)
     group.compose("neighbour", neighbour)
     group.compose("neighbour_raw", neighbour_raw)
     group.compose("nodata", nodata_fn)

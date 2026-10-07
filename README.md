@@ -42,14 +42,14 @@ selected backend, topology, parameter layout, and algorithm.
 
 ## Quick start: a complete flow Program
 
-The experimental CuPy Programs provide the shortest route from a DEM to SFD
+The CuPy Programs provide the shortest route from a DEM to SFD
 drainage accumulation:
 
 ```python
 import numpy as np
 
 from pyfastflow.core import Backend
-from pyfastflow.experimental.programs.flow import SFDFlowProgram
+from pyfastflow.flow import SFDFlowProgram
 
 ny = nx = 1024
 dem = np.random.default_rng(42).random((ny, nx), dtype=np.float32)
@@ -74,7 +74,7 @@ The high-level choices currently exposed by `SFDFlowProgram` are:
 
 | Stage | Choices |
 | --- | --- |
-| Local minima | `cordonnier_carve`, `cordonnier_jump`, `reconstruct_epsilon` |
+| Local minima | `none`, `cordonnier_carve`, `cordonnier_jump`, `reconstruct_epsilon` |
 | SFD accumulation | `pointer_jump_push` (or `pj`), `rake_compress` |
 
 `reconstruct_epsilon` constructs the acyclic receiver forest itself, so it is
@@ -97,6 +97,57 @@ python examples/flow_acc_sfd_lm_program.py \
 
 See [`examples/flow_acc_sfd_lm_program.py`](./examples/flow_acc_sfd_lm_program.py)
 for the full example, including explicit cleanup without a context manager.
+
+The CuPy `MFDFlowProgram` packages persistent Kahn accumulation with raw,
+reconstructed-surface, or rank-gated Cordonnier topology. A complete zero-copy
+Perlin → MFD → multishade composition is runnable with:
+
+```bash
+python examples/flow_acc_mfd_lm_program.py
+```
+
+Use `--local-minima none` to retain raw-surface sinks, or
+`--local-minima reconstruct_epsilon` to use filling and flat resolution. The
+example selects `hillshade` or four-direction `multishade` through the
+standalone `HillshadeProgram`.
+
+MFD Programs use max-normalized `uint8` routing scores by default. Pass
+`quantized_weight=False` when constructing either `MFDFlowProgram` or
+`GraphFloodProgram` to retain precomputed `float32` weights. Effective weights
+are normalized by their integer sum during accumulation, so the quantized path
+still partitions the complete discharge at every node.
+
+The CuPy `GraphFloodProgram` combines local-minimum conditioning,
+persistent MFD accumulation, and a Manning depth update:
+
+```python
+from pyfastflow.graphflood import GraphFloodProgram
+
+with GraphFloodProgram(backend, nx=nx, ny=ny, dx=dx) as flood:
+    flood.z.from_numpy(dem.astype("float32"))
+    flood.reset_h()
+    flood.precipitation.set(50e-3 / 3600)  # m s-1
+    flood.friction_coefficient.set(0.033)
+    flood.friction_exponent.set(2 / 3)
+    flood.dt.set(1e-2)
+    flood.run_n_step(100)
+    depth = flood.h.to_numpy()
+```
+
+`run_n_step()` performs the standard stationary GraphFlood update.
+`run_n_step_analytical()` replaces its explicit depth update with either the
+local or bottom-up analytical inversion, and `run_n_step_transient()` performs
+conservative local MFD transport on the unconditioned hydraulic surface.
+`run_n_step_hybrid()` blends the previous `Qi` with Manning `Qo` through
+`hybrid_theta`.
+Stationary steps can use rank-gated, filled, or carved Cordonnier routing, or
+reconstruction plus epsilon ordering through `mfd_local_minima`.
+For a growable river domain, call `prepare_dynamic_flow_domain()`, alternate
+`run_dynamic_n_step_analytical()` with `grow_dynamic_flow_domain()`, or use
+the corresponding transient run and growth methods.
+The only friction-law option is currently `friction_law="manning"`; it is
+already a construction-time Program choice so more laws can be added without
+changing the execution API.
 
 ## Programs and memory ownership
 
@@ -127,17 +178,28 @@ immediately after all relevant Programs have closed, the application can call
 - **Flow routing:** steepest and stochastic receivers.
 - **Drainage accumulation:** atomic SFD, rake-and-compress, pointer-jump/push,
   and CuPy persistent-kernel MFD accumulation.
+- **MFD topology:** filled-surface routing, or CuPy rank-gated routing directly
+  over a Cordonnier-carved receiver graph without topographic filling.
 - **Local minima:** Cordonnier basin labelling with carve or jump rerouting,
   plus fill-and-reconstruct solvers.
-- **Hydraulics:** GraphFlood SFD, unstable flow, and CuPy MFD variants, with
-  configurable friction laws and outlet behaviour.
+- **Hydraulics:** GraphFlood with MFD routing, local-minimum conditioning,
+  stationary and transient depth updates.
 - **Terrain and utilities:** white/Perlin noise, hillshading, elementwise
   operations, scan, reduction, and reusable math/bit-packing helpers.
 
 Not every algorithm exists on every backend. Backend-specific capabilities are
 validated when their factory or Program is built. The ready-made
-`PerlinNoiseProgram` and `SFDFlowProgram` are currently CuPy-only; the lower-level
+`PerlinNoiseProgram`, `HillshadeProgram`, `SFDFlowProgram`, and `MFDFlowProgram`
+are currently CuPy-only; the lower-level
 feature factories cover Taichi, Quadrants, and CuPy where implementations exist.
+
+The rank-gated MFD path is assembled with
+`make_mfd_topology(..., method="cordonnier_rank")`. Snapshot the initial
+receivers, apply optimized Cordonnier carving, compute `receiver_rank`, then
+build directions and indegrees before running
+`make_accumulation(..., method="persistent_mfd")`. Rerouted cells retain one
+forced carved link; all other MFD links must strictly decrease receiver rank,
+which gives the persistent Kahn accumulator an acyclic graph.
 
 ## Working at the composition layer
 
@@ -170,6 +232,11 @@ unit can define a reusable class with `ProgramBuilder`. Complete backend-level
 examples live under [`examples/core`](./examples/core), and a fully authored
 Program is shown in
 [`examples/core/program/sfd_drainage.py`](./examples/core/program/sfd_drainage.py).
+
+Parameters declared with mode `"auto"` specialise per Program instance. If
+omitted they are mutable device scalars; a scalar constructor value becomes a
+compiled constant, while a correctly shaped NumPy array becomes a mutable
+spatial field. The selected mode cannot change during that instance's life.
 
 ## Backends
 
@@ -231,7 +298,7 @@ Useful starting points:
   and
   [`examples/flow_acc_sfd_lm_raw_quadrants.py`](./examples/flow_acc_sfd_lm_raw_quadrants.py):
   hard-coded baselines for measuring the cost of the machinery;
-- [`examples/core/graphflood`](./examples/core/graphflood): GraphFlood examples;
+- [`examples/graphflood`](./examples/graphflood): GraphFlood program examples;
 - [`examples/core/lem`](./examples/core/lem): landscape-evolution examples.
 
 ## License and authors
