@@ -4,9 +4,9 @@ Faces: x faces (ny, nx + 1), face ``row (nx + 1) + col`` west of cell
 (row, col); y faces (ny + 1, nx), face ``row nx + col`` north of it. A
 periodic axis uses face 0 of the row (column) as the east (south) face of
 its last cell and leaves the extra face at 0. Per face: mass flux f1,
-x-momentum flux f2 and y-momentum flux f3 (m2/s, m3/s2), and the
-hydrostatic depths on its left (west / north) and right sides
-(``hxl``/``hxr``, ``hyl``/``hyr``).
+x-momentum flux f2 and y-momentum flux f3 (m2/s, m3/s2) and, with order 2,
+the face bed max(z_l, z_r) of the reconstructed beds of its two sides
+(``zx``, ``zy``).
 
 ``flux`` (one thread per cell, its west and north faces, plus the east /
 south face of the last column / row on a non-periodic axis): each side of a
@@ -26,7 +26,11 @@ h_r <- max(h_r - max(-dz, 0), 0), before the Riemann flux
   q*_y likewise along y,
 
 with h_l, h_r, dzc = z_r - z_l the cell's own reconstruction and h_W',
-h_E' its hydrostatic depths on its west / east faces, then the friction
+h_E' its hydrostatic depths on its west / east faces: its own reconstructed
+depth cut by the bed step to the other side, max(dz, 0) = z_f - z_own with
+z_f = max(z_l, z_r) the face bed (order 1: from z of the neighbour or the
+ghost bed; order 2: stored by ``flux``), the same bits as in ``flux``; the
+uncut depth on an inflow face. Then the friction
 divisor (``_friction.py``, input velocities), u = q / h above HE_CA, and
 the cuts h <= HE_CA -> dry, |u| <= VE_CA -> 0. Kinds:
 
@@ -36,21 +40,32 @@ the cuts h <= HE_CA -> dry, |u| <= VE_CA -> 0. Kinds:
     h <- (h + h*) / 2, q <- (h u + h* u*) / 2 (dry below HE_CA).
 
 ``euler`` and the ungated ``first`` take dt from the control: with
-``time_step="cfl"`` dt = min(DT_MAX, CFL dx / c_max) (DT_MAX <= 0 means
-CFL dx, c_max the largest wave speed of the step-start fluxes), with
+``time_step="cfl"`` dt = min(DT_MAX, CFL dx / (c_max g)) (DT_MAX <= 0 means
+CFL dx, c_max the largest wave speed of the step-start fluxes, g = 1 for
+``euler`` and for ``first`` the growth of the wave speed over the first
+stage of the last step, at least 1, so that the intermediate state rarely
+needs a smaller dt), with
 ``"fixed"`` dt = DT and a CFL error flag when c_max DT / dx > CFL; both
-are cut at the end time. Sinks absorb their water after ``euler`` and
-``second``. Each stage adds its volumes and boundary-face terms, weighted
-1 / order, to the step budget.
+are cut at the end time. dt is evaluated in ``real`` by every thread and
+stored by thread 0; ``check`` repeats the same expression so that equal
+wave speeds give the same dt. Sinks absorb their water after ``euler`` and
+``second``. Each stage adds its infiltrated and threshold volumes and its
+boundary-face terms, weighted 1 / order, to the step budget (warp sums
+skipped on warps where they are all zero); rain and source volumes, which
+do not depend on the state, are added by ``finalize`` as dt times their
+time factor times the rates of the active cells summed by ``prepare``.
 
 ``check`` (order 2, after the intermediate fluxes): with ``"cfl"``, when
 min(dt, CFL dx / c_max) of the intermediate state is below dt and fewer
 than ``max_restarts`` redos ran in the step, it sets that dt, clears the
 step budget and raises the redo flag; the gated ``flux`` / ``first`` /
 ``flux`` / ``check`` that follow then recompute the first stage from the
-step-start state. With ``"fixed"`` it raises the CFL error flag.
+step-start state; otherwise it stores the growth c_max(intermediate) /
+c_max(step start) of the step for the next one. With ``"fixed"`` it raises
+the CFL error flag.
 
-``finalize`` commits the step budget, advances time and the step counter,
+``finalize`` (one thread per budget entry) commits the step budget plus the
+rain and source volumes, then thread 0 advances time and the step counter,
 clears the step flags and evaluates the time factors; ``record`` writes a
 row (time, dt, probe h / u / v, budget) every RECORD_INTERVAL steps.
 
@@ -62,7 +77,8 @@ from pyfastflow.core import KernelBuilder, RoutineBuilder
 from ._boundary import make_ghost, make_inflow_face
 from ._common import (
     B_FACE, B_INFILTRATION, B_RAIN, B_SINK, B_SOURCE, B_THRESHOLD,
-    BOUNDARY_CODES, C_DT, C_INFLOW, C_RAIN, C_SOURCE, C_T_END, C_TIME,
+    BOUNDARY_CODES, C_DT, C_GROWTH, C_INFLOW, C_RAIN, C_RAIN_RATE, C_SOURCE,
+    C_SOURCE_RATE, C_T_END, C_TIME,
     K_CFL_ERROR, K_CMAX0, K_CMAX1, K_REC_BASE, K_REC_OVERFLOW, K_REDO,
     K_RESTARTS, K_STEP, K_TOTAL_RESTARTS, N_BUDGET, N_FACE_TERMS,
     PRECISIONS, cupy_only, literal, warp_reduce,
@@ -75,7 +91,7 @@ from ._riemann import make_flux
 from ._diagnostics import ACC_CELL, ACC_FACE, ACC_IN, FROUDE_CELL, FROUDE_FACE
 from ._shear import CELL_OUT, FACE_OUT, cell_kernel, face_kernel
 
-FACES = ("fx1", "fx2", "fx3", "fy1", "fy2", "fy3", "hxl", "hxr", "hyl", "hyr")
+FACES = ("fx1", "fx2", "fx3", "fy1", "fy2", "fy3", "zx", "zy")
 STATE = ("h", "u", "v")
 STAGE_STATE = ("hs", "us", "vs")
 
@@ -139,6 +155,7 @@ def _flux_kernel(bundles, config, helpers, src, slot, gated):
     real = _real(config)
     c = literal(real)
     h, u, v = src
+    bed = int(config["order"]) == 2
     gate = f"if (control[{K_REDO}] == 0u) return;" if gated else ""
     reduce = (f'''
     cmax = fusw_warp_max(cmax);
@@ -166,24 +183,23 @@ def _flux_kernel(bundles, config, helpers, src, slot, gated):
                     &f1, &fn, &hb, &cw)$;
         *F1 = f1;
         *F2 = axis == 0 ? fn : {c(0)};
-        *F3 = axis == 0 ? {c(0)} : fn;
-        *HL = isg < 0 ? hb : hc;
-        *HR = isg < 0 ? hc : hb;
+        *F3 = axis == 0 ? {c(0)} : fn;{" *Z = fmax(zL, zR);" if bed else ""}
         *C = cw;
         return;
     }}''' if lines else ""
 
     def face(a, b, axis, out, index):
-        f1, f2, f3, hl, hr = (("fx1", "fx2", "fx3", "hxl", "hxr") if axis == 0
-                              else ("fy1", "fy2", "fy3", "hyl", "hyr"))
+        f1, f2, f3 = ("fx1", "fx2", "fx3") if axis == 0 else ("fy1", "fy2", "fy3")
+        zf = ("zx" if axis == 0 else "zy") if bed else None
         return f'''fusw_face({face_args}, {a}, {b}, {axis}, dx, factor,
-                      &F1, &F2, &F3, &HL, &HR, &C);
-            {f1}[{index}] = F1; {f2}[{index}] = F2; {f3}[{index}] = F3;
-            {hl}[{index}] = HL; {hr}[{index}] = HR; cmax = fmax(cmax, C);'''
+                      &F1, &F2, &F3,{" &Z," if bed else ""} &C);
+            {f1}[{index}] = F1; {f2}[{index}] = F2; {f3}[{index}] = F3;{f" {zf}[{index}] = Z;" if bed else ""}
+            cmax = fmax(cmax, C);'''
 
     def zero(axis, index):
-        names = (("fx1", "fx2", "fx3", "hxl", "hxr") if axis == 0
-                 else ("fy1", "fy2", "fy3", "hyl", "hyr"))
+        names = ("fx1", "fx2", "fx3") if axis == 0 else ("fy1", "fy2", "fy3")
+        if bed:
+            names += ("zx",) if axis == 0 else ("zy",)
         return " ".join(f"{name}[{index}] = {c(0)};" for name in names)
 
     west_raw = f"x > 0 ? i - 1 : {f'i + {nx - 1}' if px else '-1'}"
@@ -197,8 +213,7 @@ __device__ void fusw_face(const {real}* h, const {real}* u, const {real}* v,
                           const {real}* z, const unsigned char* code,
                           const unsigned char* fmask{inflow_args}, int a, int b, int axis,
                           {real} dx, {real} factor,
-                          {real}* F1, {real}* F2, {real}* F3,
-                          {real}* HL, {real}* HR, {real}* C) {{
+                          {real}* F1, {real}* F2, {real}* F3,{f" {real}* Z," if bed else ""} {real}* C) {{
     {real} hL, nL, tL, zL, hR, nR, tR, zR, d0, d1, d2, d3;
     if (a >= 0) $ctx.axis(h, u, v, z, code, fmask, a, axis, dx, factor,
                           &d0, &hL, &d1, &nL, &d2, &tL, &d3, &zL)$;
@@ -206,7 +221,7 @@ __device__ void fusw_face(const {real}* h, const {real}* u, const {real}* v,
     if (b >= 0) $ctx.axis(h, u, v, z, code, fmask, b, axis, dx, factor,
                           &hR, &d0, &nR, &d1, &tR, &d2, &zR, &d3)$;
     else $ctx.side(h, u, v, z, code, fmask, a, axis == 0 ? 2 : 3, dx, factor, &hR, &nR, &tR, &zR)$;{inflow_text}
-    {real} dz = zR - zL;
+    {real} dz = zR - zL;{" *Z = fmax(zL, zR);" if bed else ""}
     {real} hl = fmax(hL - fmax(dz, {c(0)}), {c(0)});
     {real} hr = fmax(hR - fmax(-dz, {c(0)}), {c(0)});
     {real} f1, fn, ft, cfl;
@@ -214,14 +229,13 @@ __device__ void fusw_face(const {real}* h, const {real}* u, const {real}* v,
     *F1 = f1;
     *F2 = axis == 0 ? fn : ft;
     *F3 = axis == 0 ? ft : fn;
-    *HL = hl; *HR = hr; *C = cfl;
+    *C = cfl;
 }}
 
 extern "C" __global__ void fusw_flux(
         const {real}* {h}, const {real}* {u}, const {real}* {v}, const {real}* z,
         const unsigned char* boundary_type, const unsigned char* boundary_faces{inflow_kernel_args},
-        {real}* fx1, {real}* fx2, {real}* fx3, {real}* fy1, {real}* fy2, {real}* fy3,
-        {real}* hxl, {real}* hxr, {real}* hyl, {real}* hyr,
+        {real}* fx1, {real}* fx2, {real}* fx3, {real}* fy1, {real}* fy2, {real}* fy3,{f" {real}* zx, {real}* zy," if bed else ""}
         const double* clock, unsigned int* control) {{
     {gate}
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -234,7 +248,7 @@ extern "C" __global__ void fusw_flux(
         int fxw = y * {nx + 1} + x;
         int fyn = y * {nx} + x;
         bool act = $ctx.grid.is_active(i)$;
-        {real} F1, F2, F3, HL, HR, C;
+        {real} F1, F2, F3,{" Z," if bed else ""} C;
         int a = -1, b = -1;
         if (act) {{ b = i; a = $ctx.grid.neighbour(i, 1)$; }}
         else {{ int w = {west_raw}; if (w >= 0 && $ctx.grid.is_active(w)$) a = w; }}
@@ -338,28 +352,30 @@ extern "C" __global__ void fusw_lines(
 # stage update
 # ----------------------------------------------------------------------------
 
-def _dt_text(config, real):
-    """dt of the step from the step-start wave speed; thread 0 stores it."""
+def _dt_text(config, real, growth):
+    """dt of the step from the step-start wave speed, times the predicted
+    growth (``growth``), in ``real``; thread 0 stores it."""
+    c = literal(real)
     if config["time_step"] == "cfl":
-        base = f'''double dtd = dt_max;
-    if (fabs(c0 * dt_max / dxd) >= eps) dtd = fmin(dt_max, cfl * dxd / c0);'''
+        scale = f" * fmax(({real})clock[{C_GROWTH}], {c(1)})" if growth else ""
+        base = f'''{real} dt = dt_max;
+    if (fabs(c0 * dt_max / dxd) >= eps) dt = fmin(dt_max, cfl * dxd / (c0{scale}));'''
         error = ""
     else:
-        base = "double dtd = (double)$ctx.DT.get(0)$;"
-        error = f"if (c0 * dtd / dxd > cfl) control[{K_CFL_ERROR}] = 1u;"
+        base = f"{real} dt = ({real})$ctx.DT.get(0)$;"
+        error = f"if (c0 * dt / dxd > cfl) control[{K_CFL_ERROR}] = 1u;"
     return f'''
-    double dxd = (double)$ctx.grid.DX.get(0)$;
-    double cfl = (double)$ctx.CFL.get(0)$;
-    double eps = (double)$ctx.EPSILON.get(0)$;
-    double dt_max = (double)$ctx.DT_MAX.get(0)$;
-    if (!(dt_max > 0.0)) dt_max = cfl * dxd;
-    double c0 = (double)__uint_as_float(control[{K_CMAX0}]);
+    {real} dxd = ({real})$ctx.grid.DX.get(0)$;
+    {real} cfl = ({real})$ctx.CFL.get(0)$;
+    {real} eps = ({real})$ctx.EPSILON.get(0)$;
+    {real} dt_max = ({real})$ctx.DT_MAX.get(0)$;
+    if (!(dt_max > {c(0)})) dt_max = cfl * dxd;
+    {real} c0 = ({real})__uint_as_float(control[{K_CMAX0}]);
     {base}
     if (i == 0) {{ {error} }}
     double t_end = clock[{C_T_END}];
-    if (t_end > 0.0) dtd = fmax(fmin(dtd, t_end - clock[{C_TIME}]), 0.0);
-    if (i == 0) clock[{C_DT}] = dtd;
-    {real} dt = ({real})dtd;'''
+    if (t_end > 0.0) dt = fmax(fmin(dt, ({real})(t_end - clock[{C_TIME}])), {c(0)});
+    if (i == 0) clock[{C_DT}] = (double)dt;'''
 
 
 def _stage_kernel(bundles, config, helpers, kind, gated):
@@ -399,19 +415,48 @@ def _stage_kernel(bundles, config, helpers, kind, gated):
         vol_inf += {weight} * (double)inf * (double)area;
         {store}'''
 
+    state = f"{sh}, {su}, {sv}, z, boundary_type, boundary_faces"
+    face_bed_args = f", const {real}* zx, const {real}* zy" if order == 2 else ""
     if order == 2:
         reconstruction = f'''
-        {real} h1l, h1r, h2l, h2r, zl, zr, r0, r1, r2, r3;
-        $ctx.axis({sh}, {su}, {sv}, z, boundary_type, boundary_faces, i, 0, dx, factor,
-                  &h1l, &h1r, &r0, &r1, &r2, &r3, &zl, &zr)$;
-        {real} dzc1 = zr - zl;
-        $ctx.axis({sh}, {su}, {sv}, z, boundary_type, boundary_faces, i, 1, dx, factor,
-                  &h2l, &h2r, &r0, &r1, &r2, &r3, &zl, &zr)$;
-        {real} dzc2 = zr - zl;'''
+        {real} h1l, h1r, h2l, h2r, zl1, zr1, zl2, zr2, r0, r1, r2, r3;
+        $ctx.axis({state}, i, 0, dx, factor, &h1l, &h1r, &r0, &r1, &r2, &r3, &zl1, &zr1)$;
+        {real} dzc1 = zr1 - zl1;
+        $ctx.axis({state}, i, 1, dx, factor, &h2l, &h2r, &r0, &r1, &r2, &r3, &zl2, &zr2)$;
+        {real} dzc2 = zr2 - zl2;'''
     else:
         reconstruction = f'''
         {real} h1l = hi, h1r = hi, h2l = hi, h2r = hi;
+        {real} zl1 = z[i], zr1 = zl1, zl2 = zl1, zr2 = zl1;
         {real} dzc1 = {c(0)}, dzc2 = {c(0)};'''
+
+    def hydrostatic(name, k, face, own_h, own_z):
+        """Depth ``name`` of the cell on its face k: its own depth cut by the
+        bed step to the face bed zf = max(z_l, z_r), zf - own_z being max(dz,
+        0) of ``flux`` exactly (order 1: zf from z of the neighbour or the
+        ghost bed; order 2: the stored ``face``)."""
+        inflow = (f'''
+            if (j < 0 && boundary_type[i] == {BOUNDARY_CODES["inflow"]} && ((boundary_faces[i] >> {k}) & 1))
+                {name} = {own_h};''' if _lines(config) > 0 else "")
+        if order == 2:
+            bed = f"{real} zf = {face};"
+        else:
+            bed = f'''{real} zf, r0, r1, r2;
+            if (j >= 0) zf = z[j];
+            else $ctx.side({state}, i, {k}, dx, factor, &r0, &r1, &r2, &zf)$;
+            zf = fmax(zf, {own_z});'''
+        return f'''
+        {real} {name};
+        {{
+            int j = $ctx.grid.neighbour(i, {k})$;
+            {bed}
+            {name} = fmax({own_h} - (zf - {own_z}), {c(0)});{inflow}
+        }}'''
+
+    reconstruction += (hydrostatic("hwl", 1, "zx[fxw]", "h1l", "zl1")
+                       + hydrostatic("hwr", 2, "zx[fxe]", "h1r", "zr1")
+                       + hydrostatic("hnl", 0, "zy[fyn]", "h2l", "zl2")
+                       + hydrostatic("hsr", 3, "zy[fys]", "h2r", "zr2"))
 
     average = ""
     if kind == "second":
@@ -438,7 +483,12 @@ def _stage_kernel(bundles, config, helpers, kind, gated):
 
     gate = f"if (control[{K_REDO}] == 0u) return;" if gated else ""
     dt_text = (f"\n    {real} dt = ({real})clock[{C_DT}];"
-               if gated or kind == "second" else _dt_text(config, real))
+               if gated or kind == "second" else _dt_text(config, real, kind == "first"))
+    reduce_inf = f'''
+    if (__any_sync(0xffffffffu, vol_inf != 0.0)) {{
+        vol_inf = fusw_warp_sum(vol_inf);
+        if ((threadIdx.x & 31) == 0 && vol_inf != 0.0) atomicAdd(&budget_step[{B_INFILTRATION}], vol_inf);
+    }}''' if infiltrate else ""
     east = f"(x == {nx - 1} ? y * {nx + 1} : fxw + 1)" if px else "fxw + 1"
     south = f"(y == {ny - 1} ? x : fyn + {nx})" if py else f"fyn + {nx}"
 
@@ -447,12 +497,11 @@ extern "C" __global__ void fusw_stage(
         {state_args}, const {real}* z, const unsigned char* boundary_type,
         const unsigned char* boundary_faces,
         const {real}* fx1, const {real}* fx2, const {real}* fx3,
-        const {real}* fy1, const {real}* fy2, const {real}* fy3,
-        const {real}* hxl, const {real}* hxr, const {real}* hyl, const {real}* hyr{infiltration_args},
+        const {real}* fy1, const {real}* fy2, const {real}* fy3{face_bed_args}{infiltration_args},
         double* clock, unsigned int* control, double* budget_step) {{
     {gate}
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    double vol_rain = 0.0, vol_source = 0.0, vol_inf = 0.0, vol_thr = 0.0;{dt_text}
+    double vol_inf = 0.0, vol_thr = 0.0;{dt_text}
     if (i < {n}) {{
       if (!$ctx.grid.is_active(i)$) {{
         {dh}[i] = {c(0)}; {du}[i] = {c(0)}; {dv}[i] = {c(0)};
@@ -471,13 +520,10 @@ extern "C" __global__ void fusw_stage(
         int fyn = y * {nx} + x;
         int fys = {south};
         {real} hi = {sh}[i], ui = {su}[i], vi = {sv}[i];
-        {real} rain = ({real})((double)$ctx.RAIN.get(i)$ * clock[{C_RAIN}]);
-        {real} source = ({real})((double)$ctx.SOURCE.get(i)$ * clock[{C_SOURCE}]) / area;
+        {real} rain = ({real})$ctx.RAIN.get(i)$ * ({real})clock[{C_RAIN}];
+        {real} source = ({real})$ctx.SOURCE.get(i)$ * ({real})clock[{C_SOURCE}] / area;
         {real} hn = hi - tx * (fx1[fxe] - fx1[fxw]) - tx * (fy1[fys] - fy1[fyn])
-                  + (rain + source) * dt;
-        vol_rain += {weight} * (double)rain * (double)dt * (double)area;
-        vol_source += {weight} * (double)source * (double)dt * (double)area;{infiltration_text}{reconstruction}
-        {real} hwl = hxr[fxw], hwr = hxl[fxe], hnl = hyr[fyn], hsr = hyl[fys];
+                  + (rain + source) * dt;{infiltration_text}{reconstruction}
         {real} qx = hi * ui - tx * (fx2[fxe] - fx2[fxw]
             + gd * ((hwl - h1l) * (hwl + h1l) + (h1r - hwr) * (h1r + hwr) + (h1l + h1r) * dzc1))
             - tx * (fy2[fys] - fy2[fyn]);
@@ -514,19 +560,14 @@ extern "C" __global__ void fusw_stage(
         {dh}[i] = hn; {du}[i] = un; {dv}[i] = vn;
       }}
     }}
-    vol_rain = fusw_warp_sum(vol_rain);
-    vol_source = fusw_warp_sum(vol_source);
-    vol_inf = fusw_warp_sum(vol_inf);
-    vol_thr = fusw_warp_sum(vol_thr);
-    if ((threadIdx.x & 31) == 0) {{
-        if (vol_rain != 0.0) atomicAdd(&budget_step[{B_RAIN}], vol_rain);
-        if (vol_source != 0.0) atomicAdd(&budget_step[{B_SOURCE}], vol_source);
-        if (vol_inf != 0.0) atomicAdd(&budget_step[{B_INFILTRATION}], vol_inf);
-        if (vol_thr != 0.0) atomicAdd(&budget_step[{B_THRESHOLD}], vol_thr);
+{reduce_inf}
+    if (__any_sync(0xffffffffu, vol_thr != 0.0)) {{
+        vol_thr = fusw_warp_sum(vol_thr);
+        if ((threadIdx.x & 31) == 0 && vol_thr != 0.0) atomicAdd(&budget_step[{B_THRESHOLD}], vol_thr);
     }}
 }}
 '''
-    names = ("friction", "infiltration") + (("axis",) if order == 2 else ())
+    names = ("friction", "infiltration") + (("axis",) if order == 2 else ("side",))
     return _compose(KernelBuilder(text, domain=n), bundles, helpers, names)
 
 
@@ -535,34 +576,37 @@ extern "C" __global__ void fusw_stage(
 # ----------------------------------------------------------------------------
 
 def _check_kernel(bundles, config, again):
+    real = _real(config)
     gate = f"if (control[{K_REDO}] == 0u) return;" if again else ""
     if config["time_step"] == "cfl":
         body = f'''
-    double dt2 = dt1;
+    {real} dt2 = dt1;
     if (fabs(c1 * dt1 / dxd) >= eps) dt2 = fmin(dt1, cfl * dxd / c1);
     if (dt2 < dt1 && control[{K_RESTARTS}] < {int(config["max_restarts"])}u) {{
-        clock[{C_DT}] = dt2;
+        clock[{C_DT}] = (double)dt2;
         control[{K_REDO}] = 1u;
         control[{K_RESTARTS}] += 1u;
         control[{K_CMAX1}] = 0u;
         for (int b = 0; b < {N_BUDGET}; ++b) budget_step[b] = 0.0;
     }} else {{
         control[{K_REDO}] = 0u;
+        {real} c0 = ({real})__uint_as_float(control[{K_CMAX0}]);
+        clock[{C_GROWTH}] = c0 > {literal(real)(0)} && c1 > c0 ? (double)(c1 / c0) : 1.0;
     }}'''
     else:
         body = f'''
     (void)eps;
-    if (c1 * (double)$ctx.DT.get(0)$ / dxd > cfl) control[{K_CFL_ERROR}] = 1u;
+    if (c1 * ({real})$ctx.DT.get(0)$ / dxd > cfl) control[{K_CFL_ERROR}] = 1u;
     control[{K_REDO}] = 0u;'''
     text = f'''
 extern "C" __global__ void fusw_check(double* clock, unsigned int* control, double* budget_step) {{
     if (blockIdx.x * blockDim.x + threadIdx.x != 0) return;
     {gate}
-    double dxd = (double)$ctx.grid.DX.get(0)$;
-    double cfl = (double)$ctx.CFL.get(0)$;
-    double eps = (double)$ctx.EPSILON.get(0)$;
-    double c1 = (double)__uint_as_float(control[{K_CMAX1}]);
-    double dt1 = clock[{C_DT}];
+    {real} dxd = ({real})$ctx.grid.DX.get(0)$;
+    {real} cfl = ({real})$ctx.CFL.get(0)$;
+    {real} eps = ({real})$ctx.EPSILON.get(0)$;
+    {real} c1 = ({real})__uint_as_float(control[{K_CMAX1}]);
+    {real} dt1 = ({real})clock[{C_DT}];
     (void)dt1;{body}
 }}
 '''
@@ -600,16 +644,24 @@ def _factors_text(config):
 _SERIES_ARGS = "const double* rain_table, const double* inflow_table, const double* source_table"
 
 
+FINALIZE_BLOCK = 32 * ((N_BUDGET + 31) // 32)
+
+
 def _finalize_kernel(config):
     text = _series_text(config) + f'''
 extern "C" __global__ void fusw_finalize(
         double* clock, unsigned int* control, double* budget, double* budget_step,
         {_SERIES_ARGS}) {{
-    if (blockIdx.x * blockDim.x + threadIdx.x != 0) return;
-    for (int b = 0; b < {N_BUDGET}; ++b) {{
-        budget[b] += budget_step[b];
+    int b = threadIdx.x;
+    if (b < {N_BUDGET}) {{
+        double add = budget_step[b];
+        if (b == {B_RAIN}) add += clock[{C_DT}] * clock[{C_RAIN}] * clock[{C_RAIN_RATE}];
+        if (b == {B_SOURCE}) add += clock[{C_DT}] * clock[{C_SOURCE}] * clock[{C_SOURCE_RATE}];
+        budget[b] += add;
         budget_step[b] = 0.0;
     }}
+    __syncthreads();
+    if (b != 0) return;
     clock[{C_TIME}] += clock[{C_DT}];
     control[{K_STEP}] += 1u;
     control[{K_TOTAL_RESTARTS}] += control[{K_RESTARTS}];
@@ -619,7 +671,7 @@ extern "C" __global__ void fusw_finalize(
     control[{K_CMAX1}] = 0u;{_factors_text(config)}
 }}
 '''
-    return KernelBuilder(text, domain=1).freeze()
+    return KernelBuilder(text, domain=FINALIZE_BLOCK, block=FINALIZE_BLOCK).freeze()
 
 
 def _refresh_kernel(config):
@@ -629,7 +681,9 @@ extern "C" __global__ void fusw_refresh(double* clock, unsigned int* control, {_
     control[{K_CMAX0}] = 0u;
     control[{K_CMAX1}] = 0u;
     control[{K_REDO}] = 0u;
-    control[{K_RESTARTS}] = 0u;{_factors_text(config)}
+    control[{K_RESTARTS}] = 0u;
+    clock[{C_RAIN_RATE}] = 0.0;
+    clock[{C_SOURCE_RATE}] = 0.0;{_factors_text(config)}
 }}
 '''
     return KernelBuilder(text, domain=1).freeze()
@@ -680,18 +734,34 @@ def _prepare_kernel(bundles, config):
     real = _real(config)
     c = literal(real)
     n = int(config["nx"]) * int(config["ny"])
-    text = f'''
-extern "C" __global__ void fusw_prepare({real}* h, {real}* u, {real}* v) {{
+    text = warp_reduce(real) + f'''
+extern "C" __global__ void fusw_prepare({real}* h, {real}* u, {real}* v, double* clock) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= {n}) return;
-    {real} he = ({real})$ctx.HE_CA.get(0)$;
-    {real} ve = ({real})$ctx.VE_CA.get(0)$;
-    if (!$ctx.grid.is_active(i)$ || h[i] <= he) {{
-        h[i] = {c(0)}; u[i] = {c(0)}; v[i] = {c(0)};
-        return;
+    double rain = 0.0, source = 0.0;
+    if (i < {n}) {{
+        {real} he = ({real})$ctx.HE_CA.get(0)$;
+        {real} ve = ({real})$ctx.VE_CA.get(0)$;
+        bool act = $ctx.grid.is_active(i)$;
+        if (!act || h[i] <= he) {{
+            h[i] = {c(0)}; u[i] = {c(0)}; v[i] = {c(0)};
+        }} else {{
+            if (fabs(u[i]) <= ve) u[i] = {c(0)};
+            if (fabs(v[i]) <= ve) v[i] = {c(0)};
+        }}
+        if (act) {{
+            double dx = (double)$ctx.grid.DX.get(0)$;
+            rain = (double)$ctx.RAIN.get(i)$ * dx * dx;
+            source = (double)$ctx.SOURCE.get(i)$;
+        }}
     }}
-    if (fabs(u[i]) <= ve) u[i] = {c(0)};
-    if (fabs(v[i]) <= ve) v[i] = {c(0)};
+    if (__any_sync(0xffffffffu, rain != 0.0 || source != 0.0)) {{
+        rain = fusw_warp_sum(rain);
+        source = fusw_warp_sum(source);
+        if ((threadIdx.x & 31) == 0) {{
+            if (rain != 0.0) atomicAdd(&clock[{C_RAIN_RATE}], rain);
+            if (source != 0.0) atomicAdd(&clock[{C_SOURCE_RATE}], source);
+        }}
+    }}
 }}
 '''
     return KernelBuilder(text, domain=n).compose("grid", bundles["grid"]).freeze()
@@ -755,11 +825,12 @@ def step_factory(be, bundles, config):
 
 
 def prepare_factory(be, bundles, config):
-    """Cut h, u, v at HE_CA / VE_CA, dry the closed cells, evaluate the time
-    factors at the current time and clear the step flags."""
+    """Evaluate the time factors at the current time and clear the step flags
+    and the rain / source rates, then cut h, u, v at HE_CA / VE_CA, dry the
+    closed cells and sum the rain and source rates of the active cells."""
     cupy_only(be)
-    return (RoutineBuilder().step("cells", _prepare_kernel(bundles, config))
-            .step("refresh", _refresh_kernel(config)).freeze())
+    return (RoutineBuilder().step("refresh", _refresh_kernel(config))
+            .step("cells", _prepare_kernel(bundles, config)).freeze())
 
 
 def codes_factory(be, bundles, config):

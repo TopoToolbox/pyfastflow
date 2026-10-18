@@ -247,6 +247,12 @@ class CompiledKernel:
         for buf in self._data.values():
             _refcount(buf, -1)
 
+    def launch_args(self) -> list:
+        """The native buffers the next launch passes, in `data_order`."""
+        # DATA is represented by a DataHandle throughout the bind graph. Only
+        # the backend call boundary unwraps it to the native buffer.
+        return [getattr(self._data[addr], "array", self._data[addr]) for addr in self._data_order]
+
     def __call__(self):
         """
         Launch with whatever `swap()` currently holds for every DATA address,
@@ -255,9 +261,7 @@ class CompiledKernel:
         kernel's launch domain.
 
         """
-        # DATA is represented by a DataHandle throughout the bind graph. Only
-        # the backend call boundary unwraps it to the native buffer.
-        args = [getattr(self._data[addr], "array", self._data[addr]) for addr in self._data_order]
+        args = self.launch_args()
         if self._domain_addr is None and self._extent is None:
             return self._launch(*args)
         if self._extent is not None:

@@ -183,6 +183,37 @@ class Backend:
 
         return compile_cupy.compile_kernel(bound)
 
+    @property
+    def graphs(self) -> bool:
+        """Whether `capture` records device work into replayable graphs."""
+        return self.family == "cupy"
+
+    def capture(self, fn):
+        """
+        Record the kernel launches of `fn()` into a CUDA graph and return its
+        replay: a callable launching the whole graph on the current stream,
+        in order with any other work there. `fn` must only launch device work
+        (no host transfer, synchronization or allocation). cupy only.
+
+        """
+        if not self.graphs:
+            raise NotImplementedError(f"Backend({self.name!r}) has no graph capture")
+        import cupy as cp
+
+        stream = cp.cuda.Stream(non_blocking=True)
+        with stream:
+            stream.begin_capture()
+            try:
+                fn()
+            finally:
+                graph = stream.end_capture()
+        return graph.launch
+
+    def buffer_key(self, array) -> tuple:
+        """Device address and size of a native buffer: what a captured graph
+        holds of it. cupy only."""
+        return (array.data.ptr, array.size)
+
     def pool(self):
         """A fresh Pool for this backend."""
         return self.PoolCls()

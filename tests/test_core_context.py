@@ -23,6 +23,7 @@ Author: B.G (08/2026)
 """
 
 import importlib
+import sys
 
 import numpy as np
 import pytest
@@ -66,6 +67,11 @@ def backend(request):
     elif name == "quadrants":
         import quadrants as qd
 
+        # qd.init fails with a device-side assert ("Out of CUDA pre-allocated
+        # memory") while any cupy allocation is live in the shared context
+        cp = sys.modules.get("cupy")
+        if cp is not None:
+            cp.get_default_memory_pool().free_all_blocks()
         qd.init(arch=qd.gpu)
     return name
 
@@ -253,6 +259,11 @@ extern "C" __global__ void {t}_mul3(int* buf) {{
     run()
 
     assert np.array_equal(buf.to_numpy(), np.full(n, (5 + 1) * 3, dtype=np.int32))
+    # run(n, unroll): captured graphs of 2 and 1 launches on cupy, a loop on
+    # the closure backends
+    buf.from_numpy(np.full(n, 5, dtype=np.int32))
+    run.run(3, unroll=2)
+    assert np.array_equal(buf.to_numpy(), np.full(n, 174, dtype=np.int32))  # 5 -> 18 -> 57 -> 174
     run.close()
     bound.close()
     pool.clear_all(force=True)

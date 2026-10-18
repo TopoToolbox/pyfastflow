@@ -13,8 +13,13 @@ edge or is a closed cell):
   6 discharge, 7 sink (the cell absorbs its water; its faces act as walls),
   8 inflow (face of an inflow line: imposed mass flux, ``_boundary.py``).
 
-Device clock (f64): time, dt of the current step, end time (<= 0: none) and
-the rain, inflow and source time factors at the current time.
+Device clock (f64): time, dt of the current step, end time (<= 0: none),
+the rain, inflow and source time factors at the current time, the rain
+and source rates of the active cells at factor 1 (sum of RAIN dx^2 and of
+SOURCE, m3/s, evaluated by ``_prepare`` at every ``run``) and the wave
+speed growth predicted for the first stage (order 2 with a CFL time step:
+the ratio of the intermediate to the step-start wave speed of the last
+step; below 1 read as 1).
 
 Device control (u32): the largest wave speed of the step-start and
 intermediate fluxes (float bits), the redo flag, redos of the current step,
@@ -44,8 +49,9 @@ N_CODES = len(BOUNDARY_CODES)
 OUTLET_TYPES = ("neumann", "stage", "critical", "normal_depth", "rating", "sink")
 
 # clock (f64)
-C_TIME, C_DT, C_T_END, C_RAIN, C_INFLOW, C_SOURCE = range(6)
-N_CLOCK = 6
+(C_TIME, C_DT, C_T_END, C_RAIN, C_INFLOW, C_SOURCE, C_RAIN_RATE, C_SOURCE_RATE,
+ C_GROWTH) = range(9)
+N_CLOCK = 9
 
 # control (u32)
 (K_CMAX0, K_CMAX1, K_REDO, K_RESTARTS, K_CFL_ERROR, K_STEP, K_REC_BASE,

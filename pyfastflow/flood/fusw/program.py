@@ -10,8 +10,9 @@ and the Riemann ``flux``, then the update of h (rain, sources,
 is the Heun scheme of FullSWOF; when the intermediate state needs a smaller
 time step, the first stage is recomputed from the step-start state with it
 (at most ``max_restarts`` times per step). ``time_step="cfl"`` takes
-dt = min(dt_max, cfl dx / c_max), ``"fixed"`` takes ``dt`` and flags a CFL
-violation (``run`` raises).
+dt = min(dt_max, cfl dx / c_max) (order 2: c_max times the growth of the
+wave speed over the first stage of the last step, at least 1), ``"fixed"``
+takes ``dt`` and flags a CFL violation (``run`` raises).
 
 Configs:
   - grid: ``ny``, ``nx``, ``dx``, ``boundary`` (normal | periodic_EW |
@@ -185,10 +186,12 @@ def build_fusw_program() -> type:
         b.data(name, _real, SHAPE, role="state")
     for name in ("hs", "us", "vs"):
         b.data(name, _real, _if(order2, _cells), role="internal")
-    for name in ("fx1", "fx2", "fx3", "hxl", "hxr"):
+    for name in ("fx1", "fx2", "fx3"):
         b.data(name, _real, (Dim("ny"), Dim("nx") + 1), role="internal")
-    for name in ("fy1", "fy2", "fy3", "hyl", "hyr"):
+    for name in ("fy1", "fy2", "fy3"):
         b.data(name, _real, (Dim("ny") + 1, Dim("nx")), role="internal")
+    b.data("zx", _real, _if(order2, lambda c: (c["ny"], c["nx"] + 1)), role="internal")
+    b.data("zy", _real, _if(order2, lambda c: (c["ny"] + 1, c["nx"])), role="internal")
     b.data("infiltrated", _real, _if(infiltrates, _cells), role="output")
     b.data("infiltrated_stage", _real,
            _if(lambda c: infiltrates(c) and order2(c), _cells), role="internal")
@@ -261,8 +264,8 @@ def build_fusw_program() -> type:
         boundary codes from the grid; time factors at t = 0."""
         for name in ("h", "u", "v", "hs", "us", "vs", "infiltrated",
                      "infiltrated_stage", "clock", "control", "budget",
-                     "budget_step", "records", "fx1", "fx2", "fx3", "hxl",
-                     "hxr", "fy1", "fy2", "fy3", "hyl", "hyr", "line_cells",
+                     "budget_step", "records", "fx1", "fx2", "fx3",
+                     "fy1", "fy2", "fy3", "zx", "zy", "line_cells",
                      "line_offsets", "line_q", "line_slope", "inflow_q", "inflow_depth"):
             self._handle(name).array.fill(0)
         self._handle("line_last").array.fill(-1)

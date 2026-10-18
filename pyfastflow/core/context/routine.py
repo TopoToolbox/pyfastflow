@@ -150,7 +150,10 @@ class BoundRoutine(_Bound):
             compiled = step_bound.compile(be)
             steps.append((name, compiled))
             step_bounds.append(step_bound)
-        return CompiledRoutine(steps, step_bounds)
+        return CompiledRoutine(steps, step_bounds, be)
+
+
+GRAPH_KEYS = 4
 
 
 class CompiledRoutine:
@@ -160,8 +163,12 @@ class CompiledRoutine:
 
     """
 
-    def __init__(self, steps: list, step_bounds: "list | None" = None):
+    def __init__(self, steps: list, step_bounds: "list | None" = None, backend=None):
         self._steps = list(steps)
+        self._backend = backend
+        # buffer key -> {launch count: graph replay}, least recently used
+        # first, at most GRAPH_KEYS keys (see run()).
+        self._graphs: dict = {}
         self._by_name = dict(steps)
         # the per-step BoundKernels this routine built and owns (destroy safety,
         # close() releases their hold on the shared Parameters and handles.
@@ -178,6 +185,7 @@ class CompiledRoutine:
         if self._closed:
             return
         self._closed = True
+        self._graphs.clear()
         for _, compiled in self._steps:
             if hasattr(compiled, "close"):
                 compiled.close()
@@ -217,6 +225,46 @@ class CompiledRoutine:
         """Launch every step in order, each with whatever its own swap() state currently holds."""
         for _, compiled in self._steps:
             compiled()
+
+    def run(self, n: int = 1, unroll: int = 0) -> None:
+        """
+        Launch the routine `n` times.
+
+        With `unroll` > 0 on a backend with graphs (`Backend.graphs`), the
+        launches go through captured graphs of `count` consecutive routine
+        launches, `count` the largest power of two <= min(remaining, unroll)
+        (so at most log2(unroll) + 1 graphs per set of buffers). A graph holds
+        the buffers every step launched with when it was captured; graphs are
+        kept per buffer key (`Backend.buffer_key` of every step's
+        `launch_args()`), so a swap() to other buffers captures new ones, and
+        the GRAPH_KEYS most recently used keys are kept. Parameter values are
+        read by the kernels at run time and need no new capture. Otherwise,
+        and on closure backends, the routine is called `n` times.
+
+        """
+        n = max(0, int(n))
+        be = self._backend
+        if int(unroll) <= 0 or be is None or not be.graphs:
+            for _ in range(n):
+                self()
+            return
+        key = tuple(be.buffer_key(a) for _, compiled in self._steps for a in compiled.launch_args())
+        graphs = self._graphs.pop(key, None)
+        if graphs is None:
+            graphs = {}
+        self._graphs[key] = graphs
+        while len(self._graphs) > GRAPH_KEYS:
+            self._graphs.pop(next(iter(self._graphs)))
+        while n > 0:
+            count = min(int(unroll), 1 << (n.bit_length() - 1))
+            replay = graphs.get(count)
+            if replay is None:
+                def record(count=count):
+                    for _ in range(count):
+                        self()
+                replay = graphs[count] = be.capture(record)
+            replay()
+            n -= count
 
     def __repr__(self) -> str:
         return f"CompiledRoutine(steps={[n for n, _ in self._steps]})"
