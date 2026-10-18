@@ -307,6 +307,10 @@ def _regulate_flux_factory(be: Backend, bundles, config):
     interface flow depth and ``q`` the provisional interface discharge
     (Sridharan et al., 2020).
 
+    A parallel neighbour that is not a link (a closed edge, or an inactive
+    cell on its far side) is replaced by the link itself, so walls do not
+    damp the links next to them.
+
     Author: B.G (09/2026)
     """
     _cupy_only(be)
@@ -355,17 +359,21 @@ def _regulate_flux_factory(be: Backend, bundles, config):
     diagonal_update = f'''
             int se = $ctx.grid.neighbour(i, 7)$;
             int nw = $ctx.grid.neighbour(i, 0)$;
+            int sese = se >= 0 ? $ctx.grid.neighbour(se, 7)$ : -1;
             qxy[i] = se >= 0
                 ? inertial_filter(qxy_reg[i],
-                    nw >= 0 ? qxy_reg[nw] : qxy_reg[i],
-                    qxy_reg[se], {theta_xy}, {regulator_mode})
+                    inertial_link(nw) ? qxy_reg[nw] : qxy_reg[i],
+                    inertial_link(sese) ? qxy_reg[se] : qxy_reg[i],
+                    {theta_xy}, {regulator_mode})
                 : qxy_reg[i];
             int sw = $ctx.grid.neighbour(i, 5)$;
             int ne = $ctx.grid.neighbour(i, 2)$;
+            int swsw = sw >= 0 ? $ctx.grid.neighbour(sw, 5)$ : -1;
             qyx[i] = sw >= 0
                 ? inertial_filter(qyx_reg[i],
-                    ne >= 0 ? qyx_reg[ne] : qyx_reg[i],
-                    qyx_reg[sw], {theta_yx}, {regulator_mode})
+                    inertial_link(ne) ? qyx_reg[ne] : qyx_reg[i],
+                    inertial_link(swsw) ? qyx_reg[sw] : qyx_reg[i],
+                    {theta_yx}, {regulator_mode})
                 : qyx_reg[i];''' if d8 else ""
     inactive_clear = "qxy[i] = qyx[i] = 0.0f;" if d8 else ""
     return KernelBuilder(
@@ -377,6 +385,10 @@ def _regulate_flux_factory(be: Backend, bundles, config):
                 : 0.5f * (q_previous + q_next);
             return theta * q + (1.0f - theta) * neighbour_q;
         }}
+
+        // Whether the far cell j of a parallel link exists and is active,
+        // i.e. whether that parallel link is a link at all.
+        #define inertial_link(j) ((j) >= 0 && $ctx.grid.is_active(j)$)
 
         {theta_helper}extern "C" __global__ void inertial_regulate_flux(
                 float* qx, float* qy, const float* qx_reg, const float* qy_reg{diagonal_args}{h_arg}{tile_arg}) {{
@@ -394,19 +406,31 @@ def _regulate_flux_factory(be: Backend, bundles, config):
             }}
             {theta_setup}
             int west = $ctx.grid.neighbour(i, {3 if d8 else 1})$;
+            int west2 = west >= 0 ? $ctx.grid.neighbour(west, {3 if d8 else 1})$ : -1;
+            int east = $ctx.grid.neighbour(i, {4 if d8 else 2})$;
             qx[fx] = west >= 0
                 ? inertial_filter(qx_reg[fx],
-                    qx_reg[x > 0 ? fx - 1 : ({int(periodic_x)} ? fx + {nx - 1} : fx)],
-                    qx_reg[x < {nx - 1} ? fx + 1 : ({int(periodic_x)} ? y * ({nx} + 1) : fx + 1)],
+                    inertial_link(west2)
+                        ? qx_reg[x > 0 ? fx - 1 : ({int(periodic_x)} ? fx + {nx - 1} : fx)]
+                        : qx_reg[fx],
+                    inertial_link(east)
+                        ? qx_reg[x < {nx - 1} ? fx + 1 : ({int(periodic_x)} ? y * ({nx} + 1) : fx + 1)]
+                        : qx_reg[fx],
                     {theta_x}, {regulator_mode})
                 : qx_reg[fx];
             if (x == {nx - 1}) qx[fx + 1] = qx_reg[fx + 1];
 
             int north = $ctx.grid.neighbour(i, {1 if d8 else 0})$;
+            int north2 = north >= 0 ? $ctx.grid.neighbour(north, {1 if d8 else 0})$ : -1;
+            int south = $ctx.grid.neighbour(i, {6 if d8 else 3})$;
             qy[fy] = north >= 0
                 ? inertial_filter(qy_reg[fy],
-                    qy_reg[y > 0 ? fy - {nx} : ({int(periodic_y)} ? ({ny - 1}) * {nx} + x : fy)],
-                    qy_reg[y < {ny - 1} ? fy + {nx} : ({int(periodic_y)} ? x : fy + {nx})],
+                    inertial_link(north2)
+                        ? qy_reg[y > 0 ? fy - {nx} : ({int(periodic_y)} ? ({ny - 1}) * {nx} + x : fy)]
+                        : qy_reg[fy],
+                    inertial_link(south)
+                        ? qy_reg[y < {ny - 1} ? fy + {nx} : ({int(periodic_y)} ? x : fy + {nx})]
+                        : qy_reg[fy],
                     {theta_y}, {regulator_mode})
                 : qy_reg[fy];
             if (y == {ny - 1}) qy[fy + {nx}] = qy_reg[fy + {nx}];

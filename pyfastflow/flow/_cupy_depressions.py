@@ -395,7 +395,7 @@ __global__ void {t}_init_saddle_outlet(long long* basin_saddle, long long* outle
     atomic_min_saddle = (
         KernelBuilder(
             f"""
-__global__ void {t}_atomic_min_saddle(const int* bid, const unsigned char* is_border, const float* z_prime, long long* basin_saddle) {{
+__global__ void {t}_atomic_min_saddle(const int* bid, const unsigned char* is_border, const float* z, long long* basin_saddle) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
     if (!is_border[i]) return;
@@ -406,7 +406,9 @@ __global__ void {t}_atomic_min_saddle(const int* bid, const unsigned char* is_bo
     for (int k = 0; k < nk; k++) {{
         int j = $ctx.grid.neighbour(i, k)$;
         if (j != -1 && bid[j] != tbid) {{
-            long long candidate = $ctx.bitpack.pack(z_prime[i], bid[j])$;
+            // Spill height towards j itself, so the recorded target basin is
+            // the one atomic_min_outlet routes to.
+            long long candidate = $ctx.bitpack.pack(fmaxf(z[i], z[j]), bid[j])$;
             res = (candidate < res) ? candidate : res;
         }}
     }}
@@ -421,7 +423,7 @@ __global__ void {t}_atomic_min_saddle(const int* bid, const unsigned char* is_bo
     find_saddlenode = (
         KernelBuilder(
             f"""
-__global__ void {t}_find_saddlenode(const int* bid, const unsigned char* is_border, const float* z_prime,
+__global__ void {t}_find_saddlenode(const int* bid, const unsigned char* is_border, const float* z,
                                      const long long* basin_saddle, int* basin_saddlenode) {{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= {n_flat}) return;
@@ -433,7 +435,7 @@ __global__ void {t}_find_saddlenode(const int* bid, const unsigned char* is_bord
     int nk = $ctx.grid.N_NEIGHBOURS.get(0)$;
     for (int k = 0; k < nk; k++) {{
         int j = $ctx.grid.neighbour(i, k)$;
-        if (j != -1 && bid[j] == target_b && z_prime[i] == target_z) {{
+        if (j != -1 && bid[j] == target_b && fmaxf(z[i], z[j]) == target_z) {{
             is_here = 1;
         }}
     }}

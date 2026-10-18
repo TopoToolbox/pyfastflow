@@ -149,6 +149,14 @@ def _build_filled_hydraulic_topology(
                 }}
             }}
 
+            // Rank drops on a flat at 0 are denormal and flush to zero:
+            // such a cell splits evenly between its receivers.
+            if (mask != 0 && !(sum_score > 0.0f)) {{
+                for (int k = 0; k < nk; ++k)
+                    if (mask & (1u << k)) scores[k] = 1.0f;
+                sum_score = (float)__popc((unsigned int)mask);
+                {"max_score = 1.0f;" if quantized_weight else ""}
+            }}
             for (int k = 0; k < nk; ++k) {{ {weight_write} }}
             dirs[i] = mask;
             steepest_slope[i] = best_slope;
