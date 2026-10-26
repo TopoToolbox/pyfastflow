@@ -85,7 +85,7 @@ def fluvial_factory(be, bundles, config):
             float beta = (isfinite(denominator) && denominator > 0.0f)
                 ? (original + c * (exponent - 1.0f) * powf(slope, exponent)) / denominator
                 : original;
-            z_a[i] = z_b[i] = fminf(original, beta);
+            z_a[i] = z_b[i] = beta;
             alpha_a[i] = alpha_b[i] = fmaxf(alpha, 0.0f);
             rec_a[i] = rec_b[i] = r;
         }}''', domain=n,
@@ -94,7 +94,7 @@ def fluvial_factory(be, bundles, config):
     def jump(name):
         return KernelBuilder(
             f'''extern "C" __global__ void golem_fluvial_{name}(
-                    const int* rec_original, const int* rec_current,
+                    const int* rec_current,
                     int* rec_next, const float* z_current, float* z_next,
                     const float* alpha_current, float* alpha_next) {{
                 int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -119,16 +119,6 @@ def fluvial_factory(be, bundles, config):
                             && $ctx.grid.is_active(rg)$) ? rg : rj;
                 }} else {{
                     alpha = 0.0f;
-                }}
-                int r0 = rec_original[i];
-                int valid_original = !$ctx.grid.can_out(i)$
-                    && r0 >= 0 && r0 < {n} && r0 != i
-                    && $ctx.grid.is_active(r0)$;
-                if (valid_original) {{
-                    float lower = z_current[r0]
-                        + fmaxf($ctx.SLOPE_FLOOR.get(i)$, 0.0f)
-                        * $ctx.grid.dist_between_nodes(i, r0)$;
-                    value = fmaxf(value, lower);
                 }}
                 z_next[i] = value;
                 alpha_next[i] = alpha;
@@ -221,7 +211,7 @@ def fluvial_factory(be, bundles, config):
 def fluvial_plan(frozen, _be):
     plan = _grid_leaf_plan(frozen, {
         "z": "z", "z0": "fluvial_z0", "guess": "fluvial_guess",
-        "rec": "rec", "rec_original": "rec", "area": "drainage_area",
+        "rec": "rec", "area": "drainage_area",
         "z_a": "fluvial_z_a", "z_b": "fluvial_z_b",
         "rec_a": "fluvial_rec_a", "rec_b": "fluvial_rec_b",
         "alpha_a": "fluvial_alpha_a", "alpha_b": "fluvial_alpha_b",
