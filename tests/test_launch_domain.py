@@ -88,3 +88,40 @@ def test_int_domain_fixes_extent():
     run.close()
     b.close()
     pool.clear_all(force=True)
+
+
+def test_routine_graphs_follow_swap():
+    import cupy as cp
+    from pyfastflow.core.context.backends import Backend
+    from pyfastflow.core.context.builder import KernelBuilder
+    from pyfastflow.core.context.routine import RoutineBuilder
+
+    bk = Backend.from_name("cupy")
+    frozen = RoutineBuilder().step("fill", KernelBuilder(_TMPL, domain="out", block=1).freeze()).freeze()
+    b = frozen.build()
+    b.bind(("fill", "N"), bk.ParameterCls("N", dtype="i32", mode="const", value=0, pool=None))
+    pool = bk.pool()
+    big = pool.get_data("i32", (64,))
+    big.from_numpy(cp.zeros(64, dtype=cp.int32))
+    b.bind(("fill", "out"), big)
+    run = b.compile()
+
+    run.run(5, unroll=4)  # graphs of 4 and 1 launches
+    cp.cuda.runtime.deviceSynchronize()
+    assert int((big.array != 0).sum()) == 64
+    assert len(run._graphs) == 1 and sorted(next(iter(run._graphs.values()))) == [1, 4]
+
+    small = pool.get_data("i32", (16,))
+    small.from_numpy(cp.zeros(16, dtype=cp.int32))
+    big.from_numpy(cp.zeros(64, dtype=cp.int32))
+    run.swap("fill.out", small)
+    run.run(3, unroll=4)  # new buffer key: new graphs of 2 and 1 launches
+    cp.cuda.runtime.deviceSynchronize()
+    assert int((small.array != 0).sum()) == 16
+    assert int((big.array != 0).sum()) == 0  # the old graphs' buffer is untouched
+    assert len(run._graphs) == 2
+    run.close()
+    assert not run._graphs
+    b.close()
+    pool.clear_all(force=True)
+    pool.clear_all(force=True)

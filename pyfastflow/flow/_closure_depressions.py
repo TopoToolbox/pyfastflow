@@ -294,6 +294,13 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
     search, saddlenode identification, bitpacked atomic-min outlet search,
     basin-graph 2-cycle break. Shared unchanged by both `method`s.
 
+    A border cell's candidate towards neighbour j is the spill height
+    max(z[i], z[j]) paired with bid[j], and the saddlenode search matches the
+    same height, so the target basin a basin records is the one
+    atomic_min_outlet routes it to. With every basin taking its minimal
+    (height, target bid) edge, the basin graph can only hold 2-cycles, which
+    break_cycle removes, also when spill heights tie exactly.
+
     `bitpack` is the FrozenGroup ops.make_bitpack_group returns
     (`ctx.bitpack.pack`/`.unpack_value`/`.unpack_index`) - each KernelBuilder
     below composes its own occurrence, only where it actually calls one of
@@ -307,8 +314,8 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
     Composed step names: same as the kernels_dict keys. Data addresses:
     "border_zprime.bid"/".z"/".z_prime"/".is_border",
     "init_saddle_outlet.basin_saddle"/".outlet"/".basin_saddlenode",
-    "atomic_min_saddle.bid"/".is_border"/".z_prime"/".basin_saddle",
-    "find_saddlenode.bid"/".is_border"/".z_prime"/".basin_saddle"/
+    "atomic_min_saddle.bid"/".is_border"/".z"/".basin_saddle",
+    "find_saddlenode.bid"/".is_border"/".z"/".basin_saddle"/
     ".basin_saddlenode", "atomic_min_outlet.bid"/".basin_saddle"/
     ".basin_saddlenode"/".z"/".outlet", "break_cycle.bid"/".outlet"/
     ".basin_saddle"/".basin_saddlenode". PARAM addresses: "border_zprime.
@@ -357,7 +364,7 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
             basin_saddlenode[i] = -1
             b_rcv[i] = 0
 
-    def atomic_min_saddle_tmpl(ctx, bid: T, is_border: T, z_prime: T, basin_saddle: T):
+    def atomic_min_saddle_tmpl(ctx, bid: T, is_border: T, z: T, basin_saddle: T):
         invalid_a = ctx.bitpack.pack(1e8, 42)
         for i in bid:
             if not is_border[i]:
@@ -367,12 +374,14 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
             for k in range(ctx.grid.N_NEIGHBOURS.get(0)):
                 j = ctx.grid.neighbour(i, k)
                 if j != -1 and bid[j] != tbid:
-                    candidate = ctx.bitpack.pack(z_prime[i], bid[j])
+                    # Spill height towards j itself, so the recorded target
+                    # basin is the one atomic_min_outlet routes to.
+                    candidate = ctx.bitpack.pack(max(z[i], z[j]), bid[j])
                     res = min(res, candidate)
             if res != invalid_a:
                 ctx.bk.atomic_min(basin_saddle[tbid], res)
 
-    def find_saddlenode_tmpl(ctx, bid: T, is_border: T, z_prime: T, basin_saddle: T, basin_saddlenode: T):
+    def find_saddlenode_tmpl(ctx, bid: T, is_border: T, z: T, basin_saddle: T, basin_saddlenode: T):
         for i in bid:
             if not is_border[i] or bid[i] == 0:
                 continue
@@ -381,7 +390,7 @@ def build_saddlesort(*, backend: str, backend_mod, grid, bitpack):
             is_here = False
             for k in range(ctx.grid.N_NEIGHBOURS.get(0)):
                 j = ctx.grid.neighbour(i, k)
-                if j != -1 and bid[j] == target_b and z_prime[i] == target_z:
+                if j != -1 and bid[j] == target_b and max(z[i], z[j]) == target_z:
                     is_here = True
             if is_here:
                 basin_saddlenode[bid[i]] = i

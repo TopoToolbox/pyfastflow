@@ -8,6 +8,7 @@ import numpy as np
 from .backends import require_backend
 from .frozen import Node
 from .host_block import FrozenHostBlock
+from .routine import CompiledRoutine
 from .slot import ProgramBuilderError, ProgramError
 
 _NP_DTYPES = {
@@ -16,6 +17,9 @@ _NP_DTYPES = {
     "u8": np.uint8, "u32": np.uint32,
 }
 _REQUIRED = object()
+# Routine launches per captured graph in run() (CompiledRoutine.run; 0: no
+# graphs). Applies on backends with graphs (cupy).
+GRAPH_UNROLL = 64
 
 
 class Dim:
@@ -261,8 +265,9 @@ class _BundleView(dict):
 
 class _Program:
     _recipe: _Recipe
-    def __init__(self, be, pool=None, **options):
+    def __init__(self, be, pool=None, *, graph_unroll=GRAPH_UNROLL, **options):
         self._be = require_backend(be); self._closed = False; self._owns_pool = pool is None
+        self._graph_unroll = int(graph_unroll)
         if pool is not None and not isinstance(pool, self._be.PoolCls): raise ProgramError(f"pool does not match {self._be.name!r}")
         self._pool = self._be.pool() if pool is None else pool
         param_inputs = {n: options.pop(n) for n in tuple(options) if n in self._recipe.params}
@@ -498,7 +503,9 @@ class _Program:
             for (temp, addrs), placeholder in zip(state.temp_plan, state.placeholders):
                 data = self._recipe.data[temp]; h = self._pool.get_data(self._be.dtypes[self._dtype(temp)], self._device_shape(data)); acquired.append(h)
                 for addr in addrs: state.compiled.swap(addr, h)
-            for _ in range(max(0, int(n))): state.compiled()
+            if isinstance(state.compiled, CompiledRoutine): state.compiled.run(n, unroll=self._graph_unroll)
+            else:
+                for _ in range(max(0, int(n))): state.compiled()
         finally:
             for (_temp, addrs), placeholder in zip(state.temp_plan, state.placeholders):
                 for addr in addrs: state.compiled.swap(addr, placeholder)
